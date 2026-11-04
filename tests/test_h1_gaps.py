@@ -113,6 +113,9 @@ def same_counts(mk, root):
         assert "거짓 양성" not in line
     summary = next(x for x in text.splitlines() if x.startswith("  점검 L "))
     assert summary.startswith(f"  점검 L {ops['l_errors']}"), summary
+    lead = d["leader"]                                           # 팀장 수: 보고서 ⑧ 과 같은 분모(이 창이 쓴 판정 기록)
+    assert f"팀장 LLM {lead['n'] - lead['fallback']} / 폴백 {lead['fallback']}" in summary, (summary, lead)
+    assert (w["leader_n"], w["leader_fallback"]) == (None, None)  # decisions 없이 부르면 팀장 수는 안 셈
     assert h1._window_counts(root, mk, d["S"], d["created_at"]) == (ops["l_errors"], ops["data_stops"])
     return ops, text
 
