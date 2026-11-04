@@ -5,9 +5,11 @@ screener.py - 부하(트레이너)가 넓은 종목군에서 자기 스타일 '�
 트레이너별로 추출한다. = 운영모델의 1단계(부하가 후보 선별). 기존 brains 그대로 재사용.
 
 출력: results/screener_<트레이너>.csv + 콘솔 요약 (이후 analyst.py가 이 후보를 분석).
-실행: python screener.py [N]   (N = 스캔할 종목 수, 기본 50)
+실행: python screener.py [N] [--market us|kr]   (N = 스캔할 종목 수, 기본 50 / 시장 기본 us)
 
-v1은 미국 종목 전용(D4) → S&P500만 훑는다. main.load_prices 가 '확정 봉'만 주므로(D1)
+미국(us): S&P500에서 고정 seed로 섞어 N종목.
+국내(kr): markets.KR_UNIVERSE (KOSPI 시가총액 상위 약 30개, 코드에 고정) 앞에서부터 N종목.
+          KRX 전체 목록 조회(fdr.StockListing("KRX"))는 자주 멈춰서 쓰지 않는다(K-D7). main.load_prices 가 '확정 봉'만 주므로(D1)
 후보의 가격·날짜는 마지막 확정 봉 기준이다. 실제 체결은 team.py 가 다음 거래일 시가로 한다(D3).
 """
 
@@ -16,6 +18,7 @@ import csv
 import random
 
 import main
+import markets
 from sprinter_brain import SprinterBrain
 from marathoner_brain import MarathonerBrain
 from pioneer_brain import PioneerBrain
@@ -25,8 +28,11 @@ START = "2024-06-01"   # 지표 워밍업 충분(마라토너 MA60+) ~ 최신까
 SEED = 7
 
 
-def universe(n):
-    """S&P500에서 고정 seed로 섞어 n종목. (객관적 모집단, 승자 cherry-pick 방지)"""
+def universe(n, market="us"):
+    """미국: S&P500에서 고정 seed로 섞어 n종목. (객관적 모집단, 승자 cherry-pick 방지)
+    국내: KR_UNIVERSE(시가총액순 고정 목록) 앞에서 n종목 — 인터넷 조회 없음."""
+    if main.mkt(market).key == "kr":
+        return list(markets.KR_UNIVERSE.values())[:n]
     import FinanceDataReader as fdr
     syms = [s for s in fdr.StockListing("S&P500")["Symbol"].tolist() if isinstance(s, str)]
     random.seed(SEED)
@@ -34,13 +40,14 @@ def universe(n):
     return syms[:n]
 
 
-def scan(n=50):
-    """n종목을 스캔해 트레이너별 '매수' 후보 리스트를 돌려준다."""
+def scan(n=50, market="us"):
+    """n종목을 스캔해 트레이너별 '매수' 후보 리스트를 돌려준다. market: "us"(기본) | "kr"."""
+    m = main.mkt(market)
     found = {t: [] for t in BRAINS}
     used = 0
-    for code in universe(n):
+    for code in (universe(n) if m.key == "us" else universe(n, m.key)):
         try:
-            df = main.load_prices(code, START)
+            df = main.prices_for(m, code, START)
         except Exception:
             continue
         if len(df) < 70:          # 지표 워밍업 부족 종목 제외
@@ -61,10 +68,11 @@ def scan(n=50):
     return found, used
 
 
-def save(found):
+def save(found, market="us"):
     main.RESULTS_DIR.mkdir(exist_ok=True)
+    prefix = "screener_" if main.mkt(market).key == "us" else "screener_kr_"
     for tname, cands in found.items():
-        f = main.RESULTS_DIR / f"screener_{tname}.csv"
+        f = main.RESULTS_DIR / f"{prefix}{tname}.csv"
         with open(f, "w", newline="", encoding="utf-8-sig") as fp:
             w = csv.writer(fp)
             w.writerow(["code", "date", "price", "rsi", "reason"])
@@ -73,10 +81,11 @@ def save(found):
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 50
-    print(f"S&P500에서 {n}종목 스캔 중...", flush=True)
-    found, used = scan(n)
-    save(found)
+    _market, _rest = main.parse_market(sys.argv[1:])
+    n = int(_rest[0]) if _rest else 50
+    print(f"{'S&P500' if _market == 'us' else 'KOSPI 대형주(KR_UNIVERSE)'}에서 {n}종목 스캔 중...", flush=True)
+    found, used = scan(n, _market)
+    save(found, _market)
     print(f"사용 {used}종목. 트레이너별 '매수' 후보:")
     for t, cands in found.items():
         print(f"  {t:<8} {len(cands)}개 → {[c['code'] for c in cands][:10]}")

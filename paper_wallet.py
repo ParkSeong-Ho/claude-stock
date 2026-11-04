@@ -17,6 +17,11 @@ v1 결정(docs/v1-design.md):
 - D4: 미국 종목 전용, 지갑 통화는 달러(USD). 거래 기록에도 통화를 남긴다.
 - D5: 상한을 넘겨서 1주를 사는 일은 없다. 1주도 못 사면 0주 → 호출부가 skip()으로 사유 기록.
 - D8: 미국 기준 비용. 수수료 0.1%(양방향), 매도세 0, 슬리피지 0.05%.
+
+kr-broker 결정(docs/kr-broker-design.md):
+- 지갑은 시장별로 따로. 국내 지갑은 currency="KRW" + 국내 비용(수수료 0.015%, 매도세 0.20%, 슬리피지 0.05%).
+  국내 값은 markets.MARKETS["kr"] 에 있고, main.make_wallet() 이 그 값으로 지갑을 만든다.
+- 아래 기본값은 그대로 미국(달러) — 인자 없이 만든 지갑은 예전과 똑같다. 한 지갑 안에서 통화를 바꾸지 않는다.
 """
 
 import math
@@ -68,9 +73,9 @@ class Holding:
 class PaperWallet:
     name: str                                       # 트레이너 이름 (예: "스프린터")
     cash: float = 0.0                               # 지금 남은 현금
-    currency: str = "USD"                           # 지갑 통화 (v1은 달러 전용, D4)
+    currency: str = "USD"                           # 지갑 통화: 미국 "USD"(기본, D4) / 국내 "KRW" (환전 없음)
     fee_rate: float = DEFAULT_FEE_RATE              # 매매 수수료율 (0.1%, 양방향, D8)
-    sell_tax_rate: float = DEFAULT_SELL_TAX_RATE    # 매도세 (미국 0, D8)
+    sell_tax_rate: float = DEFAULT_SELL_TAX_RATE    # 매도세 (미국 0, D8 / 국내 0.20%, K-D8)
     slippage: float = DEFAULT_SLIPPAGE              # 체결 미끄러짐 가정 (0.05%)
     holdings: dict = field(default_factory=dict)    # {종목코드: Holding}
     log: list = field(default_factory=list)         # 모든 거래 기록
