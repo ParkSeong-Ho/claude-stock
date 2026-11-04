@@ -227,7 +227,7 @@
      - 지금 D6 이 그 종목에 같은 비율 r 의 "분할 의심"을 보고 있을 때만, 그리고 같은 종목·효력일 기록이 없을 때만 받는다(두 번 적용 막기, 2b-2 검토 C-2·C-9).
      - 두 장부에 똑같이: 주식 수 × r, 매수가·평균가 ÷ r. 대기 주문은 그대로다.
      - r 을 곱한 주식 수가 정수가 아니면 3번으로 간다.
-     - 평가액은 그 순간 그대로다. D6 는 D 전 기록 가격을 ÷ r 해서 비교한다.
+     - 평가액은 그 순간 그대로다. D6 는 **분할을 장부에 적용하기 전(`applied_after` 이하)에 쓴 기록 가격**을 ÷ r 해서 비교한다(효력일 기준으로 나누면 밀린 봉을 따라잡을 때 거짓 D6 이 남, 2b-2 구현).
   3. **그 밖**(인적분할·주식 교환·현금 인수 등 1·2·4 로 안 되는 것): 규칙 변경 → ⑤-c 재시작.
   4. **상장폐지**(더 거래되지 않음): `python h1.py corp-action --market m --code X --delist --last-date D --last-close P --source URL`
      - `--last-date`·`--last-close` 는 1차 출처의 마지막 거래일·종가다. `--last-close` 를 비우면 장부의 그 종목 마지막 `marks` 값을 쓴다. 둘 다 `corp_actions` 에 적는다.
@@ -745,11 +745,12 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
 |---|---|
 | `h1.lock` | 잠금(fcntl). 모든 명령. 최대 30분 기다린 뒤 종료 코드 5 |
 | `analyst_cache.jsonl` | 판정 기록(§3.6) |
-| `runs.jsonl` | 명령 한 번 = 시작 줄 + 끝 줄: 명령·시장·시각·코드 지문·env·`mode`·처리한 봉·종료 코드·메시지(관문 거절·자료 멈춤 포함) |
+| `runs.jsonl` | 명령 한 번 = 시작 줄 + 끝 줄: 명령·시장·시각·코드 지문·env·`mode`·처리한 봉·종료 코드·메시지(관문 거절·자료 멈춤 포함), `start_date`(모르면 `unknown`), `d7_checked`·`journal_recovered`·`bar_modes`. **창 세기**: `start_date == S` 이거나 `unknown`·None 이면서 `at ≥ meta.created_at` 인 줄(보고서도 `h1._in_window` 를 그대로 씀) |
 | `errors.jsonl` | L 오류: 시장·봉·문제 목록·**저장하려던 장부 6개의 내용 지문**(`ledger_fingerprint`, §2.2 ④). 시장 폴더 밖이라 재시작 뒤에도 남음 |
-| `restarts.jsonl` | 재시작: `{at, market, old_start, old_last, reason, archive}` |
-| `changes.jsonl` | 코드 동결 중 허용 변경(§2.2 ⑥)·기업 행위 결정(⑦) |
-| `replay_pass.json` | 재현 통과: `[{code_hash, files, env, ledger_fingerprints: {"W1-us": 내용 지문, "W1-kr": …, "W2-kr": …}, fingerprint_version, passed_at, report}]` |
+| `restarts.jsonl` | 재시작: `{at, market, restart_id, status: "moving"\|"done", old_start, old_last, reason, archive}`. 의도 줄 → 폴더 이동 → 끝 줄. 횟수는 `restart_id` 로 한 번 |
+| `changes.jsonl` | 코드 동결 중 허용 변경(§2.2 ⑥)·기업 행위 결정(⑦). amend-rules 는 `pending` → `done`/`abandoned`. 장부·meta 에는 있는데 일지에 없던 줄은 다음 명령이 `recovered: true` 로 채움 |
+| `replay_pass.json` | 재현 통과: `[{code_hash, files, env, ledger_fingerprints: {"W1-us": 내용 지문, "W1-kr": …, "W2-kr": …}, fingerprint_version, passed_at, report}]`. **`h1.record_replay_pass` 로만 추가**(잠금 아래, 지난 줄 안 바꿈) |
+| `replay_pass.seal.json` | 통과 기록 줄마다 sha256. 목록이 줄거나 바뀌면 관문 거절 3 |
 | `universe/us.json`, `universe/kr.json` | 종목군 목록·순서(첫 S 에 한 번 쓰고 안 바꿈. 재시작해도 그대로). 미국은 받은 시각·FDR 버전도 |
 | `<market>/HEAD.json`, `<market>/meta.json` | 커밋 지점, 시작 때 고정 값 |
 | `<market>/calendar.jsonl` | 실행마다 한 줄: 받은 시각, 달력의 **S 전 거래일 ~ 마지막 봉 날짜 목록 전체**, 그 sha256, 처리한 날짜 |
@@ -1282,7 +1283,7 @@ which claude                                       # launchd PATH 에 넣을 경
 | 정정 확정 | 차이가 모든 날짜에서 같은 비율(분할 모양)이면 거절 | C-10 |
 | 관문 | `corp-action` 도 관문·규칙 확인을 거친다(status·restart 는 아님) | C-11 |
 | 기록의 창 | 장부를 읽기 전 L24·관문 거절도 `start_date`(모르면 `unknown` = 지금 창)를 남긴다 | C-3 |
-| 종목군 시세 | 고정 종목군의 절반 넘게 못 받으면 D2(4). 확인용 대형주 실패는 W5 와 "D7 판단 못 함" 표시 | C-4 |
+| 종목군 시세 | 고정 종목군의 절반 넘게 못 받으면 D2(4, 상장폐지 등록 종목은 비율에서 뺌, start 도 같음). 확인용 대형주 실패는 W5 와 "D7 판단 못 함" 표시(runs.jsonl `d7_checked: false`) | C-4 |
 | replay_pass | `record_replay_pass` 로 추가만. 지난 줄이 줄거나 바뀌면 관문 거절 3(L 아님) | C-5 |
 | restart 순서 | `restarts.jsonl` 의도 줄 → 폴더 이동 → 끝 줄. 중간에 꺼지면 다음 restart 가 마저 함(횟수 한 번) | C-6 |
 | 일지 보충 | 장부 `corp_actions`·`meta` 가 원본. 모든 명령이 시작할 때 일지에 빠진 줄을 채움 | C-7 |
