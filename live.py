@@ -3,28 +3,33 @@
  라이브 가상매매 (매일 한 번 실행) - 진짜 돈 0원
 ===========================================================
 main.py 는 과거 전체를 한 번에 훑는 백테스트.
-live.py 는 '오늘 하루'만 판단하고 그 결과를 저장해, 내일 이어서 돌린다.
+live.py 는 '새 확정 봉'만 판단하고 그 결과를 저장해, 내일 이어서 돌린다.
 → 과거에 끼워맞추지 않은 '미래(포워드)' 검증. 기획서 3.4의 학습 모드.
 
-▶ 실행 (하루 한 번, 장 마감 뒤 추천):
+▶ 실행 (하루 한 번, 미국 장 마감 뒤 추천 — 뉴욕 16:15 이후 = 한국 다음날 아침 6~7시쯤):
     python live.py
 
-  매일 자동으로 돌리고 싶으면 cron 한 줄 (예: 평일 오후 4시):
-    0 16 * * 1-5  cd /경로/files && python live.py >> live.log 2>&1
+  매일 자동으로 돌리고 싶으면 cron 한 줄 (예: 한국 시간 화~토 오전 7시):
+    0 7 * * 2-6  cd /경로/files && python live.py >> live.log 2>&1
+  너무 일찍 돌려도 괜찮아요: 아직 확정 안 된 봉은 버리고, 새 확정 봉이 없으면 아무것도 안 바꿔요.
 
 상태는 state/ 폴더의 JSON에 저장됩니다. 지우면 처음부터 다시 시작해요.
-같은 날 두 번 실행해도 하루치가 중복 반영되지 않습니다(멱등).
+
+v1 규칙 (docs/v1-design.md):
+- '처리했나'는 달력 날짜가 아니라 **마지막 확정 봉의 날짜**로 판단(D2). 새 확정 봉이 없으면
+  (주말·휴장·장중) 아무것도 저장하지 않고 끝난다. 그래서 몇 번을 돌려도 하루치가 중복되지 않는다(멱등).
+- 오늘 종가로 낸 매수/매도 신호는 state 의 pending 에 저장 → 다음 실행 때 새 봉의 시가로 체결(D3).
+- 예전(원화·수수료 0.015%) 상태 파일은 이어 쓰지 않고 *.old-날짜.json 으로 보관 후 새로 시작.
 """
 
 import sys
 import csv
-import json
 import traceback
 from pathlib import Path
 from datetime import datetime
 from dataclasses import asdict
 
-import main  # CONFIG, load_prices 재사용
+import main  # CONFIG, load_prices, trade_day 재사용
 from paper_wallet import PaperWallet, Holding
 from sprinter_brain import SprinterBrain
 from marathoner_brain import MarathonerBrain
@@ -32,7 +37,6 @@ from pioneer_brain import PioneerBrain
 from risk_guard import CircuitBreaker
 
 STATE_DIR = Path(__file__).parent / "state"   # 트레이너별 지갑·포지션 상태(JSON)
-_IND = ["MA5", "MA20", "MA60", "RSI"]
 
 
 def _wallet_to_dict(w: PaperWallet) -> dict:
@@ -40,90 +44,89 @@ def _wallet_to_dict(w: PaperWallet) -> dict:
 
 
 def _wallet_from_dict(d: dict) -> PaperWallet:
-    w = PaperWallet(name=d["name"], cash=d["cash"], fee_rate=d["fee_rate"])
+    w = PaperWallet(name=d["name"], cash=d["cash"], currency=d.get("currency", "USD"),
+                    fee_rate=d["fee_rate"], sell_tax_rate=d["sell_tax_rate"], slippage=d["slippage"])
     w.holdings = {k: Holding(**v) for k, v in d["holdings"].items()}
     w.log = d["log"]
     return w
 
 
+def _state_file(stock_name, name):
+    return STATE_DIR / f"{stock_name}_{name}.json"
+
+
+def _equity_file(stock_name, name):
+    return STATE_DIR / f"{stock_name}_{name}_평가금액.csv"
+
+
 def _load_state(stock_name, name):
-    f = STATE_DIR / f"{stock_name}_{name}.json"
-    if not f.exists():
+    """저장된 상태를 읽는다. 없거나 예전 형식이면 None (예전 파일은 보관용 이름으로 바뀜)."""
+    st = main.load_state_file(_state_file(stock_name, name), extra_old=[_equity_file(stock_name, name)])
+    if st is None:
         return None
-    return json.loads(f.read_text(encoding="utf-8"))
+    st["wallet"] = _wallet_from_dict(st["wallet"])
+    return st
 
 
-def _save_state(stock_name, name, wallet, position, prev_value, stopped, last_date):
-    STATE_DIR.mkdir(exist_ok=True)
-    f = STATE_DIR / f"{stock_name}_{name}.json"
-    f.write_text(json.dumps({
-        "wallet": _wallet_to_dict(wallet), "position": position,
-        "prev_value": prev_value, "stopped": stopped, "last_date": last_date,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+def _save_state(stock_name, name, st):
+    data = {k: v for k, v in st.items() if k != "wallet"}
+    data["wallet"] = _wallet_to_dict(st["wallet"])
+    data["schema"] = main.STATE_SCHEMA
+    main.save_json_atomic(_state_file(stock_name, name), data)
 
 
 def _append_equity(stock_name, name, date_str, value):
     STATE_DIR.mkdir(exist_ok=True)
-    f = STATE_DIR / f"{stock_name}_{name}_평가금액.csv"
+    f = _equity_file(stock_name, name)
     new = not f.exists()
     with open(f, "a", newline="", encoding="utf-8-sig") as fp:
         w = csv.writer(fp)
         if new:
             w.writerow(["날짜", "평가금액"])
-        w.writerow([date_str, round(value, 1)])
+        w.writerow([date_str, round(value, 2)])
 
 
-def step_one(name, brain, cap, code, stock_name, cash, breaker):
-    """이 트레이너·이 종목의 '오늘 하루'를 처리하고 상태를 저장. 사람이 읽을 한 줄을 돌려준다."""
-    df = brain.add_indicators(main.load_prices(code, main.CONFIG["시작일"]))
-    today = df.iloc[-1]
-    today_date = df.index[-1].date().isoformat()
-    price = float(today["Close"])
+def step_one(name, brain, cap, code, stock_name, cash, breaker, prices=None):
+    """이 트레이너·이 종목의 '새 확정 봉'들을 처리하고 상태를 저장. 사람이 읽을 한 줄을 돌려준다.
+    prices: 미리 받아 둔 시세(같은 종목을 트레이너마다 다시 받지 않으려고). 없으면 여기서 받는다.
+    st: 돌려주는 두 번째 값 — 요약(D7)에 쓰는 지금 상태."""
+    raw = prices if prices is not None else main.load_prices(code, main.CONFIG["시작일"])
+    df = brain.add_indicators(raw)
+    latest = df.index[-1].date().isoformat()
 
     st = _load_state(stock_name, name)
     if st is None:
-        wallet = PaperWallet(name=name); wallet.deposit(cash)
-        position = None; prev_value = None; stopped = False; last_date = None
+        st = main.new_state(name, cash, latest)
+        st["last_date"] = None
+        st["start_date"] = latest
+    last_date = st.get("last_date")
+
+    # D2: 마지막으로 처리한 확정 봉 이후의 봉만. 처음이면 가장 최근 봉 하나만.
+    dates = [d.date().isoformat() for d in df.index]
+    if last_date is None:
+        todo = [len(df) - 1]
     else:
-        wallet = _wallet_from_dict(st["wallet"]); position = st["position"]
-        prev_value = st["prev_value"]; stopped = st["stopped"]; last_date = st["last_date"]
+        todo = [i for i, d in enumerate(dates) if d > last_date]
+    if not todo:
+        return (f"{stock_name}/{name}: 새 확정 봉 없음 (마지막 처리 {last_date}). 저장 안 하고 끝.", st)
 
-    if last_date == today_date:
-        return f"{stock_name}/{name}: 오늘({today_date})은 이미 처리했어요. (중복 실행 방지)"
-
-    if today[[c for c in _IND if c in df.columns]].isnull().any():
-        msg = "지표가 아직 부족해서 관망."
-    else:
-        if position is not None:
-            position["days_held"] += 1
-        today_value = wallet.value({code: price})
-        hit = None if stopped else breaker.check(cash, prev_value, today_value)
-        if hit is not None:
-            if position is not None:
-                wallet.sell(code, price, position["shares"]); position = None
-            stopped = True
-            msg = "🛑 서킷 브레이커: " + hit
-        elif stopped:
-            msg = "이미 정지됨 (서킷 브레이커 발동 후 재개 대기)."
-        else:
-            action, reason = brain.decide(df, position)
-            msg = f"{action} — {reason}"
-            if action == "매수" and position is None:
-                shares = max(1, int(cash * cap / price))
-                if wallet.buy(code, price, shares):
-                    position = {"buy_price": price, "days_held": 0, "shares": shares}
-            elif action == "매도" and position is not None:
-                wallet.sell(code, price, position["shares"]); position = None
-
-    value_now = wallet.value({code: price})
-    _save_state(stock_name, name, wallet, position, value_now, stopped, today_date)
-    _append_equity(stock_name, name, today_date, value_now)
-    return f"[{today_date}] {stock_name}/{name}: {msg} | 평가금액 {value_now:,.0f}원"
+    msgs = []
+    for i in todo:
+        window = df.iloc[: i + 1]
+        msg = main.trade_day(st, brain, window, code, cash, cap, breaker)
+        value = st["wallet"].value({code: float(window["Close"].iloc[-1])})
+        _append_equity(stock_name, name, dates[i], value)
+        msgs.append(msg)
+    st["last_date"] = dates[todo[-1]]
+    _save_state(stock_name, name, st)
+    value_now = st["wallet"].value({code: float(df["Close"].iloc[-1])})
+    extra = f" (밀린 봉 {len(todo)}개 처리)" if len(todo) > 1 else ""
+    return (f"[{st['last_date']}] {stock_name}/{name}: {msgs[-1]} | 평가금액 {main.usd(value_now, False)}{extra}", st)
 
 
 def run():
     print("=" * 55)
-    print(" 라이브 가상매매 (오늘 하루) — 진짜 돈 0원")
+    print(" 라이브 가상매매 (새 확정 봉) — 진짜 돈 $0")
     print("=" * 55)
     total = main.CONFIG["총_가상자금"]
     ratios = main.CONFIG["배분비율"]
@@ -131,14 +134,28 @@ def run():
     cb = main.CONFIG["서킷브레이커"]
     breaker = CircuitBreaker(cum_limit=cb["누적한도"], day_limit=cb["일일한도"])
     brains = {"마라토너": MarathonerBrain(), "스프린터": SprinterBrain(), "파이오니어": PioneerBrain()}
+    spy = main.load_benchmark(main.CONFIG["시작일"])   # SPY 는 한 번만
 
+    summary = []
     for 종목명, code in main.CONFIG["종목목록"].items():
+        prices = main.load_prices(code, main.CONFIG["시작일"])   # 종목당 한 번만 받기
         for name, brain in brains.items():
-            cash = int(total * ratios[name])
-            print(step_one(name, brain, caps[name], code, 종목명, cash, breaker))
+            cash = total * ratios[name]
+            line, st = step_one(name, brain, caps[name], code, 종목명, cash, breaker, prices)
+            print(line)
+            if st.get("start_date") and st.get("last_date"):
+                value = st["wallet"].value({code: float(prices["Close"].iloc[-1])})
+                summary.append(f"{종목명}/" + main.compare(
+                    name, value - cash, prices, cash * caps[name], spy, st["start_date"], st["last_date"]))
 
+    if summary:
+        print("-" * 55)
+        print("시작일부터 지금까지 비교 (같은 투입액으로 들고 있기 · SPY):")
+        for s in summary:
+            print("  " + s)
     print("=" * 55)
-    print("※ 가상매매입니다. 상태는 state/ 폴더에 저장돼 내일 이어집니다.")
+    print("※ 가상매매입니다. 상태는 state/ 폴더에 저장돼 다음 확정 봉에서 이어집니다.")
+    print("※ 오늘 신호는 다음 거래일 시가에 체결돼요(다음 실행 때).")
     print("=" * 55)
 
 
