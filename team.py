@@ -131,12 +131,22 @@ def _at(m, px):
     return f"@{px:.2f}" if m.key == "us" else f"@{markets.price_text(m.key, px)}"
 
 
-def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=None, mk=None):
+def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=None, mk=None, h1=None):
     """이 트레이너의 새 확정 봉(bar_date) 하루: 주문 체결 → 보유관리 → 서킷 → 신규 주문.
-    (사람이 읽을 한 줄, 상태) 를 돌려준다. mk: 시장(없으면 미국)."""
+    (사람이 읽을 한 줄, 상태) 를 돌려준다. mk: 시장(없으면 미국).
+
+    h1: H1 포워드 모의매매(h1.py)가 넘기는 하루 처리기(h1.H1Day). None(기본)이면 지금 동작 그대로다.
+      이 파일은 h1 을 import 하지 않는다. 갈고리 5곳(설계 docs/h1-forward-design.md §3.2):
+      G0 h1 이 있으면 st 도 꼭 받는다(기존 state/ 장부를 읽지 않게)
+      G1 ① 체결을 h1.fill 이 한다(매도 먼저 → 매수 → A1 쓸어 담기)
+      G2 ② 뒤 평가 가격표에 대기 자산(지수) 종가를 넣는다
+      G4 ④ 팀장은 판정 기록을 거친 h1.leader, 주문을 다 낸 뒤 결과를 h1.note_leader 로 넘긴다
+      G5 h1 이면 변화가 없어도 진행하고, 파일 대신 h1.close_day 로 하루 기록을 남긴다(저장은 h1.py 가)"""
     m = main.mkt(mk)
     cache = {} if cache is None else cache
     brain = BRAINS[tname]()
+    if h1 is not None and st is None:      # G0
+        raise ValueError(f"{tname}: H1 장부는 h1.py 가 읽어서 넘겨야 해요(st 없음) — 기존 state/ 장부를 읽지 않게")
     if st is None:
         st = _load(tname, m)
     if st is None:
@@ -152,42 +162,45 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
     # ① 어제 낸 주문을 '신호 다음 거래일' 시가로 체결 (D3)
     #    신호 다음 봉 ~ 기준 봉 중 '시가가 있는 첫 봉'에 체결한다. 시가가 없는 봉(open_price 가 None,
     #    예: 거래정지일)은 체결할 수 없으니 건너뛴다 (S0-2, 2026-11-04 — 예전엔 종가로 대신 체결했음).
-    still = []
-    for order in st["pending"]:
-        code = order["code"]
-        df = _prices(code, cache, m)
-        nxt = None
-        if df is not None:
-            ds = _dates(df)
-            for i, day in enumerate(ds):
-                if order["signal_date"] < day <= bar_date:
-                    o = main.open_price(df.iloc[i])
-                    if o is not None:
-                        nxt = (o, day)
-                        break
-        if nxt is None:
-            still.append(order)          # 체결할 봉이 아직 없음(다음 봉 전·거래정지 중) → 다음 실행에서 다시
-            continue
-        px, d = nxt
-        changed = True
-        if order["action"] == "매수" and code not in positions:
-            n = shares_within_cap(budget, cap, px, wallet.fee_rate, wallet.slippage)
-            if n <= 0:
-                why = f"상한 {main.fmt(m, budget * cap, False)} 안에서 1주도 못 삼 (시가 {main.px_txt(m, px)})"
-                wallet.skip(code, why, d); logs.append(f"보류 {code}({why})")
-            elif wallet.buy(code, px, n, d):
-                positions[code] = {"buy_price": px, "days_held": 0, "shares": n, "buy_date": d}
-                tip = f" 팀장:{order['note']}" if order.get("note") else ""
-                logs.append(f"매수 {code}x{n}{_at(m, px)}{tip}")
-            else:
-                why = f"현금 부족 (필요 {main.fmt(m, px * n, False)}, 보유 {main.fmt(m, wallet.cash, False)})"
-                wallet.skip(code, why, d); logs.append(f"보류 {code}(현금 부족)")
-        elif order["action"] == "매도" and code in positions:
-            pos = positions[code]
-            if wallet.sell(code, px, pos["shares"], d):
-                logs.append(f"매도 {code}{_at(m, px)}({order.get('reason', '')[:14]})")
-                del positions[code]
-    st["pending"] = still
+    if h1 is not None:                     # G1: H1 은 매도 먼저 → 매수 → (A1) 쓸어 담기
+        changed = h1.fill(st, tname, cap, bar_date, cache, m, logs) or changed
+    else:
+        still = []
+        for order in st["pending"]:
+            code = order["code"]
+            df = _prices(code, cache, m)
+            nxt = None
+            if df is not None:
+                ds = _dates(df)
+                for i, day in enumerate(ds):
+                    if order["signal_date"] < day <= bar_date:
+                        o = main.open_price(df.iloc[i])
+                        if o is not None:
+                            nxt = (o, day)
+                            break
+            if nxt is None:
+                still.append(order)          # 체결할 봉이 아직 없음(다음 봉 전·거래정지 중) → 다음 실행에서 다시
+                continue
+            px, d = nxt
+            changed = True
+            if order["action"] == "매수" and code not in positions:
+                n = shares_within_cap(budget, cap, px, wallet.fee_rate, wallet.slippage)
+                if n <= 0:
+                    why = f"상한 {main.fmt(m, budget * cap, False)} 안에서 1주도 못 삼 (시가 {main.px_txt(m, px)})"
+                    wallet.skip(code, why, d); logs.append(f"보류 {code}({why})")
+                elif wallet.buy(code, px, n, d):
+                    positions[code] = {"buy_price": px, "days_held": 0, "shares": n, "buy_date": d}
+                    tip = f" 팀장:{order['note']}" if order.get("note") else ""
+                    logs.append(f"매수 {code}x{n}{_at(m, px)}{tip}")
+                else:
+                    why = f"현금 부족 (필요 {main.fmt(m, px * n, False)}, 보유 {main.fmt(m, wallet.cash, False)})"
+                    wallet.skip(code, why, d); logs.append(f"보류 {code}(현금 부족)")
+            elif order["action"] == "매도" and code in positions:
+                pos = positions[code]
+                if wallet.sell(code, px, pos["shares"], d):
+                    logs.append(f"매도 {code}{_at(m, px)}({order.get('reason', '')[:14]})")
+                    del positions[code]
+        st["pending"] = still
 
     # ② 보유 종목: 오늘 종가로 평가하고 매도 판단 → 내일 시가 주문
     #    그 종목의 마지막 봉이 기준 봉(bar_date)보다 앞이면(= 그 종목은 기준 봉 날 거래가 없음: 거래정지 등)
@@ -217,6 +230,8 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
         if action == "매도":
             st["pending"].append({"code": code, "action": "매도", "signal_date": bar_date, "reason": reason})
             logs.append(f"매도주문 {code}({reason[:14]})")
+    if h1 is not None:                         # G2: 대기 자산(지수)도 오늘 종가로 평가 (빠지면 평균 매입가로 평가됨)
+        prices[h1.idle.code] = h1.idle.close
 
     # ③ 서킷 브레이커 (포트폴리오 단위, D6 동작 유지 — 단 정리는 다음 시가)
     if not st["stopped"]:
@@ -238,8 +253,10 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
             logs.append("후보 제외 " + ",".join(stale) + "(기준 봉에 거래 없음)")
         cands = [c for c in screened if c["code"] not in busy and c["code"] not in stale]
         if cands:
-            analysis = analyst.analyze(tname, cands)          # 팀장 분석; 부재 시 None → 규칙 폴백
+            ask = h1.leader if h1 is not None else analyst.analyze   # G4: H1 은 판정 기록을 거친 팀장
+            analysis = ask(tname, cands)                      # 팀장 분석; 부재 시 None → 규칙 폴백
             verdicts = {k: (v or {}).get("verdict") for k, v in (analysis or {}).items()}
+            cands0 = list(cands)
             cands = analyst.apply(cands, analysis)            # veto 는 여기서 빠진다
             kept = []
             for c in cands:
@@ -261,15 +278,20 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
                                       "reason": c.get("reason", ""), "note": c.get("note")})
                 logs.append(f"매수주문 {c['code']}")
                 changed = True
+            if h1 is not None:                 # G4: 후보·판정·효과·빈자리를 H1 하루 기록용으로 넘김(장부는 안 고침)
+                h1.note_leader(st, tname, bar_date, cands0, analysis, kept, slots)
 
-    if not changed:
+    if not changed and h1 is None:             # G5: H1 은 변화가 없는 날에도 하루 기록을 남긴다
         # 후보·보유·주문이 모두 없음 → 날짜를 저장하지 않는다(나중에 데이터가 고쳐지면 다시 돌 수 있게)
         return f"{tname}: 후보·보유·주문 없음 → 저장 안 함 (기준 봉 {bar_date})", st
 
     value_now = wallet.value(prices)
     st["prev_value"] = value_now
     st["last_date"] = bar_date
-    _save(tname, st, m)
+    if h1 is None:
+        _save(tname, st, m)
+    else:                                      # G5: 파일 저장은 h1.py 가 장부 6개를 한꺼번에
+        h1.close_day(st, tname, bar_date, prices, value_now)
     body = "; ".join(logs) if logs else "변화 없음"
     n_pending = len(st["pending"])
     return (f"{tname}: [{bar_date}] 평가 {main.fmt(m, value_now, False)} | 보유 {len(positions)}종목"
