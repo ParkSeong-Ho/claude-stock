@@ -1,0 +1,25 @@
+====================================================================
+ 파라미터 튜닝 — 훈련(앞60%)으로 고르고 검증(뒤40%)으로 재확인
+ 종목: 삼성전자, SK하이닉스, 애플, 마이크로소프트, 엔비디아  기간: 2023-01-01~
+====================================================================
+
+▼ [스프린터] 조합 쓸어보는 중...
+  32개 조합을 tune_스프린터.csv 에 기록. 검증 성적 상위 5개:
+   take_profit  stop_loss  cross_lookback  rsi_floor  훈련_순손익  훈련_MDD%  검증_순손익  검증_MDD%  검증_매수  검증_승률%  검증_정지
+   0.03  0.015  3  55  33668  -4.8  8691  -5.3  38  55.3  0
+   0.03  0.02  3  55  29168  -6.3  6329  -5.3  37  56.8  0
+   0.03  0.015  1  55  18023  -4.8  4801  -6.8  28  53.6  0
+   0.03  0.02  1  55  17669  -5.6  4380  -6.8  28  57.1  0
+   0.05  0.015  3  55  35057  -4.7  -3857  -5.6  38  52.6  0 ★기본값
+
+▼ [파이오니어] 조합 쓸어보는 중...
+Traceback (most recent call last):
+  File "/home/user/claude-stock/tune.py", line 142, in <module>
+    main_run()
+  File "/home/user/claude-stock/tune.py", line 123, in main_run
+    rows = tune_one(name)
+           ^^^^^^^^^^^^^^
+  File "/home/user/claude-stock/tune.py", line 95, in tune_one
+    "검증_순손익": round(te_profit), "검증_MDD%": round(te_mdd * 100, 1),
+                   ^^^^^^^^^^^^^^^^
+ValueError: cannot convert float NaN to integer

@@ -1,0 +1,23 @@
+{
+  "wallet": {
+    "name": "파이오니어",
+    "cash": 100000.0,
+    "fee_rate": 0.00015,
+    "sell_tax_rate": 0.0018,
+    "slippage": 0.0005,
+    "holdings": {},
+    "log": [
+      {
+        "시각": "2026-11-04 01:31:27",
+        "종류": "입금",
+        "종목": null,
+        "수량": 0,
+        "금액": 100000
+      }
+    ]
+  },
+  "position": null,
+  "prev_value": 100000.0,
+  "stopped": false,
+  "last_date": "2026-11-03"
+}

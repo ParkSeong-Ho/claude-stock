@@ -1,0 +1,4 @@
+analyze 소요 8.5s, 결과 = {"TT": {"code": "TT", "verdict": "hold", "conviction": 0.35, "note": "RSI 31은 교정 기준(35) 아래의 깊은 과매도라 반등 여지는 있으나, 확인 가능한 촉매(뉴스·수급·테마) 근거가 없고 실시간 시장 상황도 검증하지 못해 확신이 부족해 관망."}, "BA": {"code": "BA", "verdict": "hold", "conviction": 0.4, "note": "RSI 32 과냉 반등 신호지만 실체 있는 촉매를 확인하지 못했고 악재(실적·규제·사고 이슈)와 시장 국면도 검증 불가라, 손절 -5% 리스크 대비 확신이 부족해 보류."}}
+apply 후: [('TT', None, 0.35), ('BA', None, 0.4)]
+01:31:01.244975513 claude-call args=2 promptlen=990
+01:31:09.726867603 claude-exit rc=0 dur=8.482481362s
