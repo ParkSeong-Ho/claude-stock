@@ -36,7 +36,8 @@ DecisionLog(read_only), 엄격 읽기 보강, S 의 prev_cal_date 확인.
 엔진 부분(run_bar 까지)은 파일을 쓰지 않는다(판정 기록 추가만 예외 — 장부보다 먼저 디스크에 있어야 하므로, 설계 §3.6).
 
 import 관계: h1 → team(그 밖의 운영 모듈) / team 은 h1 을 import 하지 않는다. h1_check 와 h1 은 서로를 모듈째로만
-import 한다(모듈을 읽는 순간에는 서로의 이름을 쓰지 않음 → 어느 쪽을 먼저 읽어도 됨).
+import 한다(모듈을 읽는 순간에는 서로의 이름을 쓰지 않음 → 어느 쪽을 먼저 읽어도 됨). h1_report 는 window_counts
+(status·실행 끝 요약의 일지 숫자 — 보고서와 같은 함수, 단계 3) 안에서만 늦게 import 한다.
 """
 from __future__ import annotations
 
@@ -3954,7 +3955,7 @@ def summary_lines(market, states, *, errors=None, data_stops=None, decisions=Non
         f"  A1 쉬는 돈={idle:<5} {main.fmt(m, start_total, False)} → {main.fmt(m, v1, False)} ({pct(v1)})"
         f" · {idle} {fmt_units(units)}단위",
         f"  A1−A0 {main.fmt(m, v1 - v0)} · {idle} 들고 있기(S+1 시가 시작, 소수 단위) {bh}",
-        f"  점검 L {q(errors)}" + (f"(④ 거짓 양성 {fp}건 뺌)" if fp else "")
+        f"  점검 L {q(errors)}" + (f" (④ 거짓 양성 {fp}건 뺌)" if fp else "")
         + f" · 자료 멈춤 {q(data_stops)} · 늦은 봉 {late} · 팀장 LLM {q(n_llm)} / 폴백 {q(n_fb)} · "
         f"그림자 서킷 {', '.join(firsts) if firsts else '없음'}",
         "  ※ 3개월은 판단하기에 너무 짧다 — 숫자는 기록용(사전 등록). A0 는 운영 장부가 아니다",
