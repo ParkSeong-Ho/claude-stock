@@ -21,6 +21,15 @@ h1_check.py - H1 장부 점검 (설계 docs/h1-forward-design.md §4, 단계 2b-
   errors(problems)                             L 등급만
 
 L24(장부 파일 손상)는 2b-2 의 장부 읽기가 판단한다. 여기서는 장부 모양이 깨져 점검을 끝낼 수 없을 때만 L24 로 알린다.
+
+2b-1 독립 검토(docs/h1-review-2b1.md) 반영
+- B-1 L23: 장부마다 "등록 last_date 뒤 첫 처리 봉의 시가 전에 들고 있었으면 그 봉에 정리 체결이 있고, 없었으면 없다".
+  두 장부 사이에는 등록과 그 '첫 처리 봉'이 같은지만 본다(A0·A1 보유는 갈릴 수 있음).
+- B-2 분할: corp_actions 의 {"kind": "split", "code", "r", "date", "applied_after", …} 를 읽어, 원장 다시 걷기에서
+  applied_after 날 종가 뒤에 수량 ×r 를 반영하고(L7·L8·끝 상태), L15 매수가는 ÷r 로 본다. 분할 전 체결은 지금(소급 반영된)
+  시세와 L3 비교를 하지 않는다. 두 장부의 분할 기록이 다르면 L8.
+- B-6 L12: '현금 부족' 보류 순간의 가능 금액을 그날 체결 순서(첫 전부 지수 → 정리 → 매도 → 매수 주문 순서)로 다시 세어
+  기록과 맞춘다. 같은 시가의 체결 단계가 '매도 먼저 → 매수 → 쓸어 담기'가 아니면 L4.
 """
 from __future__ import annotations
 
@@ -374,7 +383,7 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
     if len(positions) + sum(1 for o in pending if o["action"] == "매수") > team.MAX_POSITIONS:
         P("L5", "보유 + 매수 대기 > MAX_POSITIONS")
 
-    # ---- L12 보류 ----
+    # ---- L12 보류 (기록된 값) ----
     for s in skips:
         dt, kind = s["date"], s["kind"]
         if dt not in day_ix:
@@ -394,17 +403,48 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
             if not _isnum(px) or shares_within_cap(start_cash, cap, px, fee, slip) != 0:
                 P("L12", f"0주 보류 {s['code']} 인데 상한 안에서 살 수 있음 (가격 {px!r})", dt)
 
-    # ---- 원장 다시 걷기: L7·L8·L10·L15·L23 ----
+    # ---- 원장 다시 걷기: L4(같은 시가 순서)·L7·L8·L10·L12(보류 순간 다시 센 가능 금액)·L23 ----
     regs = {ca["code"]: ca for ca in d["corp_actions"] if ca.get("kind") == "delist"}
+    first_after = {c: next((x for x in dates if x > reg["last_date"]), None) for c, reg in regs.items()}
+    splits = [ca for ca in d["corp_actions"] if ca.get("kind") == "split"]
+    splits_on = {}
+    for sp in splits:
+        if sp.get("applied_after") not in day_ix:
+            P("L8", f"분할 {sp.get('code')} 적용 시점 {sp.get('applied_after')!r} 이 처리한 봉이 아님")
+            continue
+        if not (_isnum(sp.get("r")) and sp["r"] > 0):
+            P("L8", f"분할 {sp.get('code')} 비율 {sp.get('r')!r} 이 이상함")
+            continue
+        splits_on.setdefault(sp["applied_after"], []).append(sp)
     fills_on = {}
     for f in fills:
         fills_on.setdefault(f["date"], []).append(f)
-    shares = {}
+    skip_of = {s["order_id"]: s for s in skips if s.get("order_id")}
+    buys_done_on = {}
+    for o in orders:                                   # 그날 처리한 매수 주문(대기 목록 순서 = 주문 기록 순서)
+        if o["action"] == "매수" and o["status"] != "pending" and o.get("done_date"):
+            buys_done_on.setdefault(o["done_date"], []).append(o)
+    shares, held_by_day = {}, {}
     prev_cash, prev_units = start_cash, 0.0           # S 날 = 0 + 입금
     for i, row in enumerate(days):
         dt = row["date"]
         cur_cash, cur_units = prev_cash, prev_units
-        for f in fills_on.get(dt, []):
+        day_fills = fills_on.get(dt, [])
+        # L4 같은 시가 순서: 첫 전부 지수 → 상장폐지 정리 → 주식 매도 → (지수 자금 매도 → 주식 매수)* → 쓸어 담기 (위험 R1)
+        phases = [_phase(f) for f in day_fills]
+        if phases != sorted(phases):
+            P("L4", "같은 시가의 체결 순서가 '매도 먼저 → 매수 → 쓸어 담기'가 아님", dt)
+        # L23 상장폐지: 등록 last_date 뒤 첫 처리 봉에, 그 직전 종가에 들고 있었으면 정리 체결이 있고 없었으면 없다
+        for c, reg in regs.items():
+            dl = [f for f in day_fills if f["code"] == c and f["purpose"] == "delist"]
+            if first_after[c] == dt:
+                if shares.get(c, 0) and not dl:
+                    P("L23", f"상장폐지 등록 {c} 를 들고 있었는데 등록 뒤 첫 처리 봉에 정리 체결이 없음", dt)
+                if not shares.get(c, 0) and dl:
+                    P("L23", f"상장폐지 등록 {c} 를 들고 있지 않았는데 정리 체결이 있음", dt)
+            elif dl:
+                P("L23", f"{c} 정리 체결이 등록 뒤 첫 처리 봉({first_after[c]})이 아닌 날", dt)
+        for f in day_fills:
             if not _cash_ok(f["cash_before"], cur_cash):
                 P("L8", f"체결 전 현금 {f['cash_before']!r} ≠ 원장 {cur_cash!r} ({f['code']})", dt)
             if not _rel_ok(f["units_before"], cur_units):
@@ -439,6 +479,8 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
                                 P("L23", f"{c} 정리일 {dt} ≤ 등록 마지막 거래일 {reg['last_date']}", dt)
                             if f["price"] != reg["last_close"]:
                                 P("L23", f"{c} 정리 가격 {f['price']!r} ≠ 등록 마지막 종가 {reg['last_close']!r}", dt)
+        _check_skip_moments(P, arm, dt, row, day_fills, buys_done_on.get(dt, []), skip_of, prev_cash, prev_units,
+                            start_cash, cap, fee, slip)
         if not _cash_ok(cur_cash, row["cash"]):
             P("L8", f"현금 원장: 전날 {prev_cash!r} + 체결 = {cur_cash!r} ≠ 기록 {row['cash']!r}", dt)
         if not _rel_ok(cur_units, row["idle_units"]):
@@ -455,6 +497,7 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
             P("L7", f"지수 평가 {row['idle_value']!r} ≠ 단위×종가 {idle_v!r}", dt)
         if not _rel_ok(row["cash"] + stock_v + idle_v, row["value"]):
             P("L7", f"평가액 {row['value']!r} ≠ 현금+주식+지수 {row['cash'] + stock_v + idle_v!r}", dt)
+        held_by_day[dt] = set(held)
         # L5 그날 종가 뒤 보유 + 매수 대기 ≤ 5
         if len(held) + _pending_buys_at_close(orders, dt) > team.MAX_POSITIONS:
             P("L5", "그날 보유 + 매수 대기 > MAX_POSITIONS", dt)
@@ -465,16 +508,23 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
         # L10 A1
         if arm == "A1":
             if i == 0:
-                if not _cash_ok(row["cash"], start_cash) or row["idle_units"] != 0 or fills_on.get(dt):
+                if not _cash_ok(row["cash"], start_cash) or row["idle_units"] != 0 or day_fills:
                     P("L10", "S 날 A1 은 입금만(현금 = 시작 금액, 지수 0, 체결 0)", dt)
             else:
                 if not row["cash"] < h1.SWEEP_MIN:
                     P("L10", f"A1 종가 현금 {row['cash']!r} ≥ {h1.SWEEP_MIN} (쓸어 담기 누락)", dt)
                 if i == 1:
-                    fl = fills_on.get(dt, [])
-                    if not fl or not (fl[0]["kind"] == "idle" and fl[0]["side"] == "buy"
-                                      and fl[0]["purpose"] == "start"):
+                    if not day_fills or not (day_fills[0]["kind"] == "idle" and day_fills[0]["side"] == "buy"
+                                             and day_fills[0]["purpose"] == "start"):
                         P("L10", "S+1 첫 체결이 purpose='start' 지수 매수가 아님", dt)
+        # 분할(⑦-2): 그날 종가 뒤에 적용 → 다음 날부터 수량 ×r (2b-1 검토 B-2)
+        for sp in splits_on.get(dt, []):
+            c = sp["code"]
+            if shares.get(c):
+                q = shares[c] * sp["r"]
+                if not float(q).is_integer():
+                    P("L8", f"분할 {c} r={sp['r']} 를 곱한 수량 {q} 가 정수가 아님", dt)
+                shares[c] = int(q) if float(q).is_integer() else q
         prev_cash, prev_units = row["cash"], row["idle_units"]
     if arm == "A1":
         starts = [f for f in fills if f["purpose"] == "start"]
@@ -489,25 +539,31 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
             P("L8", f"마지막 하루 기록 지수 단위 {prev_units!r} ≠ 지갑 {units_w!r}")
         held = {c: q for c, q in shares.items() if q}
         if held != {c: p["shares"] for c, p in positions.items()}:
-            P("L8", f"체결로 다시 센 보유 {held} ≠ positions")
+            P("L8", f"체결·분할로 다시 센 보유 {held} ≠ positions")
         last = days[-1]
+        last_split = {sp["code"] for sp in splits_on.get(last["date"], [])}
         prices = {**last["marks"], idle: last["idle_close"]}
-        if all(c in prices for c in holds):
+        if not last_split and all(c in prices for c in holds):     # 마지막 날 종가 뒤 분할이면 비교 생략
             wv = w["cash"] + sum(h["shares"] * prices[c] for c, h in holds.items())
             if not _rel_ok(wv, last["value"]):
                 P("L7", f"마지막 평가액 {last['value']!r} ≠ wallet.value(가격표) {wv!r}", last["date"])
-        else:
+        elif not last_split:
             P("L7", "마지막 하루 기록 가격표에 없는 보유가 있음", last["date"])
 
-    # ---- L15 보유일수 ----
+    # ---- L15 보유일수·매수가(분할 반영) ----
     for code, pos in positions.items():
         buys = [f for f in fills if f["kind"] == "stock" and f["side"] == "buy" and f["code"] == code]
         if not buys:
             P("L15", f"{code} 매수 체결 기록이 없음")
             continue
         b = buys[-1]
-        if pos.get("buy_date") != b["date"] or pos.get("buy_price") != b["price"]:
-            P("L15", f"{code} 매수일·매수가가 체결 기록과 다름")
+        want_px = b["price"]
+        for sp in splits:
+            if sp.get("code") == code and _isnum(sp.get("r")) and sp.get("applied_after", "") >= b["date"]:
+                want_px = want_px / sp["r"]
+        if pos.get("buy_date") != b["date"] or not (_isnum(pos.get("buy_price"))
+                                                     and _rel_ok(pos["buy_price"], want_px)):
+            P("L15", f"{code} 매수일·매수가가 체결 기록(분할 반영 {want_px!r})과 다름")
         want = sum(1 for row in days if row["date"] > b["date"] and code not in halted_on[row["date"]])
         if pos.get("days_held") != want:
             P("L15", f"{code} 보유일수 {pos.get('days_held')} ≠ 정지 아닌 처리 봉 수 {want}")
@@ -542,8 +598,7 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
         if row["over_slots"] != len(ranked) - n_ord:
             P("L19", f"over_slots {row['over_slots']} ≠ 빈자리 부족 후보 {len(ranked) - n_ord}", dt)
         if len(ranked) > n_ord:                    # 빈자리가 모자랐으면 그날 빈자리를 다 채웠어야 함
-            held_now = {c for c, q in _shares_after(fills, dt).items() if q}
-            if len(held_now) + _pending_buys_at_close(orders, dt) != team.MAX_POSITIONS:
+            if len(held_by_day.get(dt, ())) + _pending_buys_at_close(orders, dt) != team.MAX_POSITIONS:
                 P("L19", "빈자리 부족 후보가 있는데 보유 + 매수 대기 ≠ MAX_POSITIONS", dt)
         for e in entries:
             conv = _conviction_of(decisions, e.get("key"))
@@ -591,17 +646,63 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
         for f in fills:
             if f["kind"] != "stock" or f["purpose"] == "delist":
                 continue
+            if any(sp.get("code") == f["code"] and sp.get("applied_after", "") >= f["date"] for sp in splits):
+                continue      # 분할 전 체결: 지금 시세는 분할 반영(소급 수정)된 값이라 비교하지 않음(D6·T-RETRO 몫)
             _check_stock_price(P, frames, f)
 
 
-def _shares_after(fills, d):
-    """d 날 체결까지 반영한 주식 보유 수량."""
-    sh = {}
-    for f in fills:
-        if f["date"] > d or f["kind"] != "stock":
+def _phase(f):
+    """같은 시가 안의 체결 단계 번호(설계 §2.3 a·a′·c·d·e). 하루 체결 목록의 단계는 줄어들면 안 된다."""
+    if f["kind"] == "idle":
+        return {"start": 0, "sweep": 4}.get(f.get("purpose"), 3)      # fund:<종목> 는 매수 단계(3)
+    if f.get("purpose") == "delist":
+        return 1
+    return 2 if f["side"] == "sell" else 3
+
+
+def _check_skip_moments(P, arm, dt, row, day_fills, buy_orders, skip_of, prev_cash, prev_units, start_cash, cap,
+                        fee, slip):
+    """'현금 부족' 보류마다 그 순간의 가능 금액을 그날 체결 순서로 다시 센다(2b-1 검토 B-6).
+    매수 단계 전(첫 전부 지수·정리·매도) 마지막 체결 뒤 현금·단위에서 시작해, 그날 처리한 매수 주문을 대기 목록 순서
+    (= 주문 기록 순서)로 따라가며 체결된 주문은 그 체결(지수 자금 매도 + 매수)까지 반영한다.
+    보류 순간 가능 금액 = 현금 + 지수 단위 × u_net(A1) / 현금(A0). 기록된 need·avail 과 같아야 하고,
+    need > 가능 금액·(1−1e-9)(A1) / need > 가능 금액(A0) 이어야 한다."""
+    pre = [f for f in day_fills if _phase(f) < 3]
+    buyphase = [f for f in day_fills if _phase(f) == 3]
+    c_now = pre[-1]["cash_after"] if pre else prev_cash
+    u_now = pre[-1]["units_after"] if pre else prev_units
+    q = row["idle_open"]
+    u_net = q * (1 - slip) - q * (1 - slip) * fee
+    k = 0
+    for o in buy_orders:
+        if o["status"] == "filled":
+            while k < len(buyphase):
+                f = buyphase[k]
+                k += 1
+                c_now, u_now = f["cash_after"], f["units_after"]
+                if f["kind"] == "stock" and f.get("order_id") == o["id"]:
+                    break
             continue
-        sh[f["code"]] = sh.get(f["code"], 0) + (f["qty"] if f["side"] == "buy" else -f["qty"])
-    return sh
+        if o["status"] != "skipped" or o.get("why") != "현금부족":
+            continue
+        sk = skip_of.get(o["id"])
+        if sk is None or not _isnum(sk.get("price")) or not _isnum(sk.get("need")) or not _isnum(sk.get("avail")):
+            continue                                   # L12·L14 가 따로 잡는다
+        avail = c_now + u_now * u_net if arm == "A1" else c_now
+        n = shares_within_cap(start_cash, cap, sk["price"], fee, slip)
+        e = sk["price"] * (1 + slip)
+        need = e * n + e * n * fee
+        if not (_cash_ok(sk["need"], need) and _cash_ok(sk["avail"], avail)):
+            P("L12", f"현금부족 보류 {o['code']}: 기록 (필요 {sk['need']!r}, 가능 {sk['avail']!r}) ≠ 그날 체결 순서로 "
+                     f"다시 센 값 ({need!r}, {avail!r})", dt)
+        short = need > avail * (1 - h1.SHORT_MARGIN) if arm == "A1" else need > avail
+        if not short:
+            P("L12", f"현금부족 보류 {o['code']} 인데 그 순간 다시 센 가능 금액 {avail!r} 으로 살 수 있었음", dt)
+        while k < len(buyphase) and buyphase[k]["kind"] == "idle" and buyphase[k].get("purpose") == f"fund:{o['code']}":
+            c_now, u_now = buyphase[k]["cash_after"], buyphase[k]["units_after"]     # (지수 판 뒤 실패 — L11)
+            k += 1
+    if k < len(buyphase):
+        P("L14", f"매수 단계 체결 {len(buyphase) - k}건이 그날 처리한 매수 주문 순서와 맞지 않음", dt)
 
 
 def _check_stock_price(P, frames, f):
@@ -628,6 +729,16 @@ def check_ledger(market, arm, states, calendar=None, decisions=None, allowed=Non
         except (KeyError, TypeError, AttributeError, ValueError, IndexError) as e:
             out.add("L24", f"장부 모양이 깨져 점검을 끝낼 수 없음: {type(e).__name__}: {e}", arm, tname)
     return out.items
+
+
+def _delist_first_bars(st):
+    """{code: (등록 last_date, last_close, 등록 뒤 첫 처리 봉 날짜 또는 None)}."""
+    dates = [r["date"] for r in st["days"]]
+    out = {}
+    for ca in st["corp_actions"]:
+        if ca.get("kind") == "delist":
+            out[ca["code"]] = (ca["last_date"], ca["last_close"], next((x for x in dates if x > ca["last_date"]), None))
+    return out
 
 
 def check_pair(market, a0, a1, decisions=None) -> list:
@@ -657,10 +768,15 @@ def check_pair(market, a0, a1, decisions=None) -> list:
                     f = lx.get(e["code"])
                     if f is not None and (f.get("key") != e.get("key") or f.get("verdict") != e.get("verdict")):
                         out.add("L17", f"{e['code']} A0·A1 팀장 열쇠·판정이 다름", None, tname, r["date"])
-            delist_x = sorted((f["code"], f["date"]) for f in x["fills"] if f.get("purpose") == "delist")
-            delist_y = sorted((f["code"], f["date"]) for f in y["fills"] if f.get("purpose") == "delist")
-            if delist_x != delist_y:
-                out.add("L23", f"두 장부의 상장폐지 정리가 다름 {delist_x} vs {delist_y}", None, tname)
+            # L23: 두 장부의 상장폐지 등록과 '등록 뒤 첫 처리 봉'이 같아야 한다. 정리 체결 자체는 장부마다 그때
+            # 들고 있었는지에 따라 있거나 없다(A0·A1 보유는 갈릴 수 있음, 2b-1 검토 B-1) → 장부 점검이 따로 본다
+            first_x, first_y = _delist_first_bars(x), _delist_first_bars(y)
+            if first_x != first_y:
+                out.add("L23", f"두 장부의 상장폐지 등록·등록 뒤 첫 처리 봉이 다름 {first_x} vs {first_y}", None, tname)
+            split_x = [ca for ca in x["corp_actions"] if ca.get("kind") == "split"]
+            split_y = [ca for ca in y["corp_actions"] if ca.get("kind") == "split"]
+            if split_x != split_y:
+                out.add("L8", "두 장부의 분할 기록이 다름(분할은 장부 6개에 똑같이 적용해야 함)", None, tname)
     except (KeyError, TypeError, AttributeError, ValueError) as e:
         out.add("L24", f"장부 모양이 깨져 짝 점검을 끝낼 수 없음: {type(e).__name__}: {e}")
     return out.items

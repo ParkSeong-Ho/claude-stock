@@ -49,7 +49,7 @@ def make_frame(seed, base, dates, kr=False, code=None):
 
 class World:
     def __init__(self, market="us", codes=("AAA", "BBB"), *, start="2025-06-02", end="2026-04-30", bases=None,
-                 halts=None, crash=None, idle_base=500.0, seed0=100):
+                 halts=None, crash=None, idle_base=500.0, seed0=100, idle_crash=None):
         self.market = market
         kr = market == "kr"
         self.dates = [d.date().isoformat() for d in pd.bdate_range(start, end)]
@@ -77,6 +77,13 @@ class World:
             self.halt_dates[code] = {d.date().isoformat() for d in df.index[df["Volume"] == 0]}
         self.idle_code = h1.idle_code(market)
         self.idle = make_frame(9, idle_base if not kr else 400.0, self.dates, False, self.idle_code)
+        if idle_crash:                              # 대기 자산(지수)이 그날 종가부터 mult 배
+            day, mult = idle_crash
+            ts = pd.Timestamp(day)
+            self.idle.loc[ts, "Close"] = self.idle.loc[ts, "Close"] * mult
+            after = self.idle.index > ts
+            for col in ("Open", "High", "Low", "Close"):
+                self.idle.loc[after, col] = self.idle.loc[after, col] * mult
 
     def idle_bar(self, t):
         row = self.idle.loc[pd.Timestamp(t)]
@@ -199,7 +206,7 @@ class Runner:
         self.states = h1.new_ledgers(self.market, S, code_hash=code_hash, env=self.env)
         self.log = h1.DecisionLog(log_path)
         self.results = []
-        self.delist = {}
+        self.delist = None          # 상장폐지 정보는 장부 corp_actions 에서(2b-1 검토 B-4). 주면 같은지 확인만
 
     def bar(self, t, *, frames=None, states=None, idle=None, **kw):
         w = self.world

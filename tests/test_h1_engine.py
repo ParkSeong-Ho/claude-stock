@@ -303,12 +303,24 @@ def test_T_A1_4_경계_여유_위아래(rel):
     assert st["fills"] == [] and st["wallet"].holdings["SPY"].shares == u_no
 
 
-def test_T_A1_4_지수_판_뒤_매수_실패는_L11_종료코드2(monkeypatch):
+def test_T_A1_4_지수_판_뒤_매수_실패는_L11(monkeypatch):
+    """억지로 지수를 모자라게 팔면 매수가 실패 → 예외로 멈추지 않고 L11 을 적는다(2b-1 검토 B-3)."""
     monkeypatch.setattr(h1, "SHORT_MARGIN", -1e-6)           # 일부러 모자라게 팔게 만든다
     st = hand_state(cash=0.0, units=1000.0, pending=[("XYZ", "매수")])
-    with pytest.raises(h1.H1LogicError) as e:
-        do_fill(st, prices={"XYZ": 100.0})
-    assert e.value.code == "L11" and e.value.exit_code == 2
+    day, _ = do_fill(st, prices={"XYZ": 100.0})
+    assert [p.code for p in day.problems] == ["L11"] and day.problems[0].level == "L"
+    assert "XYZ" not in st["positions"] and st["orders"][0]["status"] == "skipped"
+
+
+def test_T_A1_4_지수_판_뒤_매수_실패면_run_bar_는_저장_금지_결과와_지문(monkeypatch, tmp_path):
+    """봉 전체로: L11 이 있으면 ok=False 지만 처리 뒤 장부와 내용 지문은 있다(errors.jsonl 의 '저장하려던 지문')."""
+    sc = hs.scenario_a(tmp_path / "log.jsonl", upto=0)
+    monkeypatch.setattr(h1, "SHORT_MARGIN", -1e-6)
+    res = sc.bar(sc.D[1])
+    assert not res.ok and {p.code for p in res.errors} >= {"L11"}
+    assert isinstance(res.fingerprint, str) and len(res.fingerprint) == 64
+    assert res.fingerprint == h1.ledger_fingerprint(res.states)
+    assert all(p.arm == "A1" for p in res.errors if p.code == "L11")
 
 
 # ======================= T-A1-5 =======================
@@ -356,11 +368,11 @@ def test_T_A1_5_줄임_1e12_실패면_1e9():
     assert hx(st["fills"][-1]["qty"]) == hx(5000.0 / unit * (1 - 1e-9))
 
 
-def test_T_A1_5_줄임_셋_다_실패면_오류():
+def test_T_A1_5_줄임_셋_다_실패면_L11():
     st, fw = _flaky_state(3)
-    with pytest.raises(h1.H1LogicError) as e:
-        do_fill(st)
-    assert len(fw.tried) == 3 and e.value.code == "L11"
+    day, _ = do_fill(st)
+    assert len(fw.tried) == 3 and [p.code for p in day.problems] == ["L11"]
+    assert st["wallet"].cash == 5000.0 and st["fills"] == []
 
 
 # ======================= T-A1-6 =======================
@@ -1133,10 +1145,11 @@ def test_h1_은_주문_모듈을_읽지_않는다():
 
 def test_run_bar_거절_조건(sc_a):
     t = sc_a.D[8]
-    with pytest.raises(h1.H1LogicError):                 # 이미 처리한 봉
+    with pytest.raises(h1.H1PreconditionError):          # 이미 처리한 봉 → 사전 조건(L 아님)
         sc_a.bar(sc_a.D[7])
-    with pytest.raises(h1.H1LogicError):                 # 앞 거래일이 장부 last_date 와 다름(빠진 봉)
+    with pytest.raises(h1.H1PreconditionError):          # 앞 거래일이 장부 last_date 와 다름(빠진 봉)
         sc_a.bar(sc_a.D[9], prev_cal_date=sc_a.D[8])
+    assert issubclass(h1.H1PreconditionError, ValueError) and not issubclass(h1.H1PreconditionError, h1.H1LogicError)
     frames = {c: (f[f.index != pd.Timestamp(t)] if c == "BBB" else f) for c, f in sc_a.world.frames.items()}
     with pytest.raises(h1.H1DataProblem) as e:           # 보유 종목 t 행 없음(정지 아님) → D3
         sc_a.bar(t, frames=frames)
@@ -1296,19 +1309,30 @@ def test_R2_식_대조_시나리오_A_모든_날_모든_장부(sc_a):
 
 # ======================= R14: 평가 가격표 =======================
 
-def test_R14_가격표에_보유_종목이_빠지면_멈춘다():
+def copy_state(st):
+    blob = json.dumps(h1.ledger_to_json(st, "us"), ensure_ascii=False)
+    return h1.ledger_from_json(json.loads(blob), "us")
+
+
+def _r14_day():
+    return h1.H1Day("us", "A1", h1.IdleBar("SPY", T2, 500.0, 501.0), lambda *a: {}, start_date="2026-02-02",
+                    prev_cal_date=T1)
+
+
+def test_R14_가격표에_보유_종목이_빠지면_L7():
+    """평가 가격표 문제는 예외 대신 L7 로 적고 하루 기록은 남긴다(2b-1 검토 B-3)."""
     st = hand_state(arm="A1", cash=0.5, units=10.0, positions={"AAA": (5, 100.0)})
-    day = h1.H1Day("us", "A1", h1.IdleBar("SPY", T2, 500.0, 501.0), lambda *a: {}, start_date="2026-02-02",
-                   prev_cal_date=T1)
     w = st["wallet"]
-    with pytest.raises(h1.H1LogicError) as e:          # 주식 가격 없음 → 평균 매입가로 평가될 뻔
-        day.close_day(st, "스프린터", T2, {"SPY": 501.0}, w.value({"SPY": 501.0}))
-    assert e.value.code == "L7"
-    with pytest.raises(h1.H1LogicError):               # 지수 종가가 IdleBar 와 다름
-        day.close_day(st, "스프린터", T2, {"SPY": 499.0, "AAA": 101.0}, w.value({"SPY": 499.0, "AAA": 101.0}))
-    with pytest.raises(h1.H1LogicError):               # 넘겨받은 평가액이 현금+주식+지수와 다름
-        day.close_day(st, "스프린터", T2, {"SPY": 501.0, "AAA": 101.0}, 1.0)
+    for prices, value in (({"SPY": 501.0}, w.value({"SPY": 501.0})),                     # 주식 가격 없음(R14)
+                          ({"SPY": 499.0, "AAA": 101.0}, w.value({"SPY": 499.0, "AAA": 101.0})),   # 지수 종가 다름
+                          ({"SPY": 501.0, "AAA": 101.0}, 1.0)):                          # 평가액이 다름
+        s2 = copy_state(st)
+        day = _r14_day()
+        day.close_day(s2, "스프린터", T2, prices, value)
+        assert "L7" in {p.code for p in day.problems} and len(s2["days"]) == 1
+    day = _r14_day()
     day.close_day(st, "스프린터", T2, {"SPY": 501.0, "AAA": 101.0}, w.value({"SPY": 501.0, "AAA": 101.0}))
+    assert day.problems == []
     row = st["days"][-1]
     assert row["marks"] == {"AAA": 101.0} and row["value"] == 0.5 + 5 * 101.0 + 10.0 * 501.0
     assert row["idle_value"] == 10.0 * 501.0 and row["stock_value"] == 505.0

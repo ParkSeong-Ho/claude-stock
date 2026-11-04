@@ -11,6 +11,7 @@ import math
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -20,6 +21,7 @@ import analyst      # noqa: E402
 import h1           # noqa: E402
 import h1_check     # noqa: E402
 import h1_synth as hs  # noqa: E402
+import main         # noqa: E402
 
 L_REQUIRED = tuple(f"L{i}" for i in range(1, 24))
 
@@ -476,3 +478,203 @@ def test_판정_기록_없이도_거짓_양성_없음(bases):
         probs += h1_check.check_ledger(b.market, arm, b.states[arm], b.calendar, None, None)
     probs += h1_check.check_pair(b.market, b.states["A0"], b.states["A1"], None)
     assert h1_check.errors(probs) == [], [(p.code, p.detail) for p in probs]
+
+
+# ======================= 2b-1 독립 검토(docs/h1-review-2b1.md) 반영: B-1·B-6·B-7 점검 시험 =======================
+FEE, SLIP = 0.001, 0.0005
+
+
+def all_problems(market, states, calendar=None, log=None, allowed=None, frames=None):
+    p = []
+    for arm in h1.ARMS:
+        p += h1_check.check_ledger(market, arm, states[arm], calendar, log, allowed, frames=frames)
+    p += h1_check.check_pair(market, states["A0"], states["A1"], log)
+    return p
+
+
+def lcodes(problems):
+    return {p.code for p in h1_check.errors(problems)}
+
+
+def jcopy(states, market="us"):
+    return json.loads(json.dumps({a: {t: h1.ledger_to_json(st, market) for t, st in by.items()}
+                                  for a, by in states.items()}, ensure_ascii=False))
+
+
+def register_delist(states, code, last_date, last_close):
+    for arm in h1.ARMS:
+        for tn in h1.TRAINERS:
+            states[arm][tn]["corp_actions"].append({"kind": "delist", "code": code, "last_date": last_date,
+                                                    "last_close": last_close, "source": "시험", "at": "시험"})
+
+
+@pytest.fixture(scope="module")
+def sc_a5(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(analyst, "analyze_logged", lambda *a, **k: (_ for _ in ()).throw(AssertionError("claude")))
+        return hs.scenario_a(tmp_path_factory.mktemp("a5") / "log.jsonl", upto=5)
+
+
+# ======================= B-1 한쪽만 보유한 상장폐지 =======================
+
+def _plan_one_side(D):
+    return {"마라토너": {"buy": [("AAA", D[0]), ("BBB", D[0]), ("CCC", D[1])]}}
+
+
+@pytest.fixture(scope="module")
+def one_side(tmp_path_factory):
+    """지수가 D1 종가부터 반토막 → D2 시가에 A0 마라토너는 CCC 를 사고 A1 은 '현금 부족' 보류.
+    CCC 를 D2 마지막 거래일로 상장폐지 등록 → D3 에 A0 만 정리한다(둘 다 규칙대로)."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(analyst, "analyze_logged", lambda *a, **k: (_ for _ in ()).throw(AssertionError("claude")))
+        w = hs.world_a(idle_crash=("2026-02-03", 0.5))
+        sc = hs.scenario(w, hs.S_A, _plan_one_side, tmp_path_factory.mktemp("os") / "log.jsonl", upto=2,
+                         leader_mode="replay")
+        D = sc.D
+        assert "CCC" in sc.states["A0"]["마라토너"]["positions"] and "CCC" not in sc.states["A1"]["마라토너"]["positions"]
+        P = round(w.close("CCC", D[2]) * 0.7, 4)
+        register_delist(sc.states, "CCC", D[2], P)
+        frames = {c: f for c, f in w.frames.items() if c != "CCC"}
+        sc.step(D[3], frames=frames)
+        sc.step(D[4], frames=frames)
+    return sc, P
+
+
+def test_B1_한쪽만_보유한_상장폐지는_정상(one_side):
+    sc, P = one_side
+    D = sc.D
+    a0, a1 = sc.states["A0"]["마라토너"], sc.states["A1"]["마라토너"]
+    assert [(f["code"], f["date"], f["price"]) for f in a0["fills"] if f["purpose"] == "delist"] == [("CCC", D[3], P)]
+    assert [f for f in a1["fills"] if f["purpose"] == "delist"] == []
+    assert lcodes(all_problems("us", sc.states, sc.world.calendar(hs.S_A, D[4]), sc.runner.log)) == set()
+
+
+def test_B1_가진_장부의_정리_누락은_L23(one_side):
+    sc, _ = one_side
+    s = jcopy(sc.states)
+    st = s["A0"]["마라토너"]
+    st["fills"] = [f for f in st["fills"] if f["purpose"] != "delist"]
+    assert "L23" in lcodes(all_problems("us", s, None, sc.runner.log))
+
+
+def test_B1_두_장부의_등록이_다르면_짝_점검_L23(one_side):
+    """A1 의 등록 last_date 만 하루 앞당김 → A1 혼자 보면 규칙대로(정리할 보유 없음)지만 두 장부의 '첫 처리 봉'이 다름."""
+    sc, _ = one_side
+    s = jcopy(sc.states)
+    for ca in s["A1"]["마라토너"]["corp_actions"]:
+        ca["last_date"] = sc.D[1]
+    alone = h1_check.check_ledger("us", "A1", s["A1"], None, sc.runner.log)
+    assert lcodes(alone) == set()
+    pair = h1_check.check_pair("us", s["A0"], s["A1"], sc.runner.log)
+    assert [p.code for p in h1_check.errors(pair)] == ["L23"]
+
+
+def test_B1_안_가진_장부에_정리_체결이_있으면_L23(one_side):
+    sc, _ = one_side
+    s = jcopy(sc.states)
+    f = next(f for f in s["A0"]["마라토너"]["fills"] if f["purpose"] == "delist")
+    s["A1"]["마라토너"]["fills"].append(dict(f))
+    assert "L23" in lcodes(h1_check.check_ledger("us", "A1", s["A1"], None, sc.runner.log))
+
+
+def test_B1_첫_처리_봉에_정리_대신_다른_매도면_L23(one_side):
+    """들고 있던 장부가 등록 뒤 첫 처리 봉에 '상장폐지 정리'가 아닌 다른 체결로 판 경우: 보유는 남지 않지만 정리 누락(L23)."""
+    sc, _ = one_side
+    s = jcopy(sc.states)
+    f = next(f for f in s["A0"]["마라토너"]["fills"] if f["purpose"] == "delist")
+    f["purpose"] = "order"
+    got = h1_check.errors(h1_check.check_ledger("us", "A0", s["A0"], None, sc.runner.log))
+    assert any(p.code == "L23" and "정리 체결이 없음" in p.detail for p in got)
+
+
+# B-6
+
+def _boundary_world(rel):
+    """파이오니어 상한을 100% 로 둔 장면에서 FFF 1주 필요 금액이 A1 의 'S+1 가능 금액 × (1 − rel)' 이 되게 시가를 고른다."""
+    w = hs.world_a()
+    d1 = w.at(hs.S_A, 1)
+    q = w.idle_bar(d1).open
+    unit = q * (1 + SLIP) * (1 + FEE)
+    u0 = 10000.0 / unit * (1 - 1e-12)
+    e0 = q * (1 + SLIP)
+    cash1 = 10000.0 - (e0 * u0 + e0 * u0 * FEE)
+    avail = cash1 + u0 * (q * (1 - SLIP) - q * (1 - SLIP) * FEE)
+    target = avail * (1 - rel)
+
+    def need(p):
+        n = h1.shares_within_cap(10000.0, 1.0, p, FEE, SLIP)
+        e = p * (1 + SLIP)
+        return n, e * n + e * n * FEE
+    lo, hi = 9000.0, 9999.0
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if need(mid)[1] < target else (lo, mid)
+    w.frames["FFF"].loc[pd.Timestamp(d1), "Open"] = hi
+    n, nd = need(hi)
+    assert n == 1
+    return w, avail, nd
+
+
+@pytest.mark.parametrize("rel,skipped", [(0.5e-9, True), (1.5e-9, False)])
+def test_B6_경계_보류_need_약_avail_1빼기_1e9(monkeypatch, tmp_path, rel, skipped):
+    monkeypatch.setitem(main.CONFIG["종목상한"], "파이오니어", 1.0)
+    w, avail, need = _boundary_world(rel)
+    assert (need > avail * (1 - 1e-9)) == skipped and need <= avail
+    plan = lambda D: {"파이오니어": {"buy": [("FFF", D[0])]}}       # noqa: E731
+    sc = hs.scenario(w, hs.S_A, plan, tmp_path / "log.jsonl", upto=2, leader_mode="replay")
+    a1 = sc.states["A1"]["파이오니어"]
+    a0 = sc.states["A0"]["파이오니어"]
+    assert "FFF" in a0["positions"]                                       # A0 는 현금으로 산다
+    if skipped:
+        sk = [s for s in a1["skips"] if s["kind"] == "현금부족"]
+        assert [s["code"] for s in sk] == ["FFF"] and sk[0]["need"] == need and sk[0]["avail"] == avail
+        assert not [f for f in a1["fills"] if f["purpose"].startswith("fund:")]
+    else:
+        assert "FFF" in a1["positions"]
+    probs = all_problems("us", sc.states, sc.world.calendar(hs.S_A, sc.D[2]), sc.runner.log)
+    assert h1_check.errors(probs) == [], [(p.code, p.detail) for p in probs]
+
+
+def test_B6_다시_센_가능_금액과_다른_기록은_L12(tmp_path, monkeypatch):
+    sc = hs.scenario_a(tmp_path / "log.jsonl", upto=4)
+    s = jcopy(sc.states)
+    sk = next(x for x in s["A1"]["마라토너"]["skips"] if x["kind"] == "현금부족")
+    sk["avail"] = sk["avail"] - 100.0                    # 기록만 보면 여전히 need > avail 이라 예전 L12 는 못 잡음
+    got = h1_check.check_ledger("us", "A1", s["A1"], None, sc.runner.log)
+    assert any(p.code == "L12" and "다시 센" in p.detail for p in got)
+
+
+def test_B6_매수가_매도보다_먼저면_L4(tmp_path):
+    sc = hs.scenario_a(tmp_path / "log.jsonl", upto=3)
+    D3 = sc.D[3]
+    s = jcopy(sc.states)
+    st = s["A0"]["스프린터"]
+    today = [f for f in st["fills"] if f["date"] == D3]
+    assert [(f["side"]) for f in today] == ["sell", "buy", "buy"]
+    rest = [f for f in st["fills"] if f["date"] != D3]
+    st["fills"] = rest + [today[1], today[0], today[2]]
+    assert "L4" in lcodes(h1_check.check_ledger("us", "A0", s["A0"], None, sc.runner.log))
+
+
+# B-7
+
+def test_B7_두_장부를_똑같이_틀린_판정은_장부_점검이_L17(sc_a5):
+    s = jcopy(sc_a5.states)
+    for arm in h1.ARMS:
+        row = next(r for r in s[arm]["마라토너"]["days"] if r["leader"])
+        row["leader"][0]["verdict"] = "veto" if row["leader"][0]["verdict"] != "veto" else "buy"
+    assert not h1_check.errors(h1_check.check_pair("us", s["A0"], s["A1"], sc_a5.runner.log))   # 짝은 같다
+    assert "L17" in lcodes(h1_check.check_ledger("us", "A0", s["A0"], None, sc_a5.runner.log))
+
+
+def test_B7_first_만_틀린_그림자_서킷은_L20(tmp_path):
+    w = hs.world_a(crash={"AAA": ("2026-02-04", 0.55), "BBB": ("2026-02-04", 0.55)})
+    sc = hs.scenario_a(tmp_path / "log.jsonl", upto=4, world=w)
+    s = jcopy(sc.states)
+    st = s["A0"]["마라토너"]
+    evs = [r["events"][0] for r in st["days"] if r["events"]]
+    assert len(evs) >= 2 and evs[0]["first"] is True
+    evs[0]["first"] = False
+    assert lcodes(h1_check.check_ledger("us", "A0", {"마라토너": st}, None, sc.runner.log)) == {"L20"}
+    evs[0]["first"], evs[1]["first"] = True, True
+    assert lcodes(h1_check.check_ledger("us", "A0", {"마라토너": st}, None, sc.runner.log)) == {"L20"}
