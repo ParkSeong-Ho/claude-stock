@@ -26,19 +26,35 @@ h1.py - H1 포워드 모의매매 엔진 (설계 docs/h1-forward-design.md 3판,
 Problem 으로(끝까지 못 가는 L 예외는 번호·지문을 붙임), 사전 조건 위반은 H1PreconditionError(L 아님), bad_verdict 폴백,
 DecisionLog(read_only), 엄격 읽기 보강, S 의 prev_cal_date 확인.
 
-다음 단계(2b-2)에서 붙일 것: 실행 명령(start·run·restart·corp-action·amend-rules·status), 파일 저장·커밋 지점(HEAD)·
-백업·잠금·관문(code_hash·env)·시세 받기(fetch)·자료 점검(D1·D2·D4~D7)·요약 출력. 여기서는 파일을 쓰지 않는다
-(판정 기록 추가만 예외 — 장부보다 먼저 디스크에 있어야 하므로, 설계 §3.6).
+단계 2b-2 "실행기"(이 파일 뒤쪽 '2b-2 실행기' 절): 사람이 치는 명령과 파일 저장.
+- 명령: python h1.py start|run|restart|corp-action|amend-rules|status --market us|kr …  (종료 코드는 설계 §3.9)
+- 경로(모두 state/h1 아래인지 확인), 잠금(state/h1/h1.lock, 최대 30분), 관문(code_hash·env 가 replay_pass.json 에 있나)
+- 시세 받기(fetch: 원본 → main.confirmed_bars → 확정 시세 + 국내 거래량 0 날짜), DataSource(운영/재현/시험 자료 바꿔 끼우기)
+- 자료 점검 D1·D2·D4·D5·D6·D7(D3 는 엔진 run_bar 가 봄), 커밋 지점(HEAD.json)·백업·엄격 읽기·L24
+- 일지: runs.jsonl·errors.jsonl·restarts.jsonl·changes.jsonl·<시장>/calendar.jsonl·<시장>/corp_actions.jsonl
+엔진 부분(run_bar 까지)은 파일을 쓰지 않는다(판정 기록 추가만 예외 — 장부보다 먼저 디스크에 있어야 하므로, 설계 §3.6).
 
 import 관계: h1 → team(그 밖의 운영 모듈) / team 은 h1 을 import 하지 않는다. h1_check 와 h1 은 서로를 모듈째로만
 import 한다(모듈을 읽는 순간에는 서로의 이름을 쓰지 않음 → 어느 쪽을 먼저 읽어도 됨).
 """
 from __future__ import annotations
 
+import argparse
+import errno
+import fcntl
 import hashlib
+import importlib
+import importlib.metadata
 import json
 import math
 import os
+import platform
+import shutil
+import sys
+import time
+import traceback
+import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime, timedelta
@@ -126,7 +142,8 @@ class H1DataProblem(Exception):
 
 
 class H1Refused(Exception):
-    """실행 거절 → 종료 코드 3·5·6·8 (code 속성). 2b-2 의 관문·잠금·밀린 봉·장부 없음이 쓴다."""
+    """실행 거절 → 종료 코드 3·5·6·8 (code 속성). 2b-2 의 관문·잠금·밀린 봉·장부 없음이 쓴다.
+    (2b-2 에서 더함) code 1 = 명령 인자가 잘못됨(설계 §3.9 에 없는 번호. 아무것도 바꾸지 않음)."""
 
     def __init__(self, code, msg):
         super().__init__(msg)
@@ -307,7 +324,7 @@ class IdleBar:
 
 @dataclass
 class Fetched:
-    """시세 받기 결과(받기 함수 fetch 는 2b-2). df = main.confirmed_bars 를 거친 확정 시세,
+    """시세 받기 결과(받기 함수 fetch 는 아래 2b-2 절). df = main.confirmed_bars 를 거친 확정 시세,
     halt_dates = 국내 원본에서 거래량 0 인 날짜(거래정지일). 미국은 빈 집합."""
     df: object
     halt_dates: frozenset
@@ -1495,3 +1512,1855 @@ def run_bar(market, t, states, frames, universe, idle: IdleBar, *, decisions: De
     return BarResult(date=t, states=after, problems=problems, lines=lines, found=found, used=used, mode=mode,
                      late=late, llm_calls=leader.llm_calls, late_calls=leader.late_calls, new_records=new_records,
                      fingerprint=_safe_fingerprint(after))
+
+
+# =====================================================================================================
+# ============================ 2b-2 실행기 (설계 §2.3 준비 1~10, §2.5, §3.3, §3.7, §3.9) ============================
+# =====================================================================================================
+#
+# 사람이 치는 명령(start·run·restart·corp-action·amend-rules·status)과 파일 저장을 맡는다.
+# 큰 흐름 (run 한 번)
+#   1 잠금 → 2 runs.jsonl 시작 줄 → 3 관문(code_hash·env 가 replay_pass.json 에 있나) → 4 장부 읽기(HEAD 와 sha256 비교,
+#   다르면 백업으로 되살림, 그래도 아니면 L24) → 5 대기 자산 시세(D1) → 7 종목 시세(D2·W4·W5) → 6 달력(D4·D5·D7) →
+#   8 소급 수정(D6) → 9 처리할 봉 정하기(없으면 0, 5봉 넘으면 6) → 10 봉마다 run_bar → 점검 통과면 커밋(백업 → 장부 6개 → HEAD)
+# 운영 장부(state/team_*.json, state/kr/)는 열지 않는다: team._load·team._save·main.load_state_file 을 부르지 않고,
+# 모든 경로는 h1_path 가 "H1 폴더 아래인지" 확인한다.
+
+EXIT_OK = 0
+EXIT_USAGE = 1          # 설계 §3.9 에 없는 번호(2b-2 에서 더함): 명령 인자가 잘못됨 → 아무것도 바꾸지 않음
+EXIT_LOGIC = 2          # 장부 논리 오류(L1~L24)
+EXIT_GATE = 3           # 재현 미통과 코드·환경, 또는 규칙 상수가 시작 때와 다름
+EXIT_DATA = 4           # 자료 문제(D1~D6)
+EXIT_LOCK = 5           # 잠금 30분 대기 초과
+EXIT_BACKLOG = 6        # 밀린 봉 5개 초과 → 창 실패
+EXIT_D7 = 7             # 기준 지수 늦음(앞 봉까지는 저장)
+EXIT_NO_LEDGER = 8      # 장부 없음(start 필요) / start·restart 거절
+EXIT_TEXT = {0: "정상", 1: "명령 인자가 잘못됨(아무것도 안 바뀜)", 2: "장부 논리 오류(L) — 그 봉 저장 안 함, 재시작 대상",
+             3: "재현을 통과하지 않은 코드·환경 또는 규칙이 시작 때와 다름 — 저장 안 함",
+             4: "자료 문제(D) — 그 봉 저장 안 함, 다음 실행이 다시", 5: "다른 H1 명령이 잠금 중(30분 초과)",
+             6: "밀린 봉 5개 초과 — 판정 창 실패(재시작 대상)", 7: "기준 지수 늦음(D7) — 처리할 수 있던 봉까지 저장",
+             8: "장부 없음(start 필요) 또는 start·restart 거절"}
+
+LOCK_POLL_S = 5.0                    # 잠금을 다시 시도하는 간격(초)
+_lock_clock = time.monotonic         # 잠금 대기 시계 — 시험에서 가짜 시계로 바꿔 끼운다
+_lock_sleep = time.sleep             # 잠금 대기 쉬기 — 시험에서 바꿔 끼운다(실제로 기다리지 않게)
+DESIGN_DOC = "docs/h1-forward-design.md"
+HEAD_KEYS = ("last_date", "files", "meta_sha256", "decision_log", "run_id", "written_at")
+META_KEYS = ("market", "start_date", "restart_no", "created_at", "rules", "universe_sha256", "code_hash_at_start",
+             "env_at_start", "design_doc_sha256", "ledger_breaker", "shadow_breaker")
+LEDGER_RELS = tuple(f"{arm}/team_{tn}.json" for arm in ARMS for tn in TRAINERS)    # 시장 폴더 기준 상대 경로
+META_REL = "meta.json"
+_DIST_NAMES = {"FinanceDataReader": ("finance-datareader", "FinanceDataReader")}
+
+
+# ============================ 경로 (F1: 모두 H1 폴더 아래) ============================
+
+def _root(root=None) -> Path:
+    """H1 폴더. None 이면 H1_DIR(부를 때의 값 — 시험에서 바꿔 끼울 수 있게).
+    운영 상태 폴더(team.STATE_DIR) 자체나 그 위 폴더는 받지 않는다(운영 state/kr/ 와 겹치지 않게)."""
+    base = Path(H1_DIR if root is None else root)
+    rb, op = base.resolve(), Path(team.STATE_DIR).resolve()
+    if rb == op or rb in op.parents:
+        raise ValueError(f"H1 폴더 {rb} 가 운영 상태 폴더 {op} 와 같거나 그 위예요(설계 F1)")
+    return base
+
+
+def h1_path(root, *parts) -> Path:
+    """root/parts… 경로. 조각에 '/'·'..' 이 있거나 (심볼릭 링크 등으로) 결과가 H1 폴더 밖이면 ValueError."""
+    base = _root(root)
+    for part in parts:
+        if not isinstance(part, str) or part in ("", ".", "..") or any(ch in part for ch in "/\\\0"):
+            raise ValueError(f"H1 경로 조각이 이상해요: {part!r}")
+    p = base.joinpath(*parts)
+    rb, rp = base.resolve(), p.resolve()
+    if rp != rb and rb not in rp.parents:
+        raise ValueError(f"H1 경로 {rp} 가 H1 폴더 {rb} 밖이에요(설계 F1)")
+    return p
+
+
+def _rel_path(root, base_parts, rel) -> Path:
+    return h1_path(root, *base_parts, *rel.split("/"))
+
+
+def market_dir(market, root=None) -> Path:
+    """state/h1/<market>/ — 장부 6개·meta·HEAD·calendar.jsonl·corp_actions.jsonl·backup/."""
+    return h1_path(root, _mkey(market))
+
+
+def ledger_path(market, arm, trainer, root=None) -> Path:
+    """장부 파일 state/h1/<market>/<A0|A1>/team_<트레이너>.json (F1). 모르는 장부·트레이너·H1 폴더 밖이면 ValueError."""
+    if arm not in ARMS:
+        raise ValueError(f"모르는 장부 {arm!r}")
+    if trainer not in TRAINERS:
+        raise ValueError(f"모르는 트레이너 {trainer!r}")
+    return h1_path(root, _mkey(market), arm, f"team_{trainer}.json")
+
+
+def universe_path(market, root=None) -> Path:
+    """고정 종목군 파일 state/h1/universe/<market>.json (Q7, 재시작해도 그대로)."""
+    return h1_path(root, "universe", f"{_mkey(market)}.json")
+
+
+def decisions_path(root=None) -> Path:
+    """팀장 판정 기록 state/h1/analyst_cache.jsonl (두 시장이 같이 쓴다)."""
+    return h1_path(root, "analyst_cache.jsonl")
+
+
+# ============================ 파일 쓰기·읽기 도움 ============================
+
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def _sha256_file(p) -> str | None:
+    try:
+        return _sha256_bytes(Path(p).read_bytes())
+    except OSError:
+        return None
+
+
+def _dump(obj) -> bytes:
+    """장부·HEAD·meta 파일 글자. float 는 repr 그대로(비트가 같으면 글자도 같음), NaN·inf 는 거절."""
+    return (json.dumps(obj, ensure_ascii=False, allow_nan=False, indent=1) + "\n").encode("utf-8")
+
+
+def _fsync_dir(d) -> None:
+    try:
+        fd = os.open(d, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _write_fsync(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """임시 파일(.tmp)에 다 쓰고 fsync → os.replace → 폴더 fsync. 쓰는 중 꺼져도 반쯤 쓴 파일이 남지 않는다."""
+    tmp = path.with_name(path.name + ".tmp")
+    _write_fsync(tmp, data)
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
+def _clean(obj):
+    """일지(JSONL)에 적을 수 있는 값으로: NaN·inf → 글자, 집합 → 정렬 목록, 그 밖의 객체 → 글자."""
+    if isinstance(obj, dict):
+        return {str(k): _clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return sorted(_clean(v) for v in obj)
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return repr(obj)
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return str(obj)
+
+
+def _append_line(path: Path, rec: dict) -> None:
+    """JSONL 한 줄 추가 + fsync (일지용)."""
+    line = (json.dumps(_clean(rec), ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        view = memoryview(line)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _append_log(root, name: str, rec: dict) -> None:
+    _append_line(h1_path(root, name), rec)
+
+
+def read_jsonl(path) -> list:
+    """일지 JSONL 읽기(너그럽게: 깨진 줄은 건너뜀 — 장부가 아니라 실행 기록이라서)."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    out = []
+    for raw in p.read_bytes().split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            rec = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+    return out
+
+
+def _read_log(root, name):
+    return read_jsonl(h1_path(root, name))
+
+
+def _parse_file(path: Path, what: str):
+    """장부·HEAD·meta 파일을 엄격하게 읽는다. 없음·UTF-8 아님·깨진 JSON·NaN → H1LogicError(L24)."""
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        raise H1LogicError(f"{what} 파일이 없어요 ({path.name})", code="L24")
+    except UnicodeDecodeError:
+        raise H1LogicError(f"{what} 글자가 깨졌어요(UTF-8 아님)", code="L24")
+    try:
+        return json_loads_strict(text)
+    except H1LogicError as e:
+        raise H1LogicError(f"{what}: {e}", code="L24")
+
+
+def _iso(t) -> str:
+    return _aware(t).isoformat(timespec="seconds")
+
+
+def _norm(obj):
+    """JSON 왕복한 모양(튜플 → 목록 등)으로 맞춰 비교하려고."""
+    return json.loads(json.dumps(obj, ensure_ascii=False, allow_nan=False))
+
+
+# ============================ 지문 · 관문 (§2.2 ②-3, §2.3 준비 3) ============================
+
+def code_hash(repo=None, files=CODE_FILES) -> tuple:
+    """코드 지문 (합친 sha256, {파일: sha256 또는 None}). 없는 파일은 None 으로 적어 '없다'는 사실도 지문에 들어간다.
+    repo 기본은 이 파일이 있는 폴더."""
+    base = Path(REPO if repo is None else repo)
+    per = {}
+    for f in files:
+        try:
+            per[f] = _sha256_bytes((base / f).read_bytes())
+        except FileNotFoundError:
+            per[f] = None
+    blob = json.dumps({"v": 1, "files": [[f, per[f]] for f in files]}, ensure_ascii=False, separators=(",", ":"))
+    return _sha256_bytes(blob.encode("utf-8")), per
+
+
+def _pkg_version(name):
+    for dist in _DIST_NAMES.get(name, (name,)):
+        try:
+            return importlib.metadata.version(dist)
+        except Exception:
+            pass
+    try:
+        v = getattr(importlib.import_module(name), "__version__", None)
+        return str(v) if v is not None else None
+    except Exception:
+        return None
+
+
+def env_info() -> dict:
+    """실행 환경 지문 재료: 파이썬 버전 + ENV_PACKAGES(pandas·numpy·ta·FinanceDataReader) 버전(모르면 None)."""
+    out = {"python": platform.python_version()}
+    for name in ENV_PACKAGES:
+        out[name] = _pkg_version(name)
+    return out
+
+
+def replay_pass_entries(root=None) -> list:
+    """state/h1/replay_pass.json 의 통과 기록 목록(없으면 빈 목록). 깨진 파일은 H1LogicError(L24)."""
+    p = h1_path(root, "replay_pass.json")
+    if not p.exists():
+        return []
+    data = _parse_file(p, "replay_pass.json")
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise H1LogicError("replay_pass.json 이 목록이 아니에요", code="L24")
+    return [e for e in data if isinstance(e, dict)]
+
+
+def check_gate(root=None, ch=None, env=None) -> set:
+    """관문(설계 §2.3 준비 3): (code_hash, env_key(env)) 가 replay_pass.json 에 없으면 H1Refused(3).
+    통과하면 L22 허용 목록 {(code_hash, env_key)} (통과 기록 전부)을 돌려준다."""
+    ch = code_hash()[0] if ch is None else ch
+    env = env_info() if env is None else env
+    try:
+        entries = replay_pass_entries(root)
+    except H1LogicError as e:
+        raise H1Refused(EXIT_GATE, f"재현 통과 기록(replay_pass.json)을 읽지 못함: {e}")
+    allowed = {(e.get("code_hash"), env_key(e.get("env"))) for e in entries}
+    if (ch, env_key(env)) not in allowed:
+        raise H1Refused(EXIT_GATE, f"재현(h1_replay.py)을 통과하지 않은 코드·환경이에요 (code_hash {ch[:12]}…, "
+                                   f"python {env.get('python')}, pandas {env.get('pandas')}, "
+                                   f"FinanceDataReader {env.get('FinanceDataReader')}) → 재현을 먼저 통과시키세요")
+    return allowed
+
+
+def allowed_fingerprints(root, gate, ch, env) -> set:
+    """L22 허용 목록. 관문 실행(gate=True)은 replay_pass 의 통과 기록, gate=False(재현·시험)는 지금 지문 하나(R2-2)."""
+    if gate:
+        return check_gate(root, ch, env)
+    return {(ch, env_key(env))}
+
+
+def _design_sha():
+    return _sha256_file(REPO / DESIGN_DOC)
+
+
+# ============================ 시세 받기 (§3.3 fetch, F4 대기 자산) ============================
+
+def fetched_from_raw(market, raw, now):
+    """원본 시세(fdr.DataReader 결과 모양) → Fetched (fetch 와 재현·시험의 가짜 자료가 같은 단계를 거치게 따로 둠).
+    단계는 main.load_prices 와 같다: 거래량 칸 이름 정리('거래량' → 'Volume') → main.confirmed_bars(now, 시장).
+    halt_dates = 국내 원본에서 거래량(Volume)이 0 인 날짜(그 행은 confirmed_bars 가 버림 = 거래정지일). 미국은 빈 집합.
+    원본이 비었거나 확정 봉이 하나도 없으면 None."""
+    mk = _mkey(market)
+    if raw is None or len(raw) == 0:
+        return None
+    df = raw
+    if "Volume" not in df.columns and "거래량" in df.columns:
+        df = df.rename(columns={"거래량": "Volume"})
+    halts = frozenset()
+    if mk == "kr" and "Volume" in df.columns:
+        halts = frozenset(d.date().isoformat() for d in df.index[df["Volume"] == 0])
+    out = main.confirmed_bars(df, now, mk)
+    if out is None or len(out) == 0:
+        return None
+    return Fetched(out, halts)
+
+
+def fetch(market, code, now):
+    """종목 시세 받기(설계 §3.3): 원본 fdr.DataReader(code, team.START) → 이름 정리 → main.confirmed_bars →
+    Fetched(확정 시세, 국내 거래량 0 날짜). 받기 실패·빈 자료면 None(부르는 쪽이 D2·W4·W5 로 판단)."""
+    mk = _mkey(market)
+    if mk == "kr" and not markets.code_ok("kr", code):
+        raise ValueError(f"'{code}' 는 국내 6자리 종목코드가 아니에요 (국내 시장에는 국내 종목만).")
+    try:
+        import FinanceDataReader as fdr
+        raw = fdr.DataReader(code, team.START)
+    except (Exception, SystemExit) as e:
+        print(f"    ({code} 시세 받기 실패: {type(e).__name__})", flush=True)
+        return None
+    return fetched_from_raw(mk, raw, now)
+
+
+def load_idle(market, now):
+    """대기 자산(SPY/KS200) 확정 시세 — main.load_benchmark 와 같은 길(국내는 allow_index 문, KS200 22:30 KST 규칙).
+    다른 점은 now(이번 실행의 시각)를 넘기는 것뿐. 실패하면 None (→ D1)."""
+    m = markets.MARKETS[_mkey(market)]
+    try:
+        if m.key == "us":
+            return main.load_prices(m.benchmark, team.START, now=now)
+        return main.load_prices(m.benchmark, team.START, now=now, market=m.key, allow_index=True)
+    except (Exception, SystemExit) as e:
+        print(f"    (대기 자산 {m.benchmark} 시세 받기 실패: {type(e).__name__})", flush=True)
+        return None
+
+
+@dataclass
+class DataSource:
+    """자료 받는 곳 (운영 = live_source, 재현·시험 = 가짜). 모든 시각은 시간대 있는 datetime.
+    benchmark(now) → 대기 자산 확정 시세 DataFrame 또는 None
+    fetch(code, now) → Fetched 또는 None
+    universe() → 종목 목록 (start 때 종목군 파일이 없을 때만 한 번 부름)
+    now() → 지금 시각"""
+    benchmark: object
+    fetch: object
+    universe: object
+    now: object
+
+
+def live_source(market) -> DataSource:
+    """운영 자료: main.load_benchmark 와 같은 대기 자산, fetch, 미국 screener.universe(40) / 국내 KR_UNIVERSE, 이 컴퓨터 시계."""
+    mk = _mkey(market)
+
+    def uni():
+        if mk == "us":
+            return list(screener.universe(N_UNIVERSE))
+        return list(markets.KR_UNIVERSE.values())
+
+    return DataSource(benchmark=lambda now: load_idle(mk, now), fetch=lambda code, now: fetch(mk, code, now),
+                      universe=uni, now=_local_now)
+
+
+# ============================ 잠금 (§2.3 준비 1) ============================
+
+class h1_lock:
+    """state/h1/h1.lock 잠금(fcntl.flock). 못 잡으면 LOCK_POLL_S 마다 다시 시도하고, 최대 LOCK_WAIT_S(30분) 뒤 H1Refused(5).
+    모든 명령이 같은 잠금을 쓴다. 기다림·시계는 모듈 변수 _lock_sleep·_lock_clock (시험에서 바꿔 끼움)."""
+
+    def __init__(self, root=None, wait_s=None):
+        self.root = _root(root)
+        self.wait_s = LOCK_WAIT_S if wait_s is None else wait_s
+        self.fd = None
+
+    def __enter__(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = h1_path(self.root, "h1.lock")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            deadline = _lock_clock() + self.wait_s
+            told = False
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as e:
+                    if e.errno not in (errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES):
+                        raise
+                if not told:
+                    print(f"  다른 H1 명령이 잠금 중이라 기다려요(최대 {self.wait_s / 60:.0f}분) …", flush=True)
+                    told = True
+                left = deadline - _lock_clock()
+                if left <= 0:
+                    raise H1Refused(EXIT_LOCK, f"다른 H1 명령이 잠금({path.name})을 {self.wait_s / 60:.0f}분 넘게 쥐고 있어요 "
+                                               "→ 잠시 뒤 다시. 계속되면 멈춘 python 이 있는지 확인")
+                _lock_sleep(min(LOCK_POLL_S, left))
+        except BaseException:
+            os.close(fd)
+            raise
+        self.fd = fd
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(self.fd)
+        self.fd = None
+        return False
+
+
+def _note_lock_timeout(root, command, market, err):
+    """잠금을 못 잡은 명령도 runs.jsonl 에 한 줄 남긴다(한 번의 write 라 다른 명령의 줄과 섞이지 않음)."""
+    try:
+        _append_log(root, "runs.jsonl", {"event": "lock_timeout", "command": command, "market": market,
+                                         "at": _iso(_local_now()), "exit_code": EXIT_LOCK, "message": str(err)})
+    except Exception:
+        pass
+    print(f"[H1 {market}] {command}: 종료 코드 {EXIT_LOCK} — {err}", flush=True)
+
+
+# ============================ 실행 일지 runs.jsonl · errors.jsonl (§3.7) ============================
+
+def _pdict(p):
+    return asdict(p) if hasattr(p, "__dataclass_fields__") else dict(p)
+
+
+class _RunLog:
+    """명령 한 번 = runs.jsonl 의 시작 줄 + 끝 줄 (명령·시장·시각·run_id·code_hash·env·mode·처리한 봉·종료 코드·메시지,
+    관문 거절·자료 멈춤·판정 기록 잘림·백업 되살림 포함)."""
+
+    def __init__(self, command, market, root, now_fn=None, args=None):
+        self.command = command
+        self.market = _mkey(market)
+        self.root = _root(root)
+        self.now_fn = now_fn or _local_now
+        t = self.now()
+        self.run_id = f"{t.strftime('%Y%m%dT%H%M%S')}-{self.market}-{command}-{uuid.uuid4().hex[:8]}"
+        self.args = dict(args or {})
+        self.bars, self.late_bars, self.commits = [], [], []
+        self.problems, self.notes = [], []
+        self.extra = {}
+        self.start_date = None
+        self.code_hash = self.env = self.mode = None
+        self.exit_code = None
+
+    def now(self):
+        try:
+            return _aware(self.now_fn())
+        except Exception:
+            return _local_now()
+
+    def begin(self, code_hash=None, env=None, mode=None):
+        self.code_hash, self.env, self.mode = code_hash, env, mode
+        _append_log(self.root, "runs.jsonl", {
+            "event": "start", "run_id": self.run_id, "command": self.command, "market": self.market,
+            "at": _iso(self.now()), "code_hash": code_hash, "env": env, "mode": mode, "args": self.args})
+
+    def note(self, msg):
+        self.notes.append(msg)
+        print(f"  ※ {msg}", flush=True)
+
+    def end(self, exit_code, message, quiet=False):
+        if self.exit_code is not None:
+            return
+        self.exit_code = exit_code
+        _append_log(self.root, "runs.jsonl", {
+            "event": "end", "run_id": self.run_id, "command": self.command, "market": self.market,
+            "at": _iso(self.now()), "exit_code": exit_code, "meaning": EXIT_TEXT.get(exit_code), "message": message,
+            "start_date": self.start_date, "code_hash": self.code_hash, "env": self.env, "mode": self.mode,
+            "bars": self.bars, "late_bars": self.late_bars, "commits": self.commits,
+            "problems": [_pdict(p) for p in self.problems], "notes": self.notes, **self.extra})
+        if not quiet:
+            print(f"[H1 {self.market}] {self.command} 끝: 종료 코드 {exit_code} — {EXIT_TEXT.get(exit_code, '?')}"
+                  + (f" ({message})" if message and exit_code != EXIT_OK else ""), flush=True)
+
+
+def _log_errors(log, date, problems, fingerprint, exc=None, tb=None):
+    """errors.jsonl: L 오류 한 건(시장·봉·문제 목록·저장하려던 장부 6개의 내용 지문(참고용)·run_id)."""
+    _append_log(log.root, "errors.jsonl", {
+        "at": _iso(log.now()), "run_id": log.run_id, "command": log.command, "market": log.market,
+        "start_date": log.start_date, "date": date,
+        "problems": [_pdict(p) for p in problems],
+        "fingerprint": fingerprint,
+        "fingerprint_note": "참고용: 저장하려던 장부 6개의 내용 지문(ledger_fingerprint, 설계 §2.2 ④-나). None 이면 지문 없음",
+        "exception": None if exc is None else {"type": type(exc).__name__, "message": str(exc),
+                                               "code": getattr(exc, "code", None)},
+        "traceback": tb, "code_hash": log.code_hash, "env": log.env})
+
+
+class _LFound(Exception):
+    """봉 처리·장부 읽기에서 찾은 L 오류(Problem 목록) → errors.jsonl·종료 코드 2."""
+
+    def __init__(self, date, problems, fingerprint):
+        super().__init__("; ".join(f"{p.code} {p.detail}" for p in h1_check.errors(problems))[:500])
+        self.date = date
+        self.problems = list(problems)
+        self.fingerprint = fingerprint
+
+
+def _on_error(log, e) -> int:
+    """명령 안에서 난 예외 → 종료 코드 (설계 §3.9) + 일지. L 은 errors.jsonl 에도 남긴다."""
+    mk = log.market
+    if isinstance(e, H1Refused):
+        code, msg = e.code, str(e)
+        print(f"  거절: {msg}", flush=True)
+    elif isinstance(e, H1DataProblem):
+        code = EXIT_D7 if e.kind == "D7" else EXIT_DATA
+        msg = str(e)
+        log.problems.append(h1_check.Problem("D", e.kind, mk, None, None, getattr(e, "date", None), msg))
+        print(f"  자료 문제 {msg} → 그 봉은 저장 안 함(재시작 아님). 다음 실행이 다시 해요", flush=True)
+    elif isinstance(e, H1PreconditionError):
+        code, msg = EXIT_DATA, f"사전 조건 어긋남(달력·자료 문제로 봄): {e}"
+        log.problems.append(h1_check.Problem("D", "PRE", mk, None, None, getattr(e, "date", None), str(e)))
+        print(f"  {msg} → 저장 안 함, 다음 실행이 다시", flush=True)
+    elif isinstance(e, _LFound):
+        code, msg = EXIT_LOGIC, f"장부 논리 오류: {e}"
+        _log_errors(log, e.date, e.problems, e.fingerprint)
+        print(f"  장부 논리 오류(L) — 그 봉 {e.date or ''} 은 저장 안 함. 문제:", flush=True)
+        for p in h1_check.errors(e.problems)[:20]:
+            print(f"    {p.code} {p.arm or ''}/{p.trainer or ''} {p.date or ''}: {p.detail}", flush=True)
+    elif isinstance(e, H1LogicError):
+        code = EXIT_LOGIC
+        msg = f"장부 논리 오류 {e.code or 'L?'}: {e}"
+        probs = list(getattr(e, "problems", None) or [])
+        probs.append(h1_check.Problem("L", e.code or "L24", mk, None, None, getattr(e, "date", None), str(e)))
+        _log_errors(log, getattr(e, "date", None), probs, getattr(e, "fingerprint", None), exc=e)
+        print(f"  {msg} → 저장 안 함. 고치고 재시작 대상(설계 §2.2 ⑤)", flush=True)
+    else:
+        code = EXIT_LOGIC
+        msg = f"예상 밖 오류 {type(e).__name__}: {e}"
+        _log_errors(log, getattr(e, "date", None), [h1_check.Problem("L", "L?", mk, None, None, None, msg)], None,
+                    exc=e, tb=traceback.format_exc())
+        print(f"  {msg} → 저장 안 함(종료 코드 2, 지문 없음). 로그와 errors.jsonl 을 확인하세요", flush=True)
+        traceback.print_exc()
+    log.end(code, msg)
+    return code
+
+
+def _count_starts(mk, root) -> int:
+    return sum(1 for r in _read_log(root, "runs.jsonl")
+               if r.get("event") == "end" and r.get("command") == "start" and r.get("market") == mk
+               and r.get("exit_code") == EXIT_OK)
+
+
+def _count_restarts(mk, root) -> int:
+    return sum(1 for r in _read_log(root, "restarts.jsonl") if r.get("market") == mk)
+
+
+# ============================ 고정 종목군 (Q7, §3.7) ============================
+
+def _universe_blob(mk, codes, at, env) -> bytes:
+    return _dump({"market": mk, "codes": list(codes), "n": len(codes), "fetched_at": at,
+                  "source": f"screener.universe({N_UNIVERSE})" if mk == "us" else "markets.KR_UNIVERSE",
+                  "fdr_version": (env or {}).get("FinanceDataReader") if mk == "us" else None})
+
+
+def _check_codes(mk, codes, what):
+    if not isinstance(codes, list) or not codes or len(set(codes)) != len(codes) \
+            or not all(isinstance(c, str) and markets.code_ok(mk, c) for c in codes):
+        raise ValueError(f"{what} 종목 목록 모양이 이상해요(비었음·중복·다른 시장 코드)")
+    return codes
+
+
+def read_universe(market, root=None):
+    """(목록, 파일 sha256) 또는 None(파일 없음). 깨졌거나 모양이 다르면 H1LogicError(L22)."""
+    mk = _mkey(market)
+    p = universe_path(mk, root)
+    if not p.exists():
+        return None
+    blob = p.read_bytes()
+    try:
+        d = json_loads_strict(blob.decode("utf-8"))
+        if not isinstance(d, dict) or d.get("market") != mk:
+            raise ValueError("시장이 다름")
+        codes = _check_codes(mk, d.get("codes"), "종목군 파일")
+    except (UnicodeDecodeError, ValueError, H1LogicError) as e:
+        raise H1LogicError(f"종목군 파일 {p.name} 이 깨졌거나 모양이 달라요: {e}", code="L22")
+    return list(codes), _sha256_bytes(blob)
+
+
+# ============================ 장부 읽기 (엄격) · 커밋 지점 (§2.5) ============================
+
+@dataclass
+class Loaded:
+    """읽은 한 시장: 장부 6개(메모리 모양)·meta·HEAD. restored = 백업으로 되살렸으면 그 백업 run_id."""
+    market: str
+    head: dict
+    meta: dict
+    states: dict
+    restored: str | None = None
+
+
+def _check_head(head):
+    if not isinstance(head, dict) or set(head) != set(HEAD_KEYS):
+        _bad("HEAD.json 칸이 다름")
+    try:
+        _check_iso(head["last_date"], "HEAD.last_date")
+    except ValueError as e:
+        _bad(str(e))
+    if not isinstance(head["files"], dict) or set(head["files"]) != set(LEDGER_RELS) \
+            or not all(isinstance(v, str) for v in head["files"].values()):
+        _bad("HEAD.json files 가 장부 6개와 다름")
+    if not isinstance(head["meta_sha256"], str):
+        _bad("HEAD.json meta_sha256 모양이 다름")
+    dl = head["decision_log"]
+    if not isinstance(dl, dict) or set(dl) != {"lines", "prefix_sha256"} or not isinstance(dl["lines"], int) \
+            or isinstance(dl["lines"], bool) or dl["lines"] < 0 or not isinstance(dl["prefix_sha256"], str):
+        _bad("HEAD.json decision_log 모양이 다름")
+    rid = head["run_id"]
+    if not isinstance(rid, str) or rid in ("", ".", "..") or any(ch in rid for ch in "/\\\0"):
+        _bad("HEAD.json run_id 모양이 다름")
+    if not isinstance(head["written_at"], str):
+        _bad("HEAD.json written_at 모양이 다름")
+
+
+def _check_meta(meta, mk):
+    if not isinstance(meta, dict) or set(meta) != set(META_KEYS):
+        _bad("meta.json 칸이 다름")
+    if meta["market"] != mk:
+        _bad(f"meta.json 시장 {meta['market']!r} ≠ {mk!r}")
+    try:
+        _check_iso(meta["start_date"], "meta.start_date")
+    except ValueError as e:
+        _bad(str(e))
+    if not isinstance(meta["rules"], dict) or not isinstance(meta["universe_sha256"], str):
+        _bad("meta.json rules·universe_sha256 모양이 다름")
+
+
+def _mismatched(root, base_parts, head) -> list:
+    """base(시장 폴더 또는 백업 폴더)의 장부 6개 + meta 중 HEAD 의 sha256 과 다른(또는 없는) 파일."""
+    bad = []
+    for rel in LEDGER_RELS + (META_REL,):
+        want = head["meta_sha256"] if rel == META_REL else head["files"][rel]
+        if _sha256_file(_rel_path(root, base_parts, rel)) != want:
+            bad.append(rel)
+    return bad
+
+
+def _head_digest(head):
+    return head["decision_log"]["lines"], head["decision_log"]["prefix_sha256"]
+
+
+def _parse_ledgers(mk, blobs: dict) -> dict:
+    states = {arm: {} for arm in ARMS}
+    for arm in ARMS:
+        for tn in TRAINERS:
+            rel = f"{arm}/team_{tn}.json"
+            try:
+                d = json_loads_strict(blobs[rel].decode("utf-8"))
+            except UnicodeDecodeError:
+                raise H1LogicError(f"장부 {rel} 글자가 깨졌어요(UTF-8 아님)", code="L24")
+            except H1LogicError as e:
+                raise H1LogicError(f"장부 {rel}: {e}", code="L24")
+            try:
+                states[arm][tn] = ledger_from_json(d, mk, arm, tn)
+            except H1LogicError as e:
+                raise H1LogicError(f"장부 {rel}: {e}", code="L24")
+    return states
+
+
+def load_market(market, root=None, *, repair=True) -> Loaded:
+    """한 시장을 엄격하게 읽는다(설계 §2.3 준비 4, §2.5 읽을 때).
+    - 시장 폴더가 없으면 H1Refused(8): start 필요.
+    - HEAD.json → 장부 6개 + meta.json 의 sha256 을 비교. 다르면(커밋 3과 4 사이에서 꺼짐) backup/<HEAD.run_id>/ 가
+      HEAD 와 맞을 때 그것으로 되살린다(repair=True 일 때만, 잠금 아래에서). 그 밖은 H1LogicError(L24).
+    - JSON 깨짐·NaN·형식(schema)·칸 모양이 다르면 H1LogicError(L24) — 새 지갑으로 덮지 않는다(할 일 3번).
+    - 여섯 장부의 last_date 가 HEAD.last_date 와, start_date 가 meta.start_date 와 같아야 한다(아니면 L24)."""
+    mk = _mkey(market)
+    mdir = market_dir(mk, root)
+    if not mdir.is_dir():
+        raise H1Refused(EXIT_NO_LEDGER, f"{mk} 장부가 없어요({mdir}) → 먼저 python h1.py start --market {mk}")
+    head = _parse_file(h1_path(root, mk, "HEAD.json"), "HEAD.json")
+    _check_head(head)
+    restored = None
+    bad = _mismatched(root, (mk,), head)
+    if bad:
+        bparts = (mk, "backup", head["run_id"])
+        bdir = h1_path(root, *bparts)
+        if repair and bdir.is_dir() and not _mismatched(root, bparts, head):
+            for rel in LEDGER_RELS + (META_REL,):
+                _write_atomic(_rel_path(root, (mk,), rel), _rel_path(root, bparts, rel).read_bytes())
+            restored = head["run_id"]
+            print(f"  장부 파일 {len(bad)}개가 HEAD 와 달라(앞 실행이 커밋 도중 꺼짐) backup/{head['run_id']}/ 로 되살렸어요",
+                  flush=True)
+        else:
+            raise H1LogicError(f"장부 파일 손상: {bad} 가 HEAD.json 과 다르고 backup/{head['run_id']}/ 도 HEAD 와 맞지 않음",
+                               code="L24")
+    if repair:                                      # 커밋 도중 남은 .tmp 정리(잠금 아래)
+        for tmp in list(mdir.glob("*.tmp")) + list(mdir.glob("A*/*.tmp")):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    blobs = {rel: _rel_path(root, (mk,), rel).read_bytes() for rel in LEDGER_RELS}
+    states = _parse_ledgers(mk, blobs)
+    meta = _parse_file(_rel_path(root, (mk,), META_REL), "meta.json")
+    _check_meta(meta, mk)
+    for arm, tn, st in _flat(states):
+        if st["last_date"] != head["last_date"]:
+            _bad(f"{arm}/{tn} last_date {st['last_date']} ≠ HEAD.last_date {head['last_date']}")
+        if st["start_date"] != meta["start_date"]:
+            _bad(f"{arm}/{tn} start_date {st['start_date']} ≠ meta.start_date {meta['start_date']}")
+    return Loaded(mk, head, meta, states, restored)
+
+
+def _prune_backups(root, mk, keep: Path):
+    bk = h1_path(root, mk, "backup")
+    dirs = [d for d in bk.iterdir() if d.is_dir() and not d.name.endswith(".tmp")]
+    dirs.sort(key=lambda d: (d.stat().st_mtime_ns, d.name))
+    extra = len(dirs) - BACKUPS_KEEP
+    for d in dirs:
+        if extra <= 0:
+            break
+        if d.resolve() == keep.resolve():
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        extra -= 1
+
+
+def _backup(root, mk, head) -> bool:
+    """커밋 2단계: 지금 장부 6개 + meta(= HEAD 상태)를 backup/<HEAD.run_id>/ 에 복사. 이미 있고 HEAD 와 맞으면 건너뜀.
+    임시 폴더에 다 쓴 뒤 이름을 바꾸므로 반쯤 만든 백업은 남지 않는다. 최근 BACKUPS_KEEP(10)개만 남긴다."""
+    rid = head["run_id"]
+    bparts = (mk, "backup", rid)
+    bdir = h1_path(root, *bparts)
+    if bdir.is_dir() and not _mismatched(root, bparts, head):
+        return False
+    tparts = (mk, "backup", rid + ".tmp")
+    tdir = h1_path(root, *tparts)
+    if tdir.exists():
+        shutil.rmtree(tdir)
+    for rel in LEDGER_RELS + (META_REL,):
+        _write_fsync(_rel_path(root, tparts, rel), _rel_path(root, (mk,), rel).read_bytes())
+    if bdir.exists():
+        shutil.rmtree(bdir)
+    os.replace(tdir, bdir)
+    _fsync_dir(bdir.parent)
+    _prune_backups(root, mk, bdir)
+    return True
+
+
+def _write_set(root, base_parts, blobs: dict) -> None:
+    """커밋 3단계: 파일들을 .tmp 로 다 쓰고 fsync 한 뒤 하나씩 os.replace (그다음 폴더 fsync)."""
+    pairs = []
+    for rel, blob in blobs.items():
+        p = _rel_path(root, base_parts, rel)
+        tmp = p.with_name(p.name + ".tmp")
+        _write_fsync(tmp, blob)
+        pairs.append((tmp, p))
+    for tmp, p in pairs:
+        os.replace(tmp, p)
+    for d in sorted({str(p.parent) for _, p in pairs}):
+        _fsync_dir(d)
+
+
+def _ledger_blobs(states, mk) -> dict:
+    return {f"{arm}/team_{tn}.json": _dump(ledger_to_json(states[arm][tn], mk)) for arm in ARMS for tn in TRAINERS}
+
+
+def _new_head(states, blobs, meta_blob, decisions, run_id, written_at) -> dict:
+    lasts = {st["last_date"] for _, _, st in _flat(states)}
+    if len(lasts) != 1:
+        raise H1LogicError(f"여섯 장부의 last_date 가 다름 {sorted(map(str, lasts))}", code="L16")
+    n, sha = decisions.prefix_digest()
+    return {"last_date": lasts.pop(), "files": {rel: _sha256_bytes(b) for rel, b in blobs.items()},
+            "meta_sha256": _sha256_bytes(meta_blob), "decision_log": {"lines": n, "prefix_sha256": sha},
+            "run_id": run_id, "written_at": written_at}
+
+
+def commit(root, market, states, meta, decisions, run_id, written_at, head_old) -> tuple:
+    """커밋 순서(설계 §2.5): 1 판정 기록은 이미 디스크에(엔진이 묻는 순간 append) → 2 backup/<옛 HEAD.run_id>/ →
+    3 장부 6개(+ 바뀐 meta) .tmp → fsync → os.replace → 4 HEAD.json(.tmp → fsync → replace). 4 에서 그 봉이 저장된다.
+    돌려줌: (새 HEAD, 장부 6개 파일 글자)."""
+    mk = _mkey(market)
+    if head_old is not None:
+        _backup(root, mk, head_old)
+    blobs = _ledger_blobs(states, mk)
+    meta_blob = _dump(meta)
+    files = dict(blobs)
+    if _sha256_file(_rel_path(root, (mk,), META_REL)) != _sha256_bytes(meta_blob):
+        files[META_REL] = meta_blob
+    _write_set(root, (mk,), files)
+    head = _new_head(states, blobs, meta_blob, decisions, run_id, written_at)
+    _write_atomic(h1_path(root, mk, "HEAD.json"), _dump(head))
+    return head, blobs
+
+
+# ============================ 자료 점검 D1·D4·D5·D6·D7 (§4 D) ============================
+
+def _settle_time(mk, day: str) -> datetime:
+    """봉 day 의 대기 자산 확정 시각(국내 KS200 22:30 KST, 미국 SPY 16:15 ET)."""
+    m = markets.MARKETS[mk]
+    hh, mm = (int(x) for x in (m.bench_cutoff or m.close_cutoff).split(":"))
+    d = _date.fromisoformat(day)
+    return datetime(d.year, d.month, d.day, hh, mm, tzinfo=ZoneInfo(m.tz))
+
+
+def calendar_check(market, cal_all, states, fetched, universe, now, prev_line=None) -> tuple:
+    """준비 6 달력 점검. cal_all = 대기 자산 확정 시세 날짜 전부(오름차순). states None 이면 start(S = 마지막 봉).
+    돌려줌: (이번 달력 = S 전 거래일 ~ 마지막 봉, W 경고 목록, D7 Problem 또는 None). D4·D5 는 H1DataProblem.
+    - D4 달력 줄어듦: 이미 처리한 날짜(하루 기록 날짜와 그 prev_cal_date, calendar.jsonl 마지막 정상 줄 중 last_date 이하)가
+      새 달력에 없음. 또 이미 처리한 구간 S 전 거래일 ~ last_date 에 새 날짜가 끼어듦(설계 D4 를 넓혀 해석 — 보고서 참고)
+    - D5 달력 구멍: (last_date, 마지막 봉] 에 달력에 없는 날인데 받은 종목군의 절반 이상이 거래함
+    - D7 기준 지수 늦음: 확인용 대형주의 최신 확정 봉 > 달력 마지막 봉, 그리고 지금이 그 봉의 기준 지수 확정 시각 뒤
+    - W5 확인용 대형주 시세를 못 받음(D7 판단 불가)"""
+    mk = _mkey(market)
+    warns = []
+    if states is None:
+        if len(cal_all) < 2:
+            raise H1DataProblem("D1", f"대기 자산 {idle_code(mk)} 확정 봉이 2개보다 적어요(S 전 거래일 없음)")
+        cal = list(cal_all[-2:])
+        last = cal[0]
+    else:
+        st0 = states["A0"][TRAINERS[0]]
+        days, last = st0["days"], st0["last_date"]
+        prev_s = days[0]["prev_cal_date"]
+        ref = {prev_s} | {r["date"] for r in days} | {r["prev_cal_date"] for r in days if r["prev_cal_date"]}
+        if prev_line:
+            ref |= {d for d in prev_line.get("dates", []) if isinstance(d, str) and d <= last}
+        have = set(cal_all)
+        missing = sorted(d for d in ref if d not in have)
+        if missing:
+            raise H1DataProblem("D4", f"달력 줄어듦: 이미 처리한 날짜 {missing[:5]}{' …' if len(missing) > 5 else ''} 가 "
+                                      f"새로 받은 {idle_code(mk)} 시세에 없음(FDR 연도 파일 누락 등)")
+        cal = list(cal_all[cal_all.index(prev_s):])
+        done = [prev_s] + [r["date"] for r in days]
+        head_part = [d for d in cal if d <= last]
+        if head_part != done:
+            extra = sorted(set(head_part) - set(done))
+            raise H1DataProblem("D4", f"달력 바뀜: 이미 처리한 구간 {prev_s}~{last} 에 새 날짜 {extra[:5]} 가 생김")
+    # D5
+    have = set(cal)
+    lo, hi = last, cal[-1]
+    uni = [c for c in universe if fetched.get(c) is not None]
+    if uni and hi > lo:
+        counts = Counter()
+        for c in uni:
+            for d in _dates_of(fetched[c].df):
+                if lo < d <= hi and d not in have:
+                    counts[d] += 1
+        holes = sorted(d for d, n in counts.items() if n >= CAL_HOLE_RATIO * len(uni))
+        if holes:
+            raise H1DataProblem("D5", f"달력 구멍: {holes[:5]} 에 종목군 {len(uni)}개 중 절반 이상이 거래했는데 "
+                                      f"{idle_code(mk)} 시세에 그 날이 없음")
+    # D7
+    d7 = None
+    probes = CAL_PROBE[mk]
+    got = {c: fetched.get(c) for c in probes}
+    for c in probes:
+        if got[c] is None:
+            warns.append(h1_check.Problem("W", "W5", mk, None, None, None,
+                                          f"확인용 대형주 {c} 시세를 못 받음 → 기준 지수 늦음(D7) 판단 불가"))
+    lasts = [_dates_of(f.df)[-1] for f in got.values() if f is not None]
+    if lasts:
+        latest = max(lasts)
+        if latest > cal[-1] and _aware(now) >= _settle_time(mk, latest):
+            d7 = h1_check.Problem("D", "D7", mk, None, None, latest,
+                                  f"기준 지수 늦음: 확인용 대형주에 {latest} 확정 봉이 있는데 {idle_code(mk)} 마지막 봉은 "
+                                  f"{cal[-1]} (확정 시각 {_settle_time(mk, latest).isoformat(timespec='minutes')} 지남)")
+    return cal, warns, d7
+
+
+def _open_on(df, d):
+    if df is None:
+        return None
+    row = _row_at(df, d)
+    if row is None:
+        return None
+    try:
+        v = float(row["Open"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _close_on(df, d):
+    if df is None:
+        return None
+    row = _row_at(df, d)
+    if row is None:
+        return None
+    try:
+        v = float(row["Close"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _last_close_le(df, d):
+    """그 날짜 이하 마지막 확정 종가(정지일이면 정지 전 마지막 종가)."""
+    if df is None:
+        return None
+    cut = cut_frame(df, d)
+    if cut is None or len(cut) == 0:
+        return None
+    v = float(cut["Close"].iloc[-1])
+    return v if math.isfinite(v) else None
+
+
+def _adjusted(corp_actions, code, d, field, value):
+    """장부에 적힌 값 → 기업 행위를 반영한 '지금 시세에서 기대하는 값'(설계 D6).
+    corp_actions 를 적힌 순서대로: 분할(그 날짜 < 분할 기준일이면 ÷ r), 정정 확정(같은 날짜·칸이면 새 값)."""
+    for ca in corp_actions:
+        if ca.get("code") != code:
+            continue
+        if ca.get("kind") == "split" and d < ca["date"]:
+            value = value / ca["r"]
+        elif ca.get("kind") == "correction":
+            for it in ca.get("items") or []:
+                if it.get("date") == d and it.get("field") == field:
+                    value = it.get("new")
+    return value
+
+
+def retro_compare(market, states, dfs: dict, idle_df, codes=None) -> list:
+    """소급 수정 비교 목록(설계 §4 D6). 비교 하나 = {code, date, field, old(장부에서 기대), new(새 시세), where, same}.
+    - 보유 종목(상장폐지 등록 제외): 지금 보유의 매수 체결가(fills.price) vs 새 시세의 그 날짜 Open(field "open"),
+      최근 RETRO_DAYS(5)일 하루 기록 marks vs 새 시세의 그 날짜 이하 마지막 확정 종가(field "close")
+    - 대기 자산: 최근 5일 하루 기록 idle_open·idle_close vs 새 시세의 그 날짜 Open·Close(field "open"·"close")
+    - 비교 전에 기업 행위(분할·정정 확정)를 반영한다. codes 를 주면 그 종목만."""
+    mk = _mkey(market)
+    idle = idle_code(mk)
+    regs = delist_registrations(states)
+    seen = {}
+
+    def add(code, d, field, old, new, where):
+        key = (code, d, field)
+        if key in seen:
+            return
+        same = (old is not None and new is not None and _isnum(old)
+                and abs(old - new) <= RETRO_TOL * max(abs(old), abs(new)))
+        seen[key] = {"code": code, "date": d, "field": field, "old": old, "new": new, "where": where, "same": same}
+
+    for arm, tn, st in _flat(states):
+        cas = st["corp_actions"]
+        for code in st["positions"]:
+            if code in regs or code == idle or (codes is not None and code not in codes):
+                continue
+            df = dfs.get(code)
+            buys = [f for f in st["fills"] if f["code"] == code and f["kind"] == "stock" and f["side"] == "buy"]
+            if buys:
+                f = buys[-1]
+                add(code, f["date"], "open", _adjusted(cas, code, f["date"], "open", f["price"]),
+                    _open_on(df, f["date"]), f"{arm}/{tn} 매수 체결가")
+            for row in st["days"][-RETRO_DAYS:]:
+                if code in row["marks"]:
+                    add(code, row["date"], "close", _adjusted(cas, code, row["date"], "close", row["marks"][code]),
+                        _last_close_le(df, row["date"]), f"{arm}/{tn} 평가 종가(marks)")
+    if codes is None or idle in codes:
+        st0 = states["A0"][TRAINERS[0]]
+        cas = st0["corp_actions"]
+        for row in st0["days"][-RETRO_DAYS:]:
+            d = row["date"]
+            add(idle, d, "open", _adjusted(cas, idle, d, "open", row["idle_open"]), _open_on(idle_df, d), "대기 자산 시가")
+            add(idle, d, "close", _adjusted(cas, idle, d, "close", row["idle_close"]), _close_on(idle_df, d),
+                "대기 자산 종가")
+    return sorted(seen.values(), key=lambda c: (c["code"], c["date"], c["field"]))
+
+
+def retro_problem(comps):
+    """비교 목록 → D6 H1DataProblem 또는 None. 한 종목의 모든 비교가 같은 비율로 다르면 '분할 의심(비율 r)'."""
+    bad = [c for c in comps if not c["same"]]
+    if not bad:
+        return None
+    msgs = []
+    for code in sorted({c["code"] for c in bad}):
+        mine = [c for c in comps if c["code"] == code]
+        diff = [c for c in mine if not c["same"]]
+        hint = ""
+        if len(diff) == len(mine) and all(_isnum(c["old"]) and _isnum(c["new"]) and c["new"] for c in mine):
+            ratios = [c["old"] / c["new"] for c in mine]
+            lo, hi = min(ratios), max(ratios)
+            if hi > 0 and (hi - lo) <= RETRO_TOL * hi:
+                hint = f" — 분할 의심(비율 r={(lo + hi) / 2:.6g}): 1차 출처 확인 뒤 corp-action --split"
+        c0 = diff[0]
+        msgs.append(f"{code} {len(diff)}곳 다름(예: {c0['date']} {c0['field']} 장부 {c0['old']!r} → 새 시세 {c0['new']!r},"
+                    f" {c0['where']}){hint}")
+    return H1DataProblem("D6", "소급 수정: " + "; ".join(msgs))
+
+
+# ============================ 실행 공통 도움 ============================
+
+def _idle_bar(mk, idle_df, t) -> IdleBar:
+    row = _row_at(idle_df, t)
+    if row is None:
+        raise H1DataProblem("D1", f"대기 자산 {idle_code(mk)} 에 {t} 행이 없어요")
+    try:
+        return IdleBar(idle_code(mk), t, float(row["Open"]), float(row["Close"]))
+    except (KeyError, TypeError, ValueError) as e:
+        raise H1DataProblem("D1", f"대기 자산 {idle_code(mk)} {t} 시가·종가를 읽지 못함 ({type(e).__name__})")
+
+
+def _bench(mk, source, now):
+    """준비 5: 대기 자산 확정 시세. 못 받거나(None·빈 자료·예외) → H1DataProblem D1."""
+    try:
+        df = source.benchmark(now)
+    except Exception as e:
+        print(f"    (대기 자산 {idle_code(mk)} 시세 받기 실패: {type(e).__name__}: {e})", flush=True)
+        df = None
+    if df is None or len(df) == 0:
+        raise H1DataProblem("D1", f"대기 자산 {idle_code(mk)} 시세를 못 받음")
+    return df
+
+
+def _fetch_all(mk, source, now, universe, need, probes) -> dict:
+    """준비 7: 종목군 + 보유·대기 종목 + 확인용 대형주를 한 번씩만 받는다. {code: Fetched 또는 None}."""
+    out = {}
+    for code in dict.fromkeys(list(universe) + sorted(need) + list(probes)):
+        try:
+            f = source.fetch(code, now)
+        except Exception as e:
+            print(f"    ({code} 시세 받기 실패: {type(e).__name__}: {e})", flush=True)
+            f = None
+        if f is not None and (getattr(f, "df", None) is None or len(f.df) == 0):
+            f = None
+        out[code] = f
+    return out
+
+
+def _halted_on(fetched, codes, t) -> frozenset:
+    return frozenset(c for c in codes if fetched.get(c) is not None and t in fetched[c].halt_dates)
+
+
+def _check_mode(leader_mode):
+    if leader_mode not in ("llm", "replay"):
+        raise ValueError(f"leader_mode 는 'llm'(운영) 또는 'replay'(재현) (받은 값 {leader_mode!r})")
+
+
+def _cli_version_once(leader_mode):
+    """`claude --version` 은 실행마다 한 번, llm 모드일 때만(재현은 부르지 않음)."""
+    if leader_mode != "llm":
+        return None
+    try:
+        return analyst.claude_cli_version()
+    except Exception:
+        return None
+
+
+def _absorb(log, res):
+    """봉 결과의 경고(W)·팀장 방식을 일지에 모은다(L 은 errors.jsonl 몫)."""
+    log.problems += [p for p in res.problems if p.level == "W"]
+    log.extra.setdefault("bar_modes", {})[res.date] = {"mode": res.mode, "late": res.late, "llm_calls": res.llm_calls,
+                                                       "late_calls": res.late_calls}
+    if res.late:
+        log.late_bars.append(res.date)
+
+
+def _print_bar(res):
+    w = Counter(p.code for p in res.problems if p.level == "W")
+    wtxt = ", ".join(f"{k} {v}" for k, v in sorted(w.items())) or "없음"
+    print(f"  봉 {res.date} ({'늦은 봉 · 팀장 폴백' if res.late else res.mode}) · 스크리너 {res.used}종목 · "
+          f"팀장 LLM 호출 {res.llm_calls}번 · L {len(res.errors)} · 경고 {wtxt}", flush=True)
+    for line in res.lines:
+        print(f"    {line}", flush=True)
+
+
+def _calendar_line(cal_dates, processed, check, run_id, at, command, fetched_at=None):
+    """calendar.jsonl 한 줄: 받은 시각, 달력(S 전 거래일 ~ 마지막 봉) 날짜 목록 전체·그 sha256, 처리한 날짜,
+    check = "ok" | "D7"(달력은 정상, 기준 지수만 늦음) | "D4"·"D5"(이 줄의 달력은 기준으로 쓰지 않음) | "stopped"."""
+    blob = json.dumps(list(cal_dates), separators=(",", ":"))
+    return {"at": at, "fetched_at": fetched_at or at, "run_id": run_id, "command": command, "dates": list(cal_dates),
+            "sha256": _sha256_bytes(blob.encode("utf-8")), "processed": list(processed), "check": check}
+
+
+def _last_ok_calendar_line(root, mk):
+    """calendar.jsonl 의 마지막 '정상'(check 가 ok·D7) 줄. D4·D5 로 멈춘 실행의 줄은 기준으로 쓰지 않는다."""
+    lines = read_jsonl(h1_path(root, mk, "calendar.jsonl"))
+    for rec in reversed(lines):
+        if rec.get("check") in ("ok", "D7"):
+            return rec
+    return None
+
+
+def _window_counts(root, mk, S) -> tuple:
+    """(이 판정 창의 L 오류 수, 자료 멈춤(종료 코드 4·7) 수) — errors.jsonl·runs.jsonl 에서."""
+    errs = sum(1 for r in _read_log(root, "errors.jsonl") if r.get("market") == mk and r.get("start_date") == S)
+    stops = sum(1 for r in _read_log(root, "runs.jsonl") if r.get("event") == "end" and r.get("market") == mk
+                and r.get("start_date") == S and r.get("exit_code") in (EXIT_DATA, EXIT_D7))
+    return errs, stops
+
+
+def _print_summary(mk, root, states, decisions):
+    try:
+        S = states["A0"][TRAINERS[0]]["start_date"]
+        errs, stops = _window_counts(root, mk, S)
+        for line in summary_lines(mk, states, errors=errs, data_stops=stops, decisions=decisions):
+            print(line, flush=True)
+    except Exception as e:                       # 요약은 보조 출력 — 실패해도 결과는 그대로
+        print(f"  (요약 출력 실패: {type(e).__name__}: {e})", flush=True)
+
+
+# ============================ start (§2.5 새 시작) ============================
+
+def start(market, root=None, source=None, leader_mode="llm", gate=True) -> int:
+    """새 판정 창 시작(설계 §2.5): S = 대기 자산 확정 시세의 마지막 봉. S 는 입금만(종가 판단·다음 시가 주문).
+    모든 파일(meta·장부 6개·HEAD·calendar)을 state/h1/<m>.starting/ 에 다 쓴 뒤 os.replace 로 <m>/ 로 바꾼다.
+    거절: 시장 폴더가 이미 있음(8) / 성공한 start 흔적이 있는데 재시작 기록 없이 폴더가 없음(8) / D7(7) / 관문(3) /
+    D1·D2·D5(4). 남은 <m>.starting/ 은 지우고 처음부터(재시작으로 세지 않음). 종료 코드를 돌려준다."""
+    mk = _mkey(market)
+    root = _root(root)
+    _check_mode(leader_mode)
+    source = source if source is not None else live_source(mk)
+    try:
+        with h1_lock(root):
+            return _start_locked(mk, root, source, leader_mode, gate)
+    except H1Refused as e:
+        if e.code != EXIT_LOCK:
+            raise
+        _note_lock_timeout(root, "start", mk, e)
+        return EXIT_LOCK
+
+
+def _start_locked(mk, root, source, leader_mode, gate) -> int:
+    log = _RunLog("start", mk, root, source.now, {"leader_mode": leader_mode, "gate": gate})
+    ch, _ = code_hash()
+    env = env_info()
+    log.begin(ch, env, leader_mode)
+    print(f"[H1 {mk}] start · {_iso(log.now())} · 실행 {log.run_id}", flush=True)
+    try:
+        allowed = allowed_fingerprints(root, gate, ch, env)                        # 3 관문
+        mdir = market_dir(mk, root)
+        if mdir.exists():
+            raise H1Refused(EXIT_NO_LEDGER, f"{mk} 장부 폴더가 이미 있어요({mdir}). 새로 시작하려면 먼저 "
+                                            f"python h1.py restart --market {mk} --reason \"…\"")
+        n_restarts = _count_restarts(mk, root)
+        if _count_starts(mk, root) > n_restarts:
+            raise H1Refused(EXIT_NO_LEDGER, "runs.jsonl 에 성공한 start 기록이 있는데 장부 폴더가 없고 그 뒤 재시작 기록도 "
+                                            "없어요 → 실수로 지운 것인지 사람이 먼저 확인(설계 §2.5)")
+        sdir = h1_path(root, f"{mk}.starting")
+        if sdir.exists():
+            shutil.rmtree(sdir)
+            log.note(f"끝나지 않은 start 폴더({sdir.name})를 지우고 처음부터 해요(재시작으로 세지 않음)")
+        now = _aware(source.now())
+        idle_df = _bench(mk, source, now)                                            # 5 대기 자산
+        cal_all = _dates_of(idle_df)
+        got = read_universe(mk, root)
+        if got is not None:
+            codes, u_sha = got
+            u_blob = None
+            print(f"  종목군: 이미 있는 고정 목록 {len(codes)}종목(universe/{mk}.json, 재시작해도 그대로)", flush=True)
+        else:
+            try:
+                codes = _check_codes(mk, list(source.universe()), "받은 종목군")
+            except Exception as e:
+                raise H1DataProblem("D2", f"종목군 목록을 받지 못함({type(e).__name__}: {e})")
+            u_blob = _universe_blob(mk, codes, _iso(now), env)
+            u_sha = _sha256_bytes(u_blob)
+            print(f"  종목군: 새로 받은 {len(codes)}종목을 고정(universe/{mk}.json)", flush=True)
+        fetched = _fetch_all(mk, source, now, codes, set(), CAL_PROBE[mk])           # 7 종목 시세
+        for c in codes:
+            if fetched.get(c) is None:
+                log.problems.append(h1_check.Problem("W", "W4", mk, None, None, None, f"종목군 {c} 시세 못 받음 → 건너뜀"))
+        cal, warns, d7 = calendar_check(mk, cal_all, None, fetched, codes, now)       # 6 달력
+        log.problems += warns
+        if d7 is not None:
+            raise H1DataProblem("D7", d7.detail + " → 시작 거절(기준 지수가 따라온 뒤 다시 start)")
+        prev_s, S = cal
+        log.start_date = S
+        states = new_ledgers(mk, S, restart_no=n_restarts, code_hash=ch, env=env, updated_at=_iso(now))
+        decisions = DecisionLog(decisions_path(root))
+        if decisions.truncated:
+            log.extra["decision_log_truncated"] = decisions.truncated
+            log.note(f"판정 기록 마지막 줄이 반쯤 쓰여 잘라 냈어요({decisions.truncated['bytes']}바이트)")
+        frames = {c: (fetched[c].df if fetched.get(c) is not None else None) for c in codes}
+        print(f"  시작 봉 S = {S} (S 전 거래일 {prev_s}) · S 는 입금만, 매매는 S+1 시가부터", flush=True)
+        res = run_bar(mk, S, states, frames, codes, _idle_bar(mk, idle_df, S), decisions=decisions,
+                      leader_mode=leader_mode, halted=_halted_on(fetched, codes, S), prev_cal_date=prev_s,
+                      calendar=cal, now=source.now, cli_version=_cli_version_once(leader_mode), code_hash=ch, env=env,
+                      allowed=allowed, head=None, universe_sha256=u_sha, meta_universe_sha256=u_sha)
+        _absorb(log, res)
+        _print_bar(res)
+        if not res.ok:
+            raise _LFound(S, res.problems, res.fingerprint)
+        at = _iso(log.now())
+        meta = {"market": mk, "start_date": S, "restart_no": n_restarts, "created_at": at, "rules": rule_constants(mk),
+                "universe_sha256": u_sha, "code_hash_at_start": ch, "env_at_start": env,
+                "design_doc_sha256": _design_sha(), "ledger_breaker": "off", "shadow_breaker": list(SHADOW_BREAKER)}
+        sparts = (f"{mk}.starting",)
+        blobs = _ledger_blobs(res.states, mk)
+        meta_blob = _dump(meta)
+        _write_set(root, sparts, {**blobs, META_REL: meta_blob})
+        head = _new_head(res.states, blobs, meta_blob, decisions, log.run_id, at)
+        _write_atomic(h1_path(root, *sparts, "HEAD.json"), _dump(head))
+        _append_line(h1_path(root, *sparts, "calendar.jsonl"),
+                     _calendar_line(cal, [S], "ok", log.run_id, at, "start", _iso(now)))
+        _fsync_dir(sdir)
+        if u_blob is not None:
+            _write_atomic(universe_path(mk, root), u_blob)
+        os.replace(sdir, mdir)                                                      # 여기서 시작이 "있는 것"이 된다
+        _fsync_dir(root)
+        log.bars.append(S)
+        log.commits.append(log.run_id)
+        _print_summary(mk, root, res.states, decisions)
+        log.end(EXIT_OK, f"시작 S={S}")
+        return EXIT_OK
+    except Exception as e:
+        return _on_error(log, e)
+
+
+# ============================ run (§2.3 준비 1~10) ============================
+
+def run(market, root=None, source=None, leader_mode="llm", gate=True) -> int:
+    """매일 실행(설계 §2.3): 새 확정 봉을 오래된 것부터 하나씩 처리하고, 점검을 통과한 봉마다 커밋한다.
+    처리할 봉이 없으면 0(D7 이었으면 7). 5봉 넘게 밀리면 6. 자료 문제 4·7, 장부 논리 오류 2, 관문·규칙 3, 장부 없음 8."""
+    mk = _mkey(market)
+    root = _root(root)
+    _check_mode(leader_mode)
+    source = source if source is not None else live_source(mk)
+    try:
+        with h1_lock(root):
+            return _run_locked(mk, root, source, leader_mode, gate)
+    except H1Refused as e:
+        if e.code != EXIT_LOCK:
+            raise
+        _note_lock_timeout(root, "run", mk, e)
+        return EXIT_LOCK
+
+
+def _run_locked(mk, root, source, leader_mode, gate) -> int:
+    log = _RunLog("run", mk, root, source.now, {"leader_mode": leader_mode, "gate": gate})
+    ch, _ = code_hash()
+    env = env_info()
+    log.begin(ch, env, leader_mode)
+    print(f"[H1 {mk}] run · {_iso(log.now())} · 실행 {log.run_id}", flush=True)
+    cal_rec = {"dates": None, "processed": [], "check": None, "fetched_at": None}
+    try:
+        return _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec)
+    except Exception as e:
+        return _on_error(log, e)
+    finally:
+        if cal_rec["dates"] is not None:
+            try:
+                _append_line(h1_path(root, mk, "calendar.jsonl"),
+                             _calendar_line(cal_rec["dates"], cal_rec["processed"], cal_rec["check"] or "stopped",
+                                            log.run_id, _iso(log.now()), "run", cal_rec["fetched_at"]))
+            except Exception as e:
+                print(f"  (calendar.jsonl 기록 실패: {type(e).__name__}: {e})", flush=True)
+
+
+def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int:
+    allowed = allowed_fingerprints(root, gate, ch, env)                               # 3 관문
+    loaded = load_market(mk, root, repair=True)                                       # 4 장부 읽기
+    meta, head, states = loaded.meta, loaded.head, loaded.states
+    log.start_date = meta["start_date"]
+    if loaded.restored:
+        log.extra["restored_from_backup"] = loaded.restored
+    decisions = DecisionLog(decisions_path(root))
+    if decisions.truncated:
+        log.extra["decision_log_truncated"] = decisions.truncated
+        log.note(f"판정 기록 마지막 줄이 반쯤 쓰여 잘라 냈어요({decisions.truncated['bytes']}바이트, 아직 장부에 안 쓰인 줄)")
+    l18 = h1_check.check_decisions(mk, decisions, _head_digest(head))
+    if l18:
+        raise _LFound(None, l18, _safe_fingerprint(states))
+    if _norm(meta["rules"]) != _norm(rule_constants(mk)):
+        diff = sorted(k for k in set(meta["rules"]) | set(rule_constants(mk))
+                      if _norm(meta["rules"].get(k)) != _norm(rule_constants(mk).get(k)))
+        raise H1Refused(EXIT_GATE, f"규칙 상수가 시작 때(meta.rules)와 달라요: {diff} → 세율 줄 추가면 "
+                                   f"python h1.py amend-rules --market {mk} --source URL, 아니면 재시작 대상")
+    got = read_universe(mk, root)
+    if got is None:
+        raise _LFound(None, [h1_check.Problem("L", "L22", mk, None, None, None, f"종목군 파일 universe/{mk}.json 이 없음")],
+                      _safe_fingerprint(states))
+    codes, u_sha = got
+    if u_sha != meta["universe_sha256"]:
+        raise _LFound(None, [h1_check.Problem("L", "L22", mk, None, None, None,
+                                              "종목군 파일 지문 ≠ meta.universe_sha256 (파일이 바뀜)")],
+                      _safe_fingerprint(states))
+    regs = delist_registrations(states)
+    last, S = head["last_date"], meta["start_date"]
+    now = _aware(source.now())
+    print(f"  시작 S {S} · 마지막 처리 봉 {last}", flush=True)
+
+    idle_df = _bench(mk, source, now)                                                  # 5 대기 자산
+    cal_all = _dates_of(idle_df)
+    prev_s = states["A0"][TRAINERS[0]]["days"][0]["prev_cal_date"]
+    cal_rec["dates"] = [d for d in cal_all if d >= prev_s]
+    cal_rec["fetched_at"] = _iso(now)
+
+    need = set()                                                                       # 7 종목 시세
+    for _, _, st in _flat(states):
+        need |= set(st["positions"]) | {o["code"] for o in st["pending"]}
+    need -= set(regs)
+    fetched = _fetch_all(mk, source, now, codes, need, CAL_PROBE[mk])
+    miss = sorted(c for c in need if fetched.get(c) is None)
+    if miss:
+        raise H1DataProblem("D2", f"보유·대기 종목 {miss} 시세를 못 받음(인수·상장폐지 의심이면 설계 §2.2 ⑦)")
+    for c in codes:
+        if c not in need and fetched.get(c) is None:
+            log.problems.append(h1_check.Problem("W", "W4", mk, None, None, None, f"종목군 {c} 시세 못 받음 → 건너뜀"))
+
+    try:                                                                               # 6 달력
+        cal, warns, d7 = calendar_check(mk, cal_all, states, fetched, codes, now, _last_ok_calendar_line(root, mk))
+    except H1DataProblem as e:
+        cal_rec["check"] = e.kind
+        raise
+    cal_rec["dates"] = list(cal)
+    cal_rec["check"] = "D7" if d7 is not None else "ok"
+    log.problems += warns
+    if d7 is not None:
+        log.problems.append(d7)
+        print(f"  {d7.detail} → 처리할 수 있는 봉까지만 하고 종료 코드 7", flush=True)
+
+    dfs = {c: f.df for c, f in fetched.items() if f is not None}                       # 8 소급 수정
+    prob = retro_problem(retro_compare(mk, states, dfs, idle_df))
+    if prob is not None:
+        raise prob
+
+    todo = [d for d in cal if d > last]                                                # 9 처리할 봉
+    if not todo:
+        code = EXIT_D7 if d7 is not None else EXIT_OK
+        print(f"  새 확정 봉 없음 — 이미 처리됨({last}). 스캔·팀장 호출 없이 끝", flush=True)
+        _print_summary(mk, root, states, decisions)
+        log.end(code, "이미 처리됨" if code == EXIT_OK else d7.detail)
+        return code
+    if len(todo) > MAX_LATE_BATCH:
+        raise H1Refused(EXIT_BACKLOG, f"밀린 봉 {len(todo)}개({todo[0]}~{todo[-1]}) > {MAX_LATE_BATCH} → 판정 창 실패"
+                                      f"(사전 등록 ②-2). python h1.py restart --market {mk} → start")
+    print(f"  처리할 봉 {len(todo)}개: {', '.join(todo)}", flush=True)
+
+    cli_version = _cli_version_once(leader_mode)                                       # 10 봉마다
+    frame_codes = list(dict.fromkeys(list(codes) + sorted(need)))
+    frames = {c: (fetched[c].df if fetched.get(c) is not None else None) for c in frame_codes}
+    for k, t in enumerate(todo, 1):
+        res = run_bar(mk, t, states, frames, codes, _idle_bar(mk, idle_df, t), decisions=decisions,
+                      leader_mode=leader_mode, halted=_halted_on(fetched, frame_codes, t),
+                      prev_cal_date=cal[cal.index(t) - 1], calendar=cal, now=source.now, cli_version=cli_version,
+                      code_hash=ch, env=env, allowed=allowed, head=_head_digest(head), universe_sha256=u_sha,
+                      meta_universe_sha256=meta["universe_sha256"])
+        _absorb(log, res)
+        _print_bar(res)
+        if not res.ok:
+            raise _LFound(t, res.problems, res.fingerprint)
+        at = _iso(log.now())
+        for _, _, st in _flat(res.states):
+            st["h1"].update({"code_hash": ch, "env": dict(env), "updated_at": at})
+        commit_id = log.run_id if k == 1 else f"{log.run_id}.{k}"
+        head, blobs = commit(root, mk, res.states, meta, decisions, commit_id, at, head)
+        states = _parse_ledgers(mk, blobs)              # 디스크에 쓴 글자 그대로 다시 읽어 다음 봉에(저장 → 읽기와 같은 길)
+        log.bars.append(t)
+        log.commits.append(commit_id)
+        cal_rec["processed"].append(t)
+        print(f"  봉 {t} 저장 완료(HEAD {commit_id})", flush=True)
+    _print_summary(mk, root, states, decisions)
+    if d7 is not None:
+        log.end(EXIT_D7, d7.detail)
+        return EXIT_D7
+    log.end(EXIT_OK, f"{len(todo)}봉 처리")
+    return EXIT_OK
+
+
+# ============================ restart (§2.2 ⑤, §2.5) ============================
+
+def restart(market, reason, root=None) -> Path:
+    """재시작: 잠금 아래에서 state/h1/<m>/ 를 state/h1/archive/<m>-<시각>/ 로 옮기고 restarts.jsonl 에 한 줄.
+    판정 기록·일지·고정 종목군은 그대로. 그다음 사람이 start. 옮긴 폴더 경로를 돌려준다.
+    거절(H1Refused): 이유 없음(1) / 시장 폴더 없음(8) / 재시작 상한 MAX_RESTARTS(2) 다 씀(8) / 잠금(5)."""
+    mk = _mkey(market)
+    root = _root(root)
+    if not isinstance(reason, str) or not reason.strip():
+        raise H1Refused(EXIT_USAGE, "재시작 이유(--reason)를 적어 주세요")
+    try:
+        lock = h1_lock(root)
+        lock.__enter__()
+    except H1Refused as e:
+        _note_lock_timeout(root, "restart", mk, e)
+        raise
+    try:
+        log = _RunLog("restart", mk, root, None, {"reason": reason})
+        log.begin(code_hash()[0], env_info(), None)
+        try:
+            mdir = market_dir(mk, root)
+            if not mdir.is_dir():
+                raise H1Refused(EXIT_NO_LEDGER, f"{mk} 장부 폴더가 없어요 — 재시작할 것이 없음")
+            n = _count_restarts(mk, root)
+            if n >= MAX_RESTARTS:
+                raise H1Refused(EXIT_NO_LEDGER, f"{mk} 재시작을 이미 {n}번 했어요(상한 {MAX_RESTARTS}, 사전 등록 ⑤) → "
+                                                "'H1 포워드 실패(운영 기준 미충족)'로 보고하고 멈춤")
+            old_start = old_last = None
+            try:
+                old_start = json_loads_strict(h1_path(root, mk, META_REL).read_text("utf-8")).get("start_date")
+            except Exception:
+                pass
+            try:
+                old_last = json_loads_strict(h1_path(root, mk, "HEAD.json").read_text("utf-8")).get("last_date")
+            except Exception:
+                pass
+            log.start_date = old_start
+            stamp = log.now().strftime("%Y%m%d-%H%M%S")
+            dest = h1_path(root, "archive", f"{mk}-{stamp}")
+            i = 2
+            while dest.exists():
+                dest = h1_path(root, "archive", f"{mk}-{stamp}-{i}")
+                i += 1
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(mdir, dest)
+            _fsync_dir(dest.parent)
+            _fsync_dir(root)
+            _append_log(root, "restarts.jsonl", {"at": _iso(log.now()), "market": mk, "old_start": old_start,
+                                                 "old_last": old_last, "reason": reason,
+                                                 "archive": str(dest.relative_to(root)), "run_id": log.run_id,
+                                                 "restart_no": n + 1})
+            print(f"[H1 {mk}] 재시작 {n + 1}/{MAX_RESTARTS}: 옛 장부(S {old_start} ~ {old_last})를 {dest} 로 옮겼어요. "
+                  f"다음: python h1.py start --market {mk}", flush=True)
+            log.end(EXIT_OK, f"보관 {dest.name}")
+            return dest
+        except H1Refused as e:
+            print(f"  거절: {e}", flush=True)
+            log.end(e.code, str(e))
+            raise
+        except Exception as e:
+            _on_error(log, e)
+            raise
+    finally:
+        lock.__exit__(None, None, None)
+
+
+# ============================ corp-action (§2.2 ⑦) ============================
+
+def corp_action(market, code, *, split=None, date=None, delist=False, last_date=None, last_close=None,
+                accept_correction=False, source=None, root=None, source_data=None) -> int:
+    """기업 행위 적용(설계 §2.2 ⑦). 셋 중 하나만: split(⑦-2) / delist(⑦-4) / accept_correction(⑦-5).
+    source = 1차 출처(URL 등 글자), source_data = accept_correction 이 지금 시세를 받는 DataSource(기본 live_source).
+    run 과 같은 잠금·커밋 순서(백업 → 장부 6개 → HEAD, 새 run_id)로 쓰고 corp_actions.jsonl·changes.jsonl 에 남긴다.
+    종료 코드: 0 적용 / 1 인자·조건이 맞지 않음(아무것도 안 바뀜) / 2 장부 손상(L24) / 4 시세 못 받음 / 5 잠금 / 8 장부 없음."""
+    mk = _mkey(market)
+    root = _root(root)
+    try:
+        with h1_lock(root):
+            return _corp_locked(mk, root, code, split, date, delist, last_date, last_close, accept_correction,
+                                source, source_data)
+    except H1Refused as e:
+        if e.code != EXIT_LOCK:
+            raise
+        _note_lock_timeout(root, "corp-action", mk, e)
+        return EXIT_LOCK
+
+
+def _marks_last(states, code):
+    """장부들의 그 종목 마지막 marks (날짜, 값). 없으면 None. 같은 날짜에 값이 다르면 ValueError."""
+    best = None
+    for _, _, st in _flat(states):
+        for row in reversed(st["days"]):
+            if code in row["marks"]:
+                cand = (row["date"], row["marks"][code])
+                if best is None or cand[0] > best[0]:
+                    best = cand
+                elif cand[0] == best[0] and cand[1] != best[1]:
+                    raise ValueError(f"{code} 같은 날 {cand[0]} marks 가 장부마다 다름")
+                break
+    return best
+
+
+def _corp_locked(mk, root, code, split, date, delist, last_date, last_close, accept_correction, source, source_data):
+    args = {"code": code, "split": split, "date": date, "delist": bool(delist), "last_date": last_date,
+            "last_close": last_close, "accept_correction": bool(accept_correction), "source": source}
+    now_fn = source_data.now if source_data is not None else None
+    log = _RunLog("corp-action", mk, root, now_fn, args)
+    log.begin(code_hash()[0], env_info(), None)
+    try:
+        kinds = [split is not None, bool(delist), bool(accept_correction)]
+        if sum(kinds) != 1:
+            raise H1Refused(EXIT_USAGE, "--split · --delist · --accept-correction 중 하나만 고르세요")
+        if not isinstance(source, str) or not source.strip():
+            raise H1Refused(EXIT_USAGE, "1차 출처(--source, 거래소 공시·회사 발표 주소)를 적어 주세요")
+        if not isinstance(code, str) or not code:
+            raise H1Refused(EXIT_USAGE, "--code 가 필요해요")
+        idle = idle_code(mk)
+        if code != idle and not markets.code_ok(mk, code):
+            raise H1Refused(EXIT_USAGE, f"{code} 는 이 시장({mk}) 종목코드가 아니에요")
+        loaded = load_market(mk, root, repair=True)
+        log.start_date = loaded.meta["start_date"]
+        states, head, meta = loaded.states, loaded.head, loaded.meta
+        decisions = DecisionLog(decisions_path(root))
+        l18 = h1_check.check_decisions(mk, decisions, _head_digest(head))
+        if l18:
+            raise _LFound(None, l18, _safe_fingerprint(states))
+        regs = delist_registrations(states)
+        at = _iso(log.now())
+        if split is not None:
+            try:
+                r = float(split)
+                _check_iso(date, "--date")
+            except (TypeError, ValueError) as e:
+                raise H1Refused(EXIT_USAGE, f"분할 인자가 이상해요: {e}")
+            if code == idle:
+                raise H1Refused(EXIT_USAGE, "대기 자산(지수)에는 분할을 적용하지 않아요")
+            if code in regs:
+                raise H1Refused(EXIT_USAGE, f"{code} 는 상장폐지로 등록된 종목이에요")
+            try:
+                new = apply_split(states, code, r, date, source, at)
+            except ValueError as e:
+                raise H1Refused(EXIT_USAGE, f"분할 공식을 적용할 수 없어요: {e} → 설계 §2.2 ⑦-3(재시작) 검토")
+            entry = {"kind": "split", "code": code, "r": r, "date": date, "applied_after": head["last_date"],
+                     "source": source, "at": at}
+            held = sum(1 for _, _, st in _flat(states) if code in st["positions"])
+            what = f"분할 {code} r={r:g} (기준일 {date}, 보유 장부 {held}개: 주식 수 ×r·매수가 ÷r, 평가액 그대로)"
+        elif delist:
+            if code == idle:
+                raise H1Refused(EXIT_USAGE, "대기 자산(지수)은 상장폐지로 등록할 수 없어요")
+            if code in regs:
+                raise H1Refused(EXIT_USAGE, f"{code} 는 이미 상장폐지로 등록돼 있어요")
+            try:
+                _check_iso(last_date, "--last-date")
+            except ValueError as e:
+                raise H1Refused(EXIT_USAGE, str(e))
+            if last_date > head["last_date"]:
+                raise H1Refused(EXIT_USAGE, f"--last-date {last_date} 가 장부 마지막 처리 봉 {head['last_date']} 보다 뒤예요"
+                                            " → 그 날까지 run 으로 처리한 뒤 등록(2b-1 검토 B-4)")
+            how = "command"
+            if last_close is None:
+                try:
+                    got = _marks_last(states, code)
+                except ValueError as e:
+                    raise H1Refused(EXIT_USAGE, str(e))
+                if got is None:
+                    raise H1Refused(EXIT_USAGE, f"{code} 의 marks 가 장부에 없어요 → --last-close 를 적어 주세요")
+                last_close, how = got[1], f"marks {got[0]}"
+            try:
+                px = float(last_close)
+            except (TypeError, ValueError):
+                raise H1Refused(EXIT_USAGE, f"--last-close {last_close!r} 가 숫자가 아니에요")
+            if not (math.isfinite(px) and px > 0):
+                raise H1Refused(EXIT_USAGE, f"--last-close {px!r} 는 양수여야 해요")
+            entry = {"kind": "delist", "code": code, "last_date": last_date, "last_close": px,
+                     "last_close_from": how, "source": source, "at": at}
+            new = clone_states(states, mk)
+            for _, _, st in _flat(new):
+                st["corp_actions"].append(dict(entry))
+            held = [f"{arm}/{tn}" for arm, tn, st in _flat(states) if code in st["positions"]]
+            what = (f"상장폐지 {code} 마지막 거래 {last_date} 종가 {px!r}({how}) — 다음 처리 봉 시가 맨 앞에서 전량 정리"
+                    f"(보유 장부 {held or '없음'}), 대기 주문 dropped")
+        else:
+            sd = source_data if source_data is not None else live_source(mk)
+            now = _aware(sd.now())
+            idle_df = _bench(mk, sd, now) if code == idle else None
+            dfs = {}
+            if code != idle:
+                f = _fetch_all(mk, sd, now, [code], set(), ())[code]
+                if f is None:
+                    raise H1DataProblem("D2", f"{code} 시세를 못 받음")
+                dfs[code] = f.df
+            diffs = [c for c in retro_compare(mk, states, dfs, idle_df, codes={code}) if not c["same"]]
+            if not diffs:
+                raise H1Refused(EXIT_USAGE, f"{code} 는 지금 D6(소급 수정) 차이가 없어요 — 정정 확정할 것이 없음")
+            if any(c["new"] is None for c in diffs):
+                raise H1Refused(EXIT_USAGE, f"{code} 새 시세에 값이 없는 날짜가 있어요 → 정정 확정 불가(⑦-1 기다림 또는 ⑦-3)")
+            items = [{"date": c["date"], "field": c["field"], "old": c["old"], "new": c["new"]} for c in diffs]
+            entry = {"kind": "correction", "code": code, "items": items, "source": source, "at": at}
+            new = clone_states(states, mk)
+            for _, _, st in _flat(new):
+                st["corp_actions"].append(json.loads(json.dumps(entry)))
+            what = f"정정 확정 {code} {len(items)}칸(장부 그대로, 다음부터 D6 은 새 값과 비교)"
+        for _, _, st in _flat(new):
+            st["h1"]["updated_at"] = at
+        head2, _ = commit(root, mk, new, meta, decisions, log.run_id, at, head)
+        log.commits.append(log.run_id)
+        _append_line(h1_path(root, mk, "corp_actions.jsonl"), {**entry, "run_id": log.run_id})
+        _append_log(root, "changes.jsonl", {"at": at, "market": mk, "kind": f"corp-action:{entry['kind']}",
+                                            "entry": entry, "run_id": log.run_id, "ledger_last_date": head2["last_date"]})
+        print(f"[H1 {mk}] 기업 행위 적용: {what}", flush=True)
+        log.end(EXIT_OK, what)
+        return EXIT_OK
+    except Exception as e:
+        return _on_error(log, e)
+
+
+# ============================ amend-rules (§2.2 ⑥-ii) ============================
+
+def amend_rules(market, source, root=None, gate=True) -> int:
+    """국내 매도세 표에 줄 추가(설계 §2.2 ⑥-ii): 지금 코드 상수의 세율 표가 meta.rules 의 표 + 뒤에 더한 줄
+    (시행일 > 장부 마지막 처리 봉, 날짜 오름차순)이고 나머지 규칙은 같을 때만 meta.rules 를 지금 상수로 바꾼다.
+    관문(재현 통과)을 거치고, 커밋 순서(백업 → 장부 6개 → meta → HEAD)로 쓰고, changes.jsonl 에 남긴다.
+    종료 코드: 0 반영(또는 이미 같음) / 3 관문 또는 '줄 추가'가 아닌 규칙 변경(재시작 대상) / 1 출처 없음 / 2·5·8."""
+    mk = _mkey(market)
+    root = _root(root)
+    try:
+        with h1_lock(root):
+            return _amend_locked(mk, root, source, gate)
+    except H1Refused as e:
+        if e.code != EXIT_LOCK:
+            raise
+        _note_lock_timeout(root, "amend-rules", mk, e)
+        return EXIT_LOCK
+
+
+def _amend_locked(mk, root, source, gate):
+    log = _RunLog("amend-rules", mk, root, None, {"source": source, "gate": gate})
+    ch, _ = code_hash()
+    env = env_info()
+    log.begin(ch, env, None)
+    try:
+        if not isinstance(source, str) or not source.strip():
+            raise H1Refused(EXIT_USAGE, "법령 1차 출처(--source)를 적어 주세요")
+        allowed_fingerprints(root, gate, ch, env)
+        loaded = load_market(mk, root, repair=True)
+        log.start_date = loaded.meta["start_date"]
+        meta, head = loaded.meta, loaded.head
+        old, new = _norm(meta["rules"]), _norm(rule_constants(mk))
+        if old == new:
+            print(f"[H1 {mk}] 규칙이 이미 지금 코드와 같아요 — 바꿀 것 없음", flush=True)
+            log.end(EXIT_OK, "이미 같음")
+            return EXIT_OK
+        others = sorted(k for k in set(old) | set(new) if k != "stock_sell_tax" and old.get(k) != new.get(k))
+        if others:
+            raise H1Refused(EXIT_GATE, f"세율 표 말고도 규칙이 달라요 {others} → amend-rules 로 고칠 수 없음(재시작 대상 ⑤-c)")
+        if mk != "kr":
+            raise H1Refused(EXIT_GATE, "세율 표 줄 추가는 국내(kr)만 해당해요")
+        o, n = old["stock_sell_tax"], new["stock_sell_tax"]
+        if len(n) <= len(o) or n[:len(o)] != o:
+            raise H1Refused(EXIT_GATE, "세율 표가 '앞줄 그대로 + 뒤에 줄 추가'가 아니에요(앞줄이 바뀜·줄어듦) → 재시작 대상")
+        added = n[len(o):]
+        dates = [row[0] for row in n]
+        if dates != sorted(dates) or len(set(dates)) != len(dates):
+            raise H1Refused(EXIT_GATE, "세율 표 날짜가 오름차순이 아니에요")
+        for d, _r in added:
+            if not d > head["last_date"]:
+                raise H1Refused(EXIT_GATE, f"더한 줄의 시행일 {d} 이 마지막 처리 봉 {head['last_date']} 보다 뒤가 아니에요"
+                                           "(지난 체결을 바꾸게 됨) → 재시작 대상")
+        decisions = DecisionLog(decisions_path(root))
+        l18 = h1_check.check_decisions(mk, decisions, _head_digest(head))
+        if l18:
+            raise _LFound(None, l18, _safe_fingerprint(loaded.states))
+        at = _iso(log.now())
+        meta2 = dict(meta)
+        meta2["rules"] = rule_constants(mk)
+        commit(root, mk, loaded.states, meta2, decisions, log.run_id, at, head)
+        log.commits.append(log.run_id)
+        _append_log(root, "changes.jsonl", {"at": at, "market": mk, "kind": "amend-rules", "added_rows": added,
+                                            "source": source, "run_id": log.run_id, "code_hash": ch, "env": env,
+                                            "ledger_last_date": head["last_date"]})
+        print(f"[H1 {mk}] 국내 매도세 표에 줄 {added} 를 더했어요(meta.rules 갱신, 지난 체결은 그대로)", flush=True)
+        log.end(EXIT_OK, f"세율 줄 추가 {added}")
+        return EXIT_OK
+    except Exception as e:
+        return _on_error(log, e)
+
+
+# ============================ status · 요약 (§3.3, §8.2) ============================
+
+def status(market, root=None) -> list:
+    """상태 줄들(읽기만: 백업 되살리기·판정 기록 자르기 없음). S·판정 창 진행·마지막 봉·L·자료 멈춤·늦은 봉·
+    재시작·마감·장부 파일 상태 + 요약. 잠금은 잡는다(다른 명령이 쓰는 중에 반쯤 바뀐 파일을 읽지 않게)."""
+    mk = _mkey(market)
+    root = _root(root)
+    try:
+        lock = h1_lock(root)
+        lock.__enter__()
+    except H1Refused as e:
+        _note_lock_timeout(root, "status", mk, e)
+        raise
+    try:
+        log = _RunLog("status", mk, root, None)
+        log.begin(None, None, None)
+        lines = _status_lines(mk, root, log)
+        log.end(EXIT_OK if market_dir(mk, root).is_dir() else EXIT_NO_LEDGER, "상태 보기", quiet=True)
+        return lines
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _status_lines(mk, root, log) -> list:
+    out = []
+    mdir = market_dir(mk, root)
+    n_rs = _count_restarts(mk, root)
+    days_left = (_date.fromisoformat(DEADLINE) - _local_now().date()).days
+    tail = f"  재시작 {n_rs}/{MAX_RESTARTS} (남은 {max(0, MAX_RESTARTS - n_rs)}) · 마감 {DEADLINE} 까지 {days_left}일"
+    if not mdir.is_dir():
+        out.append(f"[H1 {mk} 상태] 장부 없음 → python h1.py start --market {mk}")
+        out.append(tail)
+        return out
+    try:
+        loaded = load_market(mk, root, repair=False)
+    except (H1LogicError, H1Refused) as e:
+        out.append(f"[H1 {mk} 상태] 장부를 읽지 못함: {getattr(e, 'code', '')} {e}")
+        out.append("  다음 run 이 백업으로 되살릴 수 있으면 되살리고, 아니면 L24(종료 코드 2) → 재시작 대상")
+        out.append(tail)
+        return out
+    meta, head, states = loaded.meta, loaded.head, loaded.states
+    S = meta["start_date"]
+    log.start_date = S
+    days = states["A0"][TRAINERS[0]]["days"]
+    n = len(days)
+    errs, stops = _window_counts(root, mk, S)
+    ends = [r for r in _read_log(root, "runs.jsonl") if r.get("event") == "end" and r.get("market") == mk
+            and r.get("start_date") == S]
+    kinds = Counter(p.get("code") for r in ends if r.get("exit_code") in (EXIT_DATA, EXIT_D7)
+                    for p in r.get("problems") or [] if p.get("level") == "D")
+    late = sum(1 for r in days if r["late"])
+    batch = max([len(r.get("bars") or []) for r in ends if r.get("command") == "run"] or [0])
+    gate_refused = sum(1 for r in ends if r.get("exit_code") == EXIT_GATE)
+    out.append(f"[H1 {mk} 상태] 시작 S {S} · 마지막 처리 봉 {head['last_date']} · 판정 창 {min(n, WINDOW_BARS)}/{WINDOW_BARS}"
+               + (f" (연장 {n - WINDOW_BARS}봉)" if n > WINDOW_BARS else f" (남은 {WINDOW_BARS - n}봉)"))
+    out.append(f"  장부 파일: HEAD 와 같음 (HEAD {head['run_id']}, {head['written_at']})")
+    ktxt = ", ".join(f"{k} {v}" for k, v in sorted(kinds.items()))
+    out.append(f"  L 오류 {errs} · 자료 멈춤 {stops}" + (f" ({ktxt})" if ktxt else "")
+               + f" · 관문 거절 {gate_refused} · 늦은 봉 {late}/{MAX_LATE_TOTAL}"
+               + f" · 한 번에 따라잡은 최대 {batch}봉")
+    out.append(tail)
+    decisions = DecisionLog(decisions_path(root), read_only=True)
+    if decisions.truncated:
+        out.append(f"  판정 기록 마지막 줄이 반쯤 쓰여 있음({decisions.truncated['bytes']}바이트) — 다음 run 이 잘라 냄")
+    out += summary_lines(mk, states, errors=errs, data_stops=stops, decisions=decisions)
+    return out
+
+
+def summary_lines(market, states, *, errors=None, data_stops=None, decisions=None) -> list:
+    """두 장부 요약(설계 §3.3 요약 예 모양). errors·data_stops 는 errors.jsonl·runs.jsonl 에서 센 값(모르면 '?'),
+    decisions 를 주면 이 창의 팀장 LLM/폴백 수를 센다. 지수 단위는 소수 6자리."""
+    mk = _mkey(market)
+    m = main.mkt(mk)
+    idle = idle_code(mk)
+    st0 = states["A0"][TRAINERS[0]]
+    days = st0["days"]
+    if not days:
+        return [f"[H1 {mk}] 아직 처리한 봉이 없어요"]
+    S, last = st0["start_date"], days[-1]["date"]
+    n = len(days)
+    start_total = sum(states["A0"][tn]["start_cash"] for tn in TRAINERS)
+
+    def total(arm):
+        return sum(states[arm][tn]["days"][-1]["value"] for tn in TRAINERS)
+
+    def pct(v):
+        return f"{(v / start_total - 1) * 100:+.2f}%"
+
+    v0, v1 = total("A0"), total("A1")
+    units = 0.0
+    for tn in TRAINERS:
+        w = _plain_wallet(states["A1"][tn]["wallet"])
+        h = w["holdings"].get(idle)
+        if h is not None:
+            units += float(h.shares if isinstance(h, Holding) else h["shares"])
+    if n >= 2:
+        q = days[1]["idle_open"]
+        bh_units = start_total / (q * (1 + m.slippage) * (1 + m.fee_rate))
+        bh = f"{(bh_units * days[-1]['idle_close'] / start_total - 1) * 100:+.2f}%"
+    else:
+        bh = "아직 없음(S+1 시가에 시작)"
+    late = sum(1 for r in days if r["late"])
+    n_llm = n_fb = None
+    if decisions is not None:
+        recs = [r for r in decisions.records() if r.get("market") == mk and S <= str(r.get("date")) <= last]
+        n_llm = sum(1 for r in recs if r.get("status") == "ok")
+        n_fb = len(recs) - n_llm
+    firsts = []
+    for arm in ARMS:
+        for tn in TRAINERS:
+            for r in states[arm][tn]["days"]:
+                if any(e.get("kind") == "shadow_breaker" and e.get("first") for e in r.get("events") or []):
+                    firsts.append(f"{arm}/{tn} {r['date']}")
+    q = lambda v: "?" if v is None else str(v)   # noqa: E731
+    window = f"{min(n, WINDOW_BARS)}/{WINDOW_BARS}" + (f" (+연장 {n - WINDOW_BARS})" if n > WINDOW_BARS else "")
+    return [
+        f"[H1 {mk}] 기준 봉 {last} · 시작 {S} · 판정 창 {window}",
+        f"  A0 쉬는 돈=현금  {main.fmt(m, start_total, False)} → {main.fmt(m, v0, False)} ({pct(v0)})",
+        f"  A1 쉬는 돈={idle:<5} {main.fmt(m, start_total, False)} → {main.fmt(m, v1, False)} ({pct(v1)})"
+        f" · {idle} {fmt_units(units)}단위",
+        f"  A1−A0 {main.fmt(m, v1 - v0)} · {idle} 들고 있기(S+1 시가 시작, 소수 단위) {bh}",
+        f"  점검 L {q(errors)} · 자료 멈춤 {q(data_stops)} · 늦은 봉 {late} · 팀장 LLM {q(n_llm)} / 폴백 {q(n_fb)} · "
+        f"그림자 서킷 {', '.join(firsts) if firsts else '없음'}",
+        "  ※ 3개월은 판단하기에 너무 짧다 — 숫자는 기록용(사전 등록). A0 는 운영 장부가 아니다",
+    ]
+
+
+# ============================ 명령줄 (cli) ============================
+
+class _UsageError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse 기본 오류 종료 코드 2 는 '장부 논리 오류'와 겹쳐서, 인자 오류는 1 로 돌려준다."""
+
+    def error(self, message):
+        raise _UsageError(message)
+
+
+def _parser():
+    p = _Parser(prog="h1.py", description="H1 포워드 모의매매 실행기 (진짜 돈·진짜 주문 없음, 장부만). "
+                                          "종료 코드: " + " / ".join(f"{k} {v}" for k, v in EXIT_TEXT.items()))
+    sub = p.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
+    for name, helptext in (("start", "새 판정 창 시작(S 는 입금만)"), ("run", "매일 실행(새 확정 봉 처리)"),
+                           ("restart", "시장 폴더를 보관하고 재시작 기록"), ("corp-action", "분할·상장폐지·정정 확정"),
+                           ("amend-rules", "국내 매도세 표 줄 추가 반영"), ("status", "상태 보기")):
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument("--market", required=True, choices=("us", "kr"))
+        if name == "restart":
+            sp.add_argument("--reason", required=True)
+        if name == "corp-action":
+            sp.add_argument("--code", required=True)
+            sp.add_argument("--split", type=float, default=None, help="비율 r = 새 주식 수 ÷ 옛 주식 수")
+            sp.add_argument("--date", default=None, help="분할 기준일 YYYY-MM-DD")
+            sp.add_argument("--delist", action="store_true")
+            sp.add_argument("--last-date", default=None, help="상장폐지 마지막 거래일 YYYY-MM-DD")
+            sp.add_argument("--last-close", type=float, default=None, help="마지막 거래 종가(비우면 장부 marks)")
+            sp.add_argument("--accept-correction", action="store_true")
+            sp.add_argument("--source", required=True, help="1차 출처(거래소 공시·회사 발표 주소)")
+        if name == "amend-rules":
+            sp.add_argument("--source", required=True, help="법령 1차 출처")
+    return p
+
+
+def cli(argv=None) -> int:
+    """python h1.py start|run|restart|corp-action|amend-rules|status --market us|kr … → 종료 코드(설계 §3.9)."""
+    try:
+        a = _parser().parse_args(sys.argv[1:] if argv is None else argv)
+    except _UsageError as e:
+        print(f"h1.py: 명령 인자 오류 — {e}  (python h1.py -h 로 사용법)", flush=True)
+        return EXIT_USAGE
+    try:
+        if a.cmd == "start":
+            return start(a.market)
+        if a.cmd == "run":
+            return run(a.market)
+        if a.cmd == "restart":
+            restart(a.market, a.reason)
+            return EXIT_OK
+        if a.cmd == "corp-action":
+            return corp_action(a.market, a.code, split=a.split, date=a.date, delist=a.delist, last_date=a.last_date,
+                               last_close=a.last_close, accept_correction=a.accept_correction, source=a.source)
+        if a.cmd == "amend-rules":
+            return amend_rules(a.market, a.source)
+        if a.cmd == "status":
+            lines = status(a.market)
+            for line in lines:
+                print(line, flush=True)
+            return EXIT_OK if market_dir(a.market).is_dir() else EXIT_NO_LEDGER
+    except H1Refused as e:
+        return e.code
+    except Exception as e:                       # restart·status 의 예상 밖 오류(일지에는 이미 남김)
+        print(f"h1.py: 예상 밖 오류 {type(e).__name__}: {e}", flush=True)
+        return EXIT_LOGIC
+    return EXIT_USAGE
+
+
+if __name__ == "__main__":
+    # `python h1.py …` 로 돌 때 이 파일은 __main__ 이고, h1_check 가 `import h1` 로 같은 파일을 한 번 더 읽는다.
+    # 예외 클래스·설정이 두 벌이 되지 않게 명령은 import 한 h1 모듈 쪽에서 돈다.
+    import h1 as _h1
+    sys.exit(_h1.cli())
