@@ -30,9 +30,9 @@
 | K-D4 | 주문 안전: **지정가만**, 주문은 **재시도 안 함**(조회만 재시도), 같은 `client_id` 주문은 하루 한 번(파일 기반 중복 방지), 모의 기간 만료 오류 `40910000` 은 따로 감지해 크게 알린다. |
 | K-D5 | 지정가 = 신호 봉 종가 × (1 ± 0.5%) 를 호가단위로 맞춤(매수는 올림, 매도는 내림). 수량은 `shares_within_cap` 과 브로커 매수가능수량 중 작은 값. |
 | K-D6 | 비밀값은 **프로젝트 폴더의 `.env` 에서만** 읽는다: `KIS_APP_KEY`, `KIS_APP_SECRET`, `KIS_ACCOUNT`(8자리-2자리), `KIS_MODE`(기본 `mock`). 토큰 캐시는 `state/kis_token.json`(gitignore). 로그에는 계좌번호를 가린다(`1234****-01`). 클라우드 세션은 키 없이 가짜 HTTP 로만 테스트한다. |
-| K-D7 | 국내 시장: 종목은 **고정 목록**(KOSPI 시가총액 상위 약 30개, 6자리 코드, 목록은 코드에 명시). 시세는 FinanceDataReader(네이버). 벤치마크 KODEX 200(`069500`). KRX 전체 목록 조회는 쓰지 않는다(멈춤 문제). |
+| K-D7 | 국내 시장: 종목은 **고정 목록**(KOSPI 시가총액 상위 약 30개, 6자리 코드, 목록은 코드에 명시). 시세는 FinanceDataReader(네이버). 벤치마크 ~~KODEX 200(`069500`)~~ → **KOSPI 200 가격지수(`KS200`)** (2026-11-04 변경, 아래 메모). KRX 전체 목록 조회는 쓰지 않는다(멈춤 문제).<br>**변경 메모 (2026-11-04, S0-1):** 처음 결정은 "벤치마크 KODEX 200(`069500`)"이었다(취소선은 기록으로 남김). 그런데 FDR(네이버)의 069500 시세는 **분배금 반영** 값이고 국내 주식 시세는 **배당 미반영**이라 비교가 벤치마크 쪽으로 연 약 2%p 기운다(2015-01-02 네이버 19,639원 vs 실제 종가 24,725원 / 2015~2026 네이버 069500 +354.8% vs `KS200` +261.8%). 사용자 결정으로 둘 다 '가격만'인 `KS200`(`fdr.DataReader("KS200", start)`, OHLCV 있음)을 쓴다. 지수 기호는 6자리 코드가 아니므로 `main.load_benchmark` 경로에서만 받는다(`load_prices(..., allow_index=True)`). 화면 이름은 "KOSPI 200(가격지수)". **KS200 출처(2026-11-04 확인):** 네이버가 아니라 FDR 0.9.110 이상이 GitHub `FinanceData/fdr_krx_data_cache` 의 `data/index/year_ks200/<연도>.csv` 를 읽는다(0.9.90~0.9.102 는 data.krx.co.kr 직접 호출 — 지금은 로그인 없이 거절 → `requirements.txt` 하한 `>=0.9.110`). 이 캐시는 거래일 12~14시 KST 에 **미완성 오늘 봉**을 올리고 16:50~21:53 KST 에 종가를 고친다 → 벤치마크만 확정 시각 22:30 KST(K-D9). 자세히: `docs/kr-fix-s0.md` |
 | K-D8 | 국내 비용: 수수료 `0.00015`(KIS 0.0140527% + 유관기관 0.0036396%, 반올림), 매도세 `0.0020`, 슬리피지 `0.0005`. 정수 주식만. |
-| K-D9 | 국내 확정 봉(D1의 한국판): 마지막 봉 날짜가 한국시간 "오늘"이고 현재가 **16:00 KST 이전**이면 버린다. Close NaN 행은 버린다. |
+| K-D9 | 국내 확정 봉(D1의 한국판): 마지막 봉 날짜가 한국시간 "오늘"이고 현재가 **16:00 KST 이전**이면 버린다. Close NaN 행은 버린다. **추가 (2026-11-04, S0-2):** `Volume == 0` 행(거래정지일)도 버린다. 시가가 없는 봉에서는 종가로 대신 체결하지 않고(`main.open_price` → None) 주문을 다음 거래된 봉 시가까지 남긴다. team 은 기준 봉에 봉이 없는 종목(정지 중)의 판단·보유일수를 쉬고, 그런 종목은 매수 후보에서 뺀다. **추가 (2026-11-04, 검토 I2):** 벤치마크 `KS200` 만 확정 시각 **22:30 KST**(`Market.bench_cutoff`) — team 기준 날짜는 22:30 전이면 하루 전 봉. 국내 실행 권장: 22:30 KST 이후 또는 다음날 09:00 전. 자세히: `docs/kr-fix-s0.md` |
 | K-D10 | 국내 가상자금 **₩10,000,000**(설계자 판단: 100만원이면 대형주 1주도 못 사는 종목이 많아 전략이 왜곡됨). 배분비율·종목상한은 미국과 같은 값. |
 | K-D11 | 시장 선택은 인자: `python team.py 40 --market kr` / `--market us`(기본 us). 상태 파일은 시장별: 미국 `state/team_<트레이너>.json`(지금 그대로), 국내 `state/kr/team_<트레이너>.json`. |
 
@@ -47,10 +47,11 @@ class Market:
     fee_rate: float
     sell_tax_rate: float
     slippage: float
-    benchmark: str      # "SPY" | "069500"
+    benchmark: str      # "SPY" | "KS200"   (처음 약속은 "069500" — 2026-11-04 K-D7 변경)
     tz: str             # "America/New_York" | "Asia/Seoul"
     close_cutoff: str   # "16:15" | "16:00"  (현지시간, 이 전이면 오늘 봉 버림)
     total_cash: float   # 10_000 | 10_000_000
+    bench_cutoff: str | None = None   # 2026-11-04 추가: 벤치마크만의 확정 시각. us None(=close_cutoff), kr "22:30"
 MARKETS: dict[str, Market]          # {"us": ..., "kr": ...}
 get_market(key: str) -> Market
 round_to_tick(market_key: str, price: float, side: str) -> float
@@ -152,7 +153,7 @@ reconcile(market_key: str, broker: Broker, date: str) -> str     # 보고서 경
 ## 5. 완료 기준
 
 1. `kr-broker` 에 K1~K4 를 합친 상태에서 `pytest` 전부 통과.
-2. `python team.py 40 --market kr` 이 실제 시세로 종료코드 0, 출력에 `nan` 없음, 금액이 전부 `원`, KODEX 200 비교 줄.
+2. `python team.py 40 --market kr` 이 실제 시세로 종료코드 0, 출력에 `nan` 없음, 금액이 전부 `원`, ~~KODEX 200~~ KOSPI 200(가격지수) 비교 줄 (2026-11-04 K-D7 변경).
 3. `python order_runner.py place --market us --broker paper` / `--market kr` 이 pending 을 주문으로 바꾸고, 두 번 실행해도 주문이 한 번만 기록됨.
 4. (사용자 맥, 키 준비 후) `--broker kis` 로 모의계좌에 국내 1건·미국 1건 지정가 주문이 들어가고 `reconcile` 보고서가 나옴.
 

@@ -323,19 +323,35 @@ def blocked_reason(tries, today):
     return None
 
 
+SIGNAL_LOOKBACK_DAYS = 90      # 신호일 앞으로 이만큼(달력 일) 시세를 받아 '마지막 거래된 봉'을 찾는다(긴 거래정지 대비)
+
+
 def signal_close(market_key, code, signal_date):
-    """신호 봉(signal_date) 종가. 시세를 다시 받아 그 날짜 행의 종가를 쓴다. 못 구하면 None."""
+    """신호 봉 종가 = 신호일(signal_date) '이하'에서 마지막으로 **거래된** 봉의 종가. 못 구하면 None.
+
+    2026-11-04 변경 (I5):
+    - 시세를 그 시장 규칙으로 받는다(main.prices_for). 국내는 market="kr" → 거래정지일(거래량 0) 행이 빠진 시세.
+      예전에는 시장 없이(미국 규칙) 받아서 국내 정지일 행이 그대로 남아 있었다.
+    - 신호일에 봉이 없으면(그 종목이 그날 거래정지 등) 그 앞의 마지막 거래된 봉 종가를 쓴다.
+      시장만 바꾸고 '그 날짜 행'만 찾으면, 정지일이 신호일인 주문(예: 서킷 브레이커 정리)은 종가를 영영 못 구해
+      정지가 풀린 뒤에도 주문이 안 나간다.
+    - 주의: 종이 브로커(broker/paper.py)는 거래정지를 모른다 — 정지 중에 place 하면 지정가에 바로 '체결'로 적는다.
+      KIS 는 정지 종목 주문을 거절(rejected)하고, 다음 거래일에 다시 낼 수 있다(NOT_ACCEPTED_KINDS).
+    """
     try:
-        start = (_date.fromisoformat(signal_date) - timedelta(days=14)).isoformat()
-        df = main.load_prices(code, start)
+        start = (_date.fromisoformat(signal_date) - timedelta(days=SIGNAL_LOOKBACK_DAYS)).isoformat()
+        df = main.prices_for(market_key, code, start)
     except BaseException as e:     # load_prices 는 라이브러리 없으면 SystemExit 을 던진다
         if isinstance(e, KeyboardInterrupt):
             raise
         return None
-    for ts, row in df.iterrows():
-        if ts.date().isoformat() == signal_date:
-            return _num(row["Close"])
-    return None
+    best = None
+    for ts, row in df.sort_index().iterrows():          # 날짜 순서대로 → 마지막으로 남는 값이 '신호일 이하 최신'
+        if ts.date().isoformat() <= signal_date:
+            v = _num(row["Close"])
+            if v is not None:
+                best = v
+    return best
 
 
 # ---------------- ② 주문 내기 ----------------

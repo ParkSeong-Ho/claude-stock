@@ -24,10 +24,13 @@ class Market:
     fee_rate: float     # 매매 수수료율 (살 때·팔 때 각각)
     sell_tax_rate: float  # 매도 거래세 (팔 때만)
     slippage: float     # 체결 미끄러짐 가정
-    benchmark: str      # "SPY" | "069500"
+    benchmark: str      # "SPY" | "KS200"  (국내는 2026-11-04 에 "069500" → "KS200", 아래 설명)
     tz: str             # "America/New_York" | "Asia/Seoul"
     close_cutoff: str   # "16:15" | "16:00"  (현지시간, 이 전이면 오늘 봉 버림)
     total_cash: float   # 10_000 | 10_000_000
+    # 벤치마크 시세만 따로 쓰는 확정 시각(현지시간). None 이면 close_cutoff 와 같다(미국 SPY = 예전 그대로).
+    # 국내 "22:30": KS200 은 장중에 '미완성 오늘 봉'이 올라오므로 밤에야 오늘 봉을 인정한다 (아래 설명, 2026-11-04).
+    bench_cutoff: str | None = None
 
 
 MARKETS = {
@@ -39,12 +42,28 @@ MARKETS = {
     #   매도세 0.20% (증권거래세+농특세, 2026 기준), 슬리피지 0.05%
     #   장 마감 15:30 + 시간외·데이터 반영 여유 → 16:00 KST 이전의 '오늘 봉'은 버린다
     #   가상자금 ₩10,000,000 (100만원이면 대형주 1주도 못 사는 종목이 많아 전략이 왜곡됨)
+    #   벤치마크 = KOSPI 200 '가격지수'(FinanceDataReader 기호 "KS200") — 2026-11-04 변경 (S0-1).
+    #     예전 값은 KODEX 200("069500")이었다. 그런데 FinanceDataReader(네이버)가 주는 069500 시세는
+    #     '분배금(배당)을 다시 넣은' 값이고, 우리 국내 주식 시세는 배당이 빠진 '가격만'이다.
+    #     → 벤치마크만 배당을 받는 셈이라 비교 줄이 벤치마크 쪽으로 연 약 2%p 기울었다.
+    #       (2015-01-02 네이버 069500 19,639원 vs 실제 종가 24,725원 /
+    #        2015~2026 수익률 네이버 069500 +354.8% vs KS200 +261.8%)
+    #     둘 다 '가격만'으로 맞추려고 가격지수 KS200 을 쓴다. 지수라 6자리 종목코드가 아니므로
+    #     main.load_benchmark 만 이 기호를 받을 수 있다(main.load_prices 의 allow_index).
+    #   KS200 시세의 출처 (2026-11-04 확인): 네이버가 아니다. FinanceDataReader 0.9.110 이상은
+    #     GitHub 저장소 FinanceData/fdr_krx_data_cache 의 data/index/year_ks200/<연도>.csv 를 읽는다
+    #     (0.9.90~0.9.102 는 data.krx.co.kr 을 직접 부르는데, 지금은 로그인 없이는 거절됨 → requirements.txt 하한 0.9.110).
+    #     이 캐시는 거래일 12:00~14:20 KST 쯤 '미완성 오늘 봉'(종가가 장중 값, 거래량 절반쯤)을 올리고,
+    #     16:50~21:53 KST 사이에 종가를 고친다(2026-09-10 ~ 11-04 커밋 61개 관찰, 그 뒤 커밋은 거래량만 바뀜).
+    #     그래서 벤치마크만 bench_cutoff="22:30" — 한국 시간 22:30 전에는 KS200 의 '오늘 봉'을 버린다.
+    #     → team 의 기준 날짜도 22:30 전에는 하루 전 봉. 국내 실행 권장: 22:30 KST 이후 또는 다음날 아침 09:00 전.
     "kr": Market(key="kr", currency="KRW", fee_rate=0.00015, sell_tax_rate=0.0020, slippage=0.0005,
-                 benchmark="069500", tz="Asia/Seoul", close_cutoff="16:00", total_cash=10_000_000),
+                 benchmark="KS200", tz="Asia/Seoul", close_cutoff="16:00", total_cash=10_000_000,
+                 bench_cutoff="22:30"),
 }
 
-# 벤치마크를 사람이 읽는 이름 (비교 줄에 찍힘)
-BENCH_NAMES = {"us": "SPY", "kr": "KODEX 200"}
+# 벤치마크를 사람이 읽는 이름 (비교 줄에 찍힘). 국내는 2026-11-04 까지 "KODEX 200" 이었다(위 설명).
+BENCH_NAMES = {"us": "SPY", "kr": "KOSPI 200(가격지수)"}
 
 
 def get_market(key: str) -> Market:

@@ -14,7 +14,7 @@
 이 파일이 하는 일:
   1) 실제 주가를 인터넷에서 가져온다 (미국: 애플, 엔비디아 … 달러 지갑 / 국내: 삼성전자 … 원화 지갑)
      ※ 시장마다 지갑이 따로라 원화와 달러는 절대 섞이지 않는다 (docs/kr-broker-design.md)
-     ※ 아직 안 끝난(장중) 봉·종가가 빈 봉은 버리고 '확정 봉'만 쓴다
+     ※ 아직 안 끝난(장중) 봉·종가가 빈 봉은 버리고 '확정 봉'만 쓴다 (국내는 거래정지일 봉도 버림)
   2) 세 트레이너(마라토너/스프린터/파이오니어)가 각자 규칙으로 가상매매
      ※ 오늘 종가로 판단 → 다음 거래일 시가로 체결 (현실처럼, 미래 데이터 안 봄)
   3) 결과를 정직하게 보여주고, 오류가 나면 안전하게 멈추고 기록한다
@@ -132,16 +132,27 @@ def cash_word(m=None):
 
 # ---------------- 데이터: 확정 봉만 (D1) ----------------
 
-def confirmed_bars(df, now=None, market="us"):
+def confirmed_bars(df, now=None, market="us", cutoff=None):
     """'다 끝난(확정된) 봉'만 남긴다. 순수 함수 — 인터넷을 쓰지 않아서 테스트하기 쉽다.
 
     초보자용 설명:
     - 종가(Close)가 비어 있는(NaN) 행은 버린다. (yahoo가 장 마감 직후 거래량만 채운 행을 줌)
+    - 국내(kr)만: 거래량(Volume)이 0 인 행도 버린다 = 거래정지일 (S0-2, 2026-11-04).
+        네이버는 거래정지일에도 행을 준다. 모양은 'Open=High=Low=0, Close=직전 종가, Volume=0'
+        또는 (삼성바이오로직스 2018-11-15~12-10) 'OHLC 전부 직전 종가, Volume=0'.
+        이 행이 남으면 ① 거래가 없던 날 주문이 '체결'되고 ② 이동평균·RSI·20일 평균 거래량에
+        거래 없는 날이 섞인다. 그래서 그 종목 시세에서는 그날이 '없던 날'이 된다.
+        main·live 는 그 종목의 그날을 아예 처리하지 않는다(신호·체결·보유일수 없음).
+        team 은 기준 날짜(KS200)마다 돌기 때문에, 그 종목의 마지막 봉이 기준 봉보다 앞이면
+        평가만 하고 판단·보유일수를 건너뛴다(team.run_trainer ②). 체결은 다음 거래된 봉 시가.
+        거래량이 비어 있는(NaN) 행은 '모름'이라 그대로 둔다. 미국은 예전과 똑같다(이 규칙 없음).
     - 마지막 봉의 날짜가 그 시장 시간으로 '오늘'인데 아직 확정 시각 전이면,
       그 봉은 아직 장중(미완성)이라 버린다.
         미국: 뉴욕 시간 16:15 전 (D1)   국내: 한국 시간 16:00 전 (K-D9)
+        국내 벤치마크 KS200 만: 한국 시간 22:30 전 (cutoff="22:30", markets.py bench_cutoff 설명)
     now: 기준 시각. 없으면 지금. 시간대가 없는 값은 이 컴퓨터의 현지 시각으로 본다.
     market: "us"(기본) | "kr"
+    cutoff: "HH:MM"(그 시장 현지시간)으로 확정 시각을 바꿔 쓸 때만. 없으면 시장 기본값.
     """
     if df is None or len(df) == 0:
         return df
@@ -149,11 +160,18 @@ def confirmed_bars(df, now=None, market="us"):
     if len(out) == 0:
         return out
     m = mkt(market)
+    if m.key == "kr" and "Volume" in out.columns:
+        out = out[out["Volume"] != 0]          # 거래정지일(거래량 0) 행 버림. NaN != 0 이라 NaN 행은 남는다
+        if len(out) == 0:
+            return out
     if m.key == "us":
         tz, settled = ET, MARKET_SETTLED
     else:
         hh, mm = m.close_cutoff.split(":")
         tz, settled = ZoneInfo(m.tz), time(int(hh), int(mm))
+    if cutoff:
+        hh, mm = cutoff.split(":")
+        settled = time(int(hh), int(mm))
     if now is None:
         now_local = datetime.now(tz)
     else:
@@ -164,12 +182,18 @@ def confirmed_bars(df, now=None, market="us"):
     return out
 
 
-def load_prices(code: str, start: str, now=None, market="us"):
+def load_prices(code: str, start: str, now=None, market="us", allow_index=False):
     """실제 주가 데이터를 가져와 확정 봉만 돌려준다(D1·K-D9). 실패하면 친절한 메시지와 함께 알린다.
-    market="kr" 이면 6자리 국내 코드만 받는다(달러 종목이 원화 지갑에 섞이지 않게)."""
+    market="kr" 이면 6자리 국내 코드만 받는다(달러 종목이 원화 지갑에 섞이지 않게).
+    allow_index: 벤치마크 전용 문(load_benchmark 만 True 로 부른다). True 여도 풀어 주는 건
+      '그 시장의 벤치마크 기호 딱 하나'(국내 "KS200" = KOSPI 200 가격지수)뿐이다.
+      그 밖의 값(예: 미국 티커 "AAPL")은 여전히 국내 종목코드가 아니라서 거부한다.
+    벤치마크 기호(code == 그 시장 benchmark)면 확정 시각은 그 시장 bench_cutoff 를 쓴다
+    (국내 KS200 = 22:30 KST. 미국 SPY 는 bench_cutoff 가 없어 예전 그대로 16:15 ET)."""
     m = mkt(market)
     if m.key == "kr" and not markets.code_ok("kr", code):
-        raise ValueError(f"'{code}' 는 국내 6자리 종목코드가 아니에요 (국내 시장에는 국내 종목만).")
+        if not (allow_index and code == m.benchmark):
+            raise ValueError(f"'{code}' 는 국내 6자리 종목코드가 아니에요 (국내 시장에는 국내 종목만).")
     try:
         import FinanceDataReader as fdr
     except ImportError:
@@ -183,7 +207,8 @@ def load_prices(code: str, start: str, now=None, market="us"):
     # 거래량 칼럼 이름 정리 (파이오니어가 사용)
     if "Volume" not in df.columns and "거래량" in df.columns:
         df = df.rename(columns={"거래량": "Volume"})
-    df = confirmed_bars(df, now, m.key)
+    cutoff = m.bench_cutoff if code == m.benchmark else None
+    df = confirmed_bars(df, now, m.key, cutoff)
     if len(df) == 0:
         raise ValueError(f"'{code}' 확정된 봉이 하나도 없어요.")
     return df
@@ -252,25 +277,37 @@ def _bar_date(window):
 
 
 def open_price(bar):
-    """체결가 = 그날 시가(Open). 시가가 비어 있으면 종가로 대신한다."""
+    """체결가 = 그날 시가(Open). 시가가 없으면(칸 없음·빈칸·NaN·0 이하) None = '이 봉에서는 체결 불가'.
+
+    초보자용 설명 (S0-2, 2026-11-04 변경):
+    - 예전에는 시가가 비면 종가로 대신 체결했다. 그런데 국내 거래정지일 행은
+      'Open=0, Close=직전 종가, Volume=0' 이라서, 거래가 하나도 없던 날 직전 종가로
+      '체결된' 것처럼 장부에 남았다(실제로는 불가능한 체결).
+    - 이제는 종가로 대신하지 않고 None 을 돌려준다. 부르는 쪽(fill_pending, team.run_trainer)은
+      주문을 지우지 않고 그대로 남겨 두었다가 '다음 거래된 봉'의 시가에 체결한다.
+    """
     o = bar.get("Open") if hasattr(bar, "get") else None
     try:
         o = float(o)
     except (TypeError, ValueError):
-        o = float("nan")
-    return o if math.isfinite(o) and o > 0 else float(bar["Close"])
+        return None
+    return o if math.isfinite(o) and o > 0 else None
 
 
 def fill_pending(st, code, bar, date, cash, cap, mk=None):
     """어제 낸 주문(st['pending'])을 오늘 시가로 체결한다. 사람이 읽을 문장을 돌려준다(없으면 None).
     st: {"wallet", "position", "pending", ...} — 이 함수가 직접 고친다.
-    매수 주식 수는 '상한 안에서 비용까지 내고 살 수 있는 만큼'(D5). 0주면 보류로 기록."""
+    매수 주식 수는 '상한 안에서 비용까지 내고 살 수 있는 만큼'(D5). 0주면 보류로 기록.
+    오늘 봉에 시가가 없으면(open_price 가 None) 체결하지 않고 주문을 그대로 남긴다 → 다음 거래된 봉에서 다시."""
     pending = st.get("pending")
     if not pending:
         return None
+    px = open_price(bar)
+    if px is None:
+        # 주의: 주문을 지우기(st["pending"] = None) '전에' 확인한다. 시가 없는 봉에서는 주문이 살아 있어야 한다.
+        return f"{pending.get('action', '주문')} 주문 대기 — {date} 시가 없음(체결 불가), 다음 거래된 봉 시가로 미룸"
     st["pending"] = None
     wallet, position = st["wallet"], st.get("position")
-    px = open_price(bar)
     if pending["action"] == "매수":
         if position is not None:
             return None
@@ -434,7 +471,10 @@ def save_logs(stock_name, r):
 
 
 def load_benchmark(start, mk=None):
-    """벤치마크(미국 SPY / 국내 KODEX 200) 시세를 한 번만 받는다. 실패하면 None (비교 줄에 '계산 불가')."""
+    """벤치마크(미국 SPY / 국내 KOSPI 200 가격지수 KS200) 시세를 한 번만 받는다.
+    실패하면 None (비교 줄에 '계산 불가').
+    국내 벤치마크는 2026-11-04 에 KODEX 200(069500) → KS200 으로 바뀌었다(S0-1, markets.py 설명).
+    KS200 은 지수 기호라 6자리 종목코드가 아니므로, 이 함수만 allow_index=True 로 받는다."""
     m = mkt(mk)
     if m.key == "us":
         try:
@@ -444,9 +484,9 @@ def load_benchmark(start, mk=None):
             return None
     label = markets.BENCH_NAMES[m.key]
     try:
-        return prices_for(m, m.benchmark, start)
+        return load_prices(m.benchmark, start, market=m.key, allow_index=True)
     except Exception as e:
-        print(f"  (벤치마크 {label}({m.benchmark}) 받기 실패: {type(e).__name__} — {label} 비교는 계산 불가로 표시)")
+        print(f"  (벤치마크 {label} [{m.benchmark}] 받기 실패: {type(e).__name__} — {label} 비교는 계산 불가로 표시)")
         return None
 
 
@@ -456,7 +496,7 @@ def _ok_num(v):
 
 def compare_line_market(mk, name, profit, bh, bench_ret, budget):
     """metrics.compare_line 의 시장별 판(국내용). 금액은 그 시장 통화, 벤치마크 이름도 그 시장 것.
-    예: '마라토너 +412,000원 | 그냥 들고 있었으면 +1,950,000원 | KODEX 200 +38% → 패'
+    예: '마라토너 +412,000원 | 그냥 들고 있었으면 +1,950,000원 | KOSPI 200(가격지수) +38% → 패'
     판정 규칙은 metrics.compare_line 과 같다(둘 다 이기면 승, 둘 다 지면 패, 하나만 이기면 반반)."""
     m = mkt(mk)
     label = markets.BENCH_NAMES[m.key]
