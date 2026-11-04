@@ -14,6 +14,8 @@
   경계 하나)마다 **그 규칙만 틀리게 바꾸면 실패하는** 시험(음성 대조·경계값 시험)이 있다. ②는 돌연변이 표본(작성자 41개 +
   검토자 25개, 8절)으로 실제로 확인한 것과, 표본 밖은 시험을 읽어서 판단한 것이 섞여 있다 — 읽어서 판단한 것은 틀릴 수 있다.
   "일부" = 시험 점 하나라도, 또는 규칙 하나라도 그런 시험이 없음. "없음" = 그 항목을 보는 시험이 없음.
+  설계 §10.2f(진행 담당, 717a417)는 "완전 = 돌연변이가 실제로 시험에 잡힐 때만"으로 더 엄하게 정했다. 이 지도에서 그 기준을 실제로
+  확인한 것은 8절 표의 규칙들(작성자 41 + 검토자 25, 지금 모두 잡힘)이고, 나머지 "완전"은 그 기준으로 보면 "읽어서 완전"이다.
 - 파일 이름은 `tests/` 를 뺀다. 예) `test_h1_engine::test_T_START_…` = `tests/test_h1_engine.py` 의 그 함수.
   `[…]` 는 매개변수 이름(그 경우만), `…` 는 이름 뒷부분 줄임(파일 안에서 하나뿐인 앞부분).
 
@@ -355,12 +357,13 @@
 
 ---
 
-## 8. 돌연변이 점검 (표본 41개)
+## 8. 돌연변이 점검 (작성자 41개 + 검토자 25개)
 
 **방법**: `git archive HEAD | tar -x` 로 만든 사본(scratch, 저장소 밖)마다 **한 곳만** 틀리게 바꾸고 전체 pytest(`-x`, 처음 실패에서 멈춤)를
 돌렸다. "잡힘" = 시험이 하나라도 실패(또는 정상 장면 준비가 깨짐). 1차는 단계 3 전 시험(755개)으로 M01~M37, 살아남은 8개(M27·M31~M37)는
 새 시험(`test_h1_gaps.py`)을 넣은 사본으로 다시(2차). M38~M41 은 이번 status 맞추기를 지키는지 보는 것(2차).
-스크립트: scratch `stage3/mut.py`(저장소에 넣지 않음 — 결과는 이 표).
+스크립트: scratch `stage3/mut.py`(저장소에 넣지 않음 — 결과는 이 표). M40 은 그 뒤(검토 3 반영) 지운 `_window_counts` 를
+겨눈 것이라 지금 코드에는 해당 줄이 없다.
 
 | # | 규칙 | 틀리게 바꾼 것 | 1차(단계 3 전) | 처음 잡은 시험 | 2차(단계 3 뒤) |
 |---|---|---|---|---|---|
@@ -411,6 +414,42 @@
 - "정상 장면 준비"로 잡힌 것(M01·M02·M06·M08~M10·M14·M15)은 엔진을 틀리게 바꾸자 봉마다 도는 장부 점검(check_day)이 바로 L 을 내서
   시험용 정상 장면을 만드는 단계에서 멈춘 것이다(엔진 오류 → 점검이 잡음 = 설계가 의도한 두 겹 방어).
 
+**검토자 돌연변이 25개** (`docs/h1-review-3.md` 부록 A, 검토자의 scratch `review3/mut.py` 를 그대로 — 사본만 지금 코드로 바꿔 다시 돌림,
+전체 pytest `-x`). 검토 때(9039f3b) 17개 잡힘·8개 살아남음 → **지금 25개 모두 잡힘**.
+
+| ID | 규칙 | 틀리게 바꾼 것 | 검토 3(9039f3b) | 지금 | 처음 잡은 시험(지금) |
+|---|---|---|---|---|---|
+| K-L11lo | L11 지수 자금 매도 | 하한 `short <= got` 지움 | **살아남음** | 잡힘 | `test_h1_gaps::test_T9_규칙마다_음성_대조[L11하한]` |
+| K-L12A1 | L12 A1 여유 | A1 도 `need > avail` | 잡힘 | 잡힘 | `test_h1_check::test_B6_경계_보류_need_약_avail_1빼기_1e9[5e-10-True]` |
+| K-L15split | L15 분할 반영 매수가 | `applied_after >= 매수일` → `>` | **살아남음** | 잡힘 | `test_h1_gaps::test_T2_산_날_장_마감_뒤_분할_적용_경계는_L_없음` |
+| K-L22env | L22 | env 무시(code_hash 만) | 잡힘 | 잡힘 | `test_h1_check::test_음성_대조_L22_코드_환경_종목군` |
+| K-L23pair | L23 짝 점검 | 두 장부 등록 비교 끔 | 잡힘 | 잡힘 | `test_h1_check::test_B1_두_장부의_등록이_다르면_짝_점검_L23` |
+| K-L4sig | L4 신호일 < 체결일 | 끔 | **살아남음** | 잡힘 | `test_h1_gaps::test_T9_규칙마다_음성_대조[L4신호일]` |
+| K-L17verdict | check_pair L17 | 판정 비교 끔(열쇠만) | **살아남음** | 잡힘 | `test_h1_gaps::test_T9_규칙마다_음성_대조[L17짝판정]` |
+| K-L18prefix | L18 HEAD 앞부분 sha | 줄 수만 봄 | 잡힘 | 잡힘 | `test_h1_check::test_음성_대조_L18_판정_기록` |
+| H-D3close | D3 이상한 종가 | 끔 | 잡힘 | 잡힘 | `test_h1_review2b2::test_C13_보유_종목_t_종가가_이상하면_D3[0.0]` |
+| H-D6days | D6 비교 날 수 | 최근 5일 → 1일 | 잡힘 | 잡힘 | `test_h1_gaps::test_G13_정정_확정도_corp_actions_jsonl_과_changes_jsonl_에_남음` |
+| H-D7plus1m | D7 확정 시각 | +1분 | 잡힘 | 잡힘 | `test_h1_gaps::test_G8_KS200_확정_시각_22시30분_정각` |
+| H-D5half | D5 절반 | `>=` → `>` | 잡힘 | 잡힘 | `test_h1_review2b2::test_C17_D5_종목군_정확히_절반이_거래한_날도_구멍` |
+| H-D2delist | D2 상장폐지 제외 | 등록 종목도 받기 대상 | 잡힘 | 잡힘 | `test_h1_gaps::test_G9_국내_상장폐지_정리_비용은_그_봉_날짜_매도세` |
+| H-HEADrestore | HEAD 복구 | 백업이 HEAD 와 맞는지 안 봄 | **살아남음** | 잡힘 | `test_h1_gaps::test_T1_백업이_있어도_HEAD_와_안_맞으면_되살리지_않고_L24` |
+| H-backupAfter | 커밋 순서 | 백업을 장부 6개 쓴 뒤에 | 잡힘 | 잡힘 | `test_h1_gaps::test_T1_백업이_있어도_HEAD_와_안_맞으면_되살리지_않고_L24` |
+| H-L24mid | L24 판정 기록 가운데 줄 | 깨진 줄 건너뜀 | 잡힘 | 잡힘 | `test_h1_engine::test_T_JSONL_중간_줄_깨짐_중복_열쇠` |
+| H-fpA | ④ (가) | 지문 비교 없이 통과 줄만 | 잡힘 | 잡힘 | `test_h1_gaps::test_S3_거짓_양성_조건이_틀리면_status_도_L_1[가]` |
+| H-fpB | ④ (나) | 내용 지문 비교 끔 | 잡힘 | 잡힘 | `test_h1_gaps::test_S3_거짓_양성_조건이_틀리면_status_도_L_1[나]` |
+| H-delistTaxDate | ⑦-4 정리 세율 날짜 | 정리 봉 → 등록 마지막 거래일 | **살아남음** | 잡힘 | `test_h1_gaps::test_G9_국내_상장폐지_정리_비용은_그_봉_날짜_매도세` |
+| H-restartCap | ⑤ 재시작 상한 | `>=` → `>` | 잡힘 | 잡힘 | `test_h1_gaps::test_재시작_수는_status_restart_보고서가_같은_규칙` |
+| R-lateExt | status 늦은 봉 경계 | S+62 대신 마지막 봉까지 | **살아남음** | 잡힘 | `test_h1_gaps::test_T7_status_늦은_봉과_팀장_수는_S62_에서_끊김` |
+| R-leaderExt | status 팀장 수 경계 | S+62 대신 마지막 봉까지 | **살아남음** | 잡힘 | `test_h1_gaps::test_T7_status_늦은_봉과_팀장_수는_S62_에서_끊김` |
+| R-preRuns | 창 세기(같은 시각) | 창 만든 start 전 실행 빼기 끔 | 잡힘 | 잡힘 | `test_h1_gaps::test_S4_실패한_start_뒤_같은_S_로_다시_시작한_창은_status_도_0[True]` |
+| R-market | ① 시장별 | 일지 줄의 시장 확인 끔 | 잡힘 | 잡힘 | `test_h1_gaps::test_G12_다른_시장의_L_과_멈춤은_이_시장_숫자에_안_섞임` |
+| R-fb20 | ⑧ 20% | `>` → `>=` | 잡힘 | 잡힘 | `test_h1_report::test_T_F8a_폴백_20퍼센트_경계[1-5-False]` |
+
+- 살아남았던 8개를 잡는 시험은 모두 이번에 더한 것(T1·T2·T7·T9·G9 바꿈). 검토자가 "겹치는 규칙이라 사실상 같은 동작"이라 한
+  K-L4sig·K-L17verdict 도 따로 음성 대조를 넣어 잡게 했다(진행 담당 결정).
+- 검토자의 확인 시험(부록 B)을 지금 코드로 돌리면 P1(연장 L 이 보고서에 없음)·P2(요약이 자기 D7 을 안 셈)는 **이제 실패**(고쳐져서),
+  P4~P7 은 바른 동작 그대로 통과.
+
 ---
 
 ## 9. 시험 환경 점검 (방법·결과·다시 돌리는 법)
@@ -420,63 +459,81 @@
 
 **도구**: `tools/h1_test_guard.py` — **저장소에 두었다**(판단 이유: 단계 4 독립 검토와 단계 7 맥 운영 전 확인 때 같은 방법으로 다시
 돌려야 한다. 운영 코드가 아니고 `CODE_FILES` 밖이라 code_hash·관문에 영향이 없고, h1.py 가 읽지 않으며, 저장소에는 아무것도 쓰지 않고
-임시 폴더만 쓴다). 하는 일:
+임시 폴더만 쓴다 — 예외로 끝나도 `try/finally` 로 지움). 검토 3(T-3·T-4·T-13) 뒤 하는 일:
 
 | 점검 | 방법 |
 |---|---|
-| 인터넷 | 임시 폴더의 `sitecustomize.py` 를 PYTHONPATH 맨 앞에 둔다. `socket.socket.connect`·`connect_ex`·`socket.create_connection`·`socket.getaddrinfo`(localhost 밖)·`urllib.request.urlopen` 을 부르면 기록하고 OSError. pytest 프로세스와 시험이 `-I` 없이 띄우는 파이썬 하위 프로세스(`python h1.py …`)까지 막힌다. 원래 sitecustomize(이 컨테이너의 zlib 고침)는 이어서 불러 준다 |
-| 진짜 claude | 임시 폴더의 가짜 `claude`(불리면 기록·종료 코드 97)를 PATH 맨 앞에. 따로 진행 담당이 준 기존 가짜(scratch `trapbin/claude` → `claude_calls.log`)를 PATH 맨 앞에 두고 전체 pytest 를 한 번 더 돌림 |
-| 결정성 | `PYTHONHASHSEED` 0·12345 × `TZ` UTC·Asia/Seoul·America/New_York × `LANG=C`(`LC_ALL=C`) = 6번 |
-| 순서 | 모은 시험 항목을 통째로 거꾸로(파일 순서와 파일 안 순서 둘 다, 작은 pytest 플러그인 `-p h1_guard_reverse`) 1번. 이 저장소에는 pytest-randomly 가 없다 |
-| 비교 | 7번 모두 junit xml 로 시험마다 결과(통과·실패·건너뜀)를 모아 서로 같은지 |
-| 저장소 | 시작 전·끝난 뒤 `git status --porcelain --untracked-files=all` 이 같은지, `state/`·`results/` 가 새로 생기지 않았는지 |
+| 인터넷(파이썬 수준) | 임시 폴더의 `sitecustomize.py` 를 PYTHONPATH 맨 앞에. `socket.socket.connect`·`connect_ex`, `_socket.socket`(C 소켓 형을 감싼 형으로 바꿔 끼움)의 `connect`·`connect_ex`, `socket.create_connection`, `socket.getaddrinfo`(localhost 밖), `urllib.request.urlopen` 을 부르면 기록하고 OSError. 기록 파일 경로는 sitecustomize 글자 안에 박혀 있어 env 와 상관없다. `subprocess.Popen` 도 감싸서 시험이 **env 를 새로 주거나 PYTHONPATH 를 덮어써** 하위 파이썬을 띄워도 지킴이 폴더를 PYTHONPATH 맨 앞에 다시 붙인다. 원래 sitecustomize(이 컨테이너의 zlib 고침)는 이어서 불러 준다 |
+| 인터넷(이름공간, 리눅스 선택) | `--netns`: pytest 전체를 `unshare -rn`(네트워크가 없는 이름공간)에서. 아래 "못 막는 길"도 실제로는 밖으로 못 나간다(기록 대신 연결 실패로 드러남) |
+| 진짜 claude | 임시 폴더의 가짜 `claude`(불리면 기록·종료 코드 97)를 PATH 맨 앞에. **기록 파일 절대 경로를 스크립트 글자에 박아** env 를 새로 준 하위 프로세스가 불러도 기록된다. 따로 진행 담당이 준 기존 가짜(scratch `trapbin/claude`)로도 전체 pytest 를 돌림 |
+| 결정성 | `PYTHONHASHSEED` 0·12345 × `TZ` UTC·Asia/Seoul·America/New_York 6번, LANG 은 그중에서 `C`·`C.UTF-8`·`ko_KR.UTF-8`(이 컨테이너에는 없음 → C·C.UTF-8 만)을 돌아가며. `--grid` 이면 셋의 곱 전부. (파이썬은 C 로캘에서도 UTF-8 모드로 돌아 C 만으로는 비 UTF-8 이 안 된다 — 그래서 C.UTF-8·ko_KR 을 따로 돌림) |
+| 순서 | 시험 항목 통째 역순 1번 + 시험 **파일** 순서를 씨앗(20261104)으로 섞은 1번(파일 안 순서는 그대로 — 파일 범위 준비물이 한 번만 만들어지게). 작은 pytest 플러그인 `-p h1_guard_order` |
+| 비교 | 모든 실행의 junit xml 로 시험마다 결과(통과·실패·건너뜀)가 같은지 |
+| 저장소 | 앞뒤로 ① `state/`·`results/` 아래 모든 항목(무시 파일 포함, **폴더가 이미 있어도**)의 크기·수정 시각·sha256 ② `git status --porcelain --ignored --untracked-files=all` ③ 그 목록의 추적 안 되는·무시되는 파일마다 크기·수정 시각·sha256. 바이트코드 캐시(`__pycache__`·`*.pyc`)는 `python -I` 하위 프로세스가 PYTHONDONTWRITEBYTECODE 를 무시하고 써서 따로 알리기만 함(실패로 안 침), `.pytest_cache`·`.ruff_cache` 는 도구 캐시라 뺌 |
 
-**지킴이가 정말 잡는지(시험의 시험)**: scratch 에 일부러 나쁜 시험 5개(urlopen·create_connection·`claude --version`·TZ 의존·순서 의존)를
-두고 `--quick` 으로 돌림 → 인터넷 시도 4번·claude 호출 2번을 기록하고, TZ 의존 시험은 Asia/Seoul 에서, 순서 의존 시험은 역순에서 실패해
-"어긋남"으로 보고함(종료 코드 1). 그 파일은 저장소에 넣지 않았다.
+**시험 쪽 지킴이**(T-3): h1 시험 파일 넷(`test_h1_runner`·`test_h1_report`·`test_h1_review2b2`·`test_h1_gaps`)의 fixture 가 시험마다 앞뒤로
+`state/`·`results/` 아래 모든 항목(폴더가 이미 있어도)의 종류·크기·수정 시각을 견준다(`tests/h1_repo_guard.py`). 시험 수백 개마다
+맥 `state/` 를 해시하면 느려서 sha256 은 안 본다 — 같은 크기로 쓰고 수정 시각까지 되돌린 바꿈은 못 보지만(`test_T3_저장소_도우미…` 가
+이 한계를 그대로 시험으로 적음) 그런 바꿈은 지킴이 도구가 sha256 으로 본다.
 
-**결과** (지킴이 전부 실행을 두 번 — 단계 3 코드 마지막 손질 전·후 — 돌렸고 둘 다 아래와 같음)
+**맥처럼 `state/h1` 이 이미 있는 상태**: 저장소에 `state/` 를 만들 수 없으므로(이 컨테이너 규칙) 가짜 저장소로 흉내 낸다 —
+`test_T3_지킴이는_맥처럼_state_h1_이_이미_있어도_그_안의_변화를_잡음`: 임시 폴더에 `tools/h1_test_guard.py` 를 복사하고 `state/h1/us/HEAD.json`·
+`state/h1/runs.jsonl` 을 미리 둔 뒤, 그 `runs.jsonl` 에 한 줄 더하는 시험을 지킴이로 돌리면 종료 코드 1·그 파일 이름을 알리고, 아무것도
+안 건드리는 시험이면 통과(그 안의 파일 sha256 그대로)·임시 폴더 지워짐.
+
+**못 막는 길(정직하게)** — 아래는 지킴이의 파이썬 수준 막기로는 **기록되지 않는다**(`--netns` 를 쓰면 실제 연결은 실패):
+1. `python -I` 하위 프로세스(PYTHONPATH 무시). 이 저장소 시험 3개가 이렇게 띄운다(`test_h1_engine::test_T_ENTRY_운영_경로에서_h1_을_읽지_않는다`,
+   `test_h1_engine::test_h1_h1_check_어느_쪽을_먼저_읽어도_된다`, `test_h1_report::test_T_F8b_R2_sim_team_을_python_I_로_부른_결과와_같음`) —
+   셋 다 시세 받기·claude 를 쓰지 않는다(소스와 R2 `sim_team.load_frames` 가 저장된 CSV 만 읽음을 확인).
+2. `subprocess` 를 거치지 않고 env 를 새로 준 하위 프로세스(`os.execve`·`os.posix_spawn` 등).
+3. 파이썬 밖: ctypes 로 libc `connect`, C 로 만든 HTTP 라이브러리(이 venv 에 `curl_cffi`·`yfinance` 가 깔려 있음 — 저장소 코드는 안 씀),
+   `curl` 같은 다른 프로그램.
+4. 지킴이보다 먼저 `from _socket import socket` 처럼 잡아 둔 이름.
+5. 가짜 claude: PATH 를 통째로 바꾸거나 claude 를 절대 경로로 부르는 길(시험 파일마다의 지킴이 — `analyst`·`subprocess.run` 바꿔 끼우기 — 가 그 몫).
+검토 3 의 우회 시험(부록 C)을 새 지킴이로 다시 돌린 결과: 같은 프로세스(C0)·env 를 새로 준 하위 파이썬(B2)·PYTHONPATH 를 덮어쓴 하위
+파이썬(B3)·`_socket` 직접(B4)은 **막히고 기록됨**(전에는 B2~B4 통과·기록 0), `python -I`(B1)·ctypes(B5)는 여전히 연결됨(위 1·3),
+env 에 기록 변수가 없는 가짜 claude 호출(B6)은 **기록됨**(전에는 0).
+
+**지킴이가 정말 잡는지(시험의 시험)**: 위 맥 흉내 시험 외에, scratch 의 일부러 나쁜 시험(인터넷·claude·TZ 의존·순서 의존)과 검토 3 우회
+시험으로 확인(저장소에 넣지 않음).
+
+**결과** (마지막 코드로)
 
 | 실행 | 결과 |
 |---|---|
-| seed0 × UTC·Seoul·NewYork, seed12345 × UTC·Seoul·NewYork (LANG=C) | 6번 모두 789 passed |
-| 역순(seed12345·Seoul) | 789 passed |
-| 시험마다 결과 | 7번 모두 같음 |
-| 인터넷 시도 | 0번 |
-| 가짜 claude 호출 | 0번(지킴이 가짜) · 0번(기존 trapbin 가짜: `claude_calls.log` 가 생기지 않음, 789 passed) |
-| 저장소 `state/`·`results/` | 생기지 않음 · git status 그대로 |
-
-- 못 막는 곳(알고 넘어감): `python -I` 로 띄우는 짧은 하위 스크립트 3종(`test_h1_engine::test_T_ENTRY_운영_경로에서_h1_을_읽지_않는다`,
-  `test_h1_engine::test_h1_h1_check_어느_쪽을_먼저_읽어도_된다`, `test_h1_report::test_T_F8b_R2_sim_team_을_python_I_로_부른_결과와_같음`)은
-  PYTHONPATH 를 무시해 sitecustomize 가 안 실린다. 세 스크립트 모두 시세 받기·claude 를 쓰지 않는다(소스 확인).
-- 각 시험 파일도 따로 지킨다: `analyst.analyze_logged·analyze·claude_cli_version` 을 부르면 실패, `subprocess.run(["claude", …])` 금지,
-  보고서·gaps 시험은 `urllib.request.urlopen` 을 부르면 BaseException, 끝나면 저장소 `state/` 가 없어야 함.
+| `--quick`(기본 seed0·UTC·C / 역순 seed12345·Seoul·C.UTF-8 / 파일 순서 섞기 seed12345·NewYork·C.UTF-8) | 3번 모두 **804 passed**, 결과 같음, 인터넷 0·claude 0, state/·results/ 그대로, git status(무시 파일·내용 포함) 그대로 |
+| `--quick --netns`(네트워크 없는 이름공간) | 3번 모두 804 passed, 같은 결과, 모두 통과 |
+| 전부(seed 0·12345 × TZ 3 = 6번, LANG 은 C·C.UTF-8 을 돌아가며 + 역순 + 섞기 = 8번) | 8번 모두 **804 passed**, 시험마다 결과 같음, 인터넷 0·claude 0, state/·results/ 그대로. 이 실행 도중 진행 쪽 스냅샷 커밋(ba65a42)이 들어와 git status 비교가 "바뀜"으로 나옴 — 지킴이가 저장소 변화를 제대로 알아챈 것이고 시험이 쓴 것이 아님(바뀐 줄은 모두 커밋된 작업 파일). 커밋 없이 다시 돌린 결과는 아래 줄 |
+| 전부 다시(커밋 없는 상태) | 8번 모두 **804 passed**, 시험마다 결과 같음, 인터넷 0·claude 0, state/·results/ 그대로, git status(무시 파일·내용 포함) 그대로 → **모두 통과**(참고: `python -I` 하위 프로세스가 쓴 바이트코드 캐시 13줄은 따로 알림, 끝난 뒤 지움) |
+| 진행 담당이 준 기존 가짜 claude(scratch `trapbin/claude`)를 PATH 맨 앞에 두고 전체 pytest | 804 passed, `claude_calls.log` 가 생기지 않음(호출 0) |
 
 **다시 돌리는 법**
 ```
-~/.venv-cs/bin/python tools/h1_test_guard.py              # 전부(전체 pytest 7번, 3개씩 함께 → 이 컨테이너에서 약 5분)
-~/.venv-cs/bin/python tools/h1_test_guard.py --quick      # 기본 1번 + 역순 1번
+~/.venv-cs/bin/python tools/h1_test_guard.py              # 전부(pytest 8번, 3개씩 함께 → 이 컨테이너에서 약 5분)
+~/.venv-cs/bin/python tools/h1_test_guard.py --quick      # 기본 + 역순 + 파일 순서 섞기, 3번
+~/.venv-cs/bin/python tools/h1_test_guard.py --netns      # (리눅스) 네트워크 없는 이름공간에서
+~/.venv-cs/bin/python tools/h1_test_guard.py --grid       # 씨앗 × TZ × LANG 전부
 ~/.venv-cs/bin/python tools/h1_test_guard.py -- tests/test_h1_gaps.py   # 대상 지정
 # 종료 코드 0 = 모두 통과, 1 = 어긋남(무엇이 어긋났는지 화면에). --keep 이면 임시 폴더(로그·junit xml)를 남김
 ```
 
 ---
 
-## 10. 설계에 반영할 것 (진행 담당 몫 — 이 단계에서 설계 문서는 고치지 않았다)
+## 10. 설계에 반영할 것 (진행 담당 몫 — 시험 담당은 설계 문서를 고치지 않았다)
+
+진행 담당이 717a417 에서 이미 반영한 것: ⑩ 의 "종목군 파일 지문은 L22", §4 D4 "이미 처리한 구간에 새 날짜가 끼어듦도 D4",
+§4 끝 "음성 대조는 코드 안의 규칙마다", 정각 경계(봉 시작 next_open 정각 = 늦은 봉, 묻기 직전 정각 = 안 물음, D7 정각부터,
+start 는 next_open(S) 정각부터 거절), §10.2e "status 와 보고서"(같은 함수·같은 범위·재시작 수도 같은 함수), §10.2f(지도·새 시험 ID·
+지킴이 도구). 남은 것:
 
 | # | 어디 | 지금 설계 | 실제 동작·제안 |
 |---|---|---|---|
-| 1 | §10.2e "status 와 보고서" | "단계 3 에서 맞춘다" | 맞췄다: status·실행 끝 요약은 `h1_report.window_counts`(= 보고서 `_journal_counts`) 하나로 센다. 범위는 **보고서 --final 과 같다**(창이 다 차면 S~S+62, 그 뒤 L 은 "연장 구간 L"로 따로, 덜 차면 지금까지). ④ 거짓 양성은 빼고 따로 보임. status 는 자기 시작 줄을 빼고, 실행 끝 요약은 곧 쓸 자기 끝 줄을 더해 센다(종료 코드 7 이면 D7 멈춤 1). 늦은 봉·팀장 LLM/폴백도 S+62 에서 끊는다. 창 크기는 meta.rules. h1 은 이때만 h1_report 를 늦게 import. 표의 "단계 3 에서"를 결정 문장으로 바꿔 적기 |
-| 2 | §3.8-2 운영 기준 | "L 오류 수(`errors.jsonl`)" | §10.2e R-2 대로 "errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), ④ 거짓 양성은 빼고 따로"로 본문 고치기 |
-| 3 | §3.8 `--final` 연장 기록 | S+62 뒤 처리한 봉 | 연장 봉이 아직 없어도 S+62 뒤 봉을 처리하다 난 L 은 연장 절에 한 줄로 보인다(판정에는 안 씀, 검토 T-5) — 본문에 더하기 |
+| 1 | §3.8-2 운영 기준 본문 | "L 오류 수(`errors.jsonl`)" | §10.2e R-2·"status 와 보고서" 대로 "errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), ④ 거짓 양성은 빼고 따로"로 본문 고치기 |
+| 2 | §3.8 `--final` 연장 기록 | S+62 뒤 처리한 봉 | 연장 봉이 아직 없어도 S+62 뒤 봉을 처리하다 난 L 은 연장 절에 한 줄로 보인다(판정에는 안 씀, 검토 T-5) — 본문에 더하기 |
+| 3 | §3.3 요약 | "점검 L 0 · 자료 멈춤 0 · … · 팀장 LLM 3 / 폴백 0" | 요약은 곧 쓸 자기 끝 줄을 더해 센다(종료 코드 7 이면 "자료 멈춤 1"), 판정 창 크기·늦은 봉·팀장 수는 S+62 까지·meta.rules, "점검 L N (④ 거짓 양성 K건 뺌)" 표시 — 요약 예 설명에 한 줄 |
 | 4 | §3.7 runs.jsonl "창 세기" | `_in_window` 만 적음 | "같은 시각이면 창을 만든 start 보다 먼저 시작한 실행의 줄은 뺀다(보고서·status 모두)"를 더하기 |
-| 5 | §3.3 요약 예 | "팀장 LLM 3 / 폴백 0" | 팀장 수의 분모가 보고서 ⑧ 과 같다(이 창 하루 기록이 가리키는 판정 기록, `h1.window_decision_keys`)는 것과 "점검 L N (④ 거짓 양성 K건 뺌)" 표시를 적기 |
-| 6 | §10.2e R-7 재시작 수 | 보고서만 "세 출처 중 큰 값" | **바꿈**(진행 담당 결정): status 머리·`restart` 상한 확인·`start` 의 meta.restart_no 도 같은 `h1.restart_info`(보수적으로 큰 값). 설계 §2.2 ⑤·§3.9(8 거절)·§10.2e R-7 에 "재시작 수는 어디서나 이 규칙"을 적기 |
-| 7 | §2.2 ⑩ | "종목군 파일 지문"을 '다르면 종료 코드 3' 목록에 넣음 | 실제(그리고 §4 L22)는 `meta.universe_sha256` 와 다르면 **L22(종료 코드 2)**. ⑩ 목록에서 빼거나 "(L22 로 봄)"을 붙이기 |
-| 8 | §4 D4 | "이미 처리한 날짜가 새 달력에 없음" | 구현은 "이미 처리한 구간(S 전 거래일~last_date)에 새 날짜가 끼어듦"도 D4(코드 주석 '설계 D4 를 넓혀 해석', 시험 `test_T_CAL_처리한_구간에_날짜가_끼어들면_D4`). 설계 표에 더하기 |
-| 9 | §2.3-2·§4 D7 | "next_open(t) 를 지났으면", "확정 시각 … 뒤" | 정각이 어느 쪽인지 적기: 봉 시작 `지금 < next_open` 이면 llm(정각은 late), 묻기 직전 `지금 ≥ next_open` 이면 안 물음, D7 은 `지금 ≥ 확정 시각`(정각 포함 — `main.confirmed_bars` 가 정각부터 그 봉을 확정으로 침), start 는 `지금 ≥ next_open(S)` 거절. 정각 시험으로 고정함(G8) |
-| 10 | §2.5 읽을 때 | "backup 이 HEAD 와 맞을 때 되살림, 그 밖은 L24" | 그대로 맞음 — 백업이 있지만 HEAD 와 다르면 L24 임을 시험(T1)으로 고정. 설계 문구 그대로 둬도 됨 |
-| 11 | §3.6 판정 기록 | "재시작해도 지우지 않는다. 새 창의 같은 열쇠는 이 기록을 다시 쓴다" | 옛 창이 늦게 처리해 `late_no_llm` 으로 남긴 열쇠도 새 창이 그대로 다시 쓴다(새 창 S 가 제때여도 LLM 안 부름) → 새 창 ⑧ 폴백 비율에 들어간다(T14c). 의도가 맞는지 §2.2 ⑤ 또는 §3.6 에 한 줄 |
-| 12 | §6 표 | | 새 시험 ID 제안: **T-STATUS**(status·요약 = 보고서 숫자, `test_S1_…`~`test_S4_…`·`test_T5_…`~`test_T7_…`), **T-EXIT1**(종료 코드 1, `test_G2_…`), **T-W**(정상 장면 W 없음, `test_G10_…`), **T-RULES**(⑩ 전부, `test_G11_…`), **T-RESTARTN**(재시작 수 한 규칙). T-HEAD 에 "백업이 있지만 HEAD 와 다름 → L24", T-RETRO 에 "산 날 마감 뒤 분할", T-DELIST 에 "세율 구간이 다른 두 날짜", T-LLMTIME·T-CAL·T-NEWSTART 에 "정각" 경계, T-L 에 "코드 안의 세부 규칙마다 음성 대조" |
-| 13 | §4 끝 "(a) 음성 대조" | 코드마다 | "점검 코드 안의 **규칙마다**"로. 돌연변이에서 코드에는 음성 대조가 있어도 규칙 하나가 비어 있던 곳이 6곳(L5·L10·L19, 검토 3 의 L11 하한·L4 신호일·L17 짝 판정) |
-| 14 | §6 머리 "바꿔 끼우는 곳" | | 시험 환경 점검 도구 `tools/h1_test_guard.py` 와 그 결과·못 막는 길(9절)을 단계 4·7 확인 목록에 넣기. 맥(단계 7)에서는 저장소 `state/h1` 이 이미 있으므로 지킴이가 그 안을 sha256 까지 앞뒤로 견준다는 것도 |
+| 5 | §2.2 ⑤·§3.9(8 거절) | 재시작 상한 2번 | 상한 확인과 `start` 가 meta 에 적는 restart_no 도 R-7 규칙(세 출처 중 큰 값, `h1.restart_info`)을 쓴다 — ⑤ 에 "재시작 수는 어디서나 이 규칙" 한 줄 |
+| 6 | §3.6 판정 기록 | "재시작해도 지우지 않는다. 새 창의 같은 열쇠는 이 기록을 다시 쓴다" | 옛 창이 늦게 처리해 `late_no_llm` 으로 남긴 열쇠도 새 창이 그대로 다시 쓴다(새 창 S 가 제때여도 LLM 안 부름) → 새 창 ⑧ 폴백 비율에 들어간다(T14c). 의도가 맞는지 한 줄 |
+| 7 | §6 표 | §10.2f 의 새 ID | §10.2f 에 더해: **T-RESTARTN**(재시작 수 한 규칙), T-HEAD 에 "백업이 있지만 HEAD 와 다름 → L24", T-RETRO 에 "산 날 마감 뒤 분할", T-DELIST 에 "세율 구간이 다른 두 날짜" — 본문 §6 표에도 옮기기 |
+| 8 | §10.2f "완전" 기준 | "돌연변이가 실제로 시험에 잡힐 때만" | 이 지도는 그 기준을 66개 규칙(8절)에만 실제로 확인했고, 나머지는 시험을 읽어 판단했다(머리말). 남은 규칙까지 돌연변이로 넓힐지는 단계 4 검토에서 정하기 |
+| 9 | §8 맥 운영·단계 7 | | 단계 7 맥 확인에 `tools/h1_test_guard.py`(맥은 `--netns` 없음, 저장소 `state/h1` 이 이미 있으면 그 안을 sha256 까지 앞뒤로 견줌)와 9절 "못 막는 길"을 넣기 |
