@@ -227,6 +227,7 @@ class MarketData:
             raise ValueError("지수 코드가 종목 코드와 겹침")
         self.rate_pct = rate_for_days(self.cal, rates, rate_rule)
         self.rate_rule = rate_rule
+        self.rates_raw = rates                       # 점검용: 원래 금리 표(점검 쪽이 규칙을 따로 다시 계산)
         self.zero_volume = zero_volume or {}
         self.tax_at_cal = np.array([self.tax(d) for d in self.dstr])
         self._calendar_flags()
@@ -364,7 +365,7 @@ class Sleeve:
         self.brain = brain              # 브레인 이름 (None = 트레이너 없음: 지수/현금만)
         self.start_cash = budget        # team.py st["start_cash"]
         self.cap = cap                  # 종목상한 비율
-        self.cap_budget = budget        # shares_within_cap 의 budget (H4 재배분 뒤에만 바뀜, I5)
+        self.cap_budget = budget        # shares_within_cap 의 budget (H4 몫이 바뀌면 시작 예산 × 새 몫 ÷ 기본몫, B6)
         self.idle = idle                # "cash" | "index" | "trend"
         self.wallet: PaperWallet = wallet
         self.positions: dict = {}       # code -> {"buy_price","days_held","shares","buy_date","entry_own","trade"}
@@ -423,7 +424,10 @@ class TeamSim:
         elif arm == "IDX":
             self.sleeves.append(self._sleeve("지수B&H", None, self.total, 0.0, "index"))
         self.trainers = [s for s in self.sleeves if s.brain]
-        self.h4_w = {s.name: ratios[s.name] / sum(ratios[x.name] for x in self.trainers) for s in self.trainers}
+        bw = np.asarray([ratios[x.name] for x in self.trainers], float)
+        bw = bw / np.sum(bw) if len(bw) else bw
+        self.h4_base = {x.name: float(b) for x, b in zip(self.trainers, bw)}   # 기본몫(60/30/10 을 합 1로)
+        self.h4_w = dict(self.h4_base)                                        # 지금 목표 몫 (B6 의 w_old)
         self.fills, self.orders, self.skips, self.trades, self.events = [], [], [], [], []
         self.open_fallbacks = 0
         self.rows = []
@@ -577,7 +581,9 @@ class TeamSim:
         avail = w.cash
         if mode == "index":
             avail += s.units(md.idx_code) * self._idx_net_per_unit(s, t)
-        if need > avail:
+        # R6: 지수를 팔아야 하는 날은 1e-9 여유를 둔다(팔고 나서 부동소수점 차이로 매수가 실패해 왕복 비용을 내지 않게)
+        short_of_cash = need > avail * (1 - 1e-9) if mode == "index" else need > avail
+        if short_of_cash:
             why = f"현금 부족 (필요 {main.fmt(md.mk, px * n, False)}, 보유 {main.fmt(md.mk, avail, False)})"
             self._skip(s, stock.code, why, t, "현금부족")
             return
@@ -590,7 +596,7 @@ class TeamSim:
         tr = {"sleeve": s.name, "trainer": s.brain, "code": stock.code, "entry_date": md.dstr[t], "entry_cal": t,
               "entry_own": j, "shares": n, "entry_price": px, "notional": px * n, "entry_spent": need,
               "signal_date": o["signal_date"], "signal_reason": o.get("reason", ""), "cap_mult": o["cap_mult"],
-              "exit_date": None, "exit_cal": None,
+              "cap_budget": budget, "cap": cap, "exit_date": None, "exit_cal": None,
               "exit_own": None, "exit_price": None, "exit_net": None, "exit_reason": None}
         self.trades.append(tr)
         s.positions[stock.code] = {"code": stock.code, "buy_price": px, "days_held": 0, "shares": n,
@@ -608,13 +614,21 @@ class TeamSim:
         return v
 
     def _realloc(self, t: int):
+        """H4 (사전 등록 §7 H4 + 보완 B6). 분기 첫 거래일 시가, 그날 체결이 끝난 뒤.
+        - 새 몫 w_new 를 지난 월 초과수익으로 계산(h4_weights). n<20 이면 기본몫 그대로.
+        - 몫이 바뀌면 옮기는 양 = (w_new − w_old) × V 뿐 (V = 그날 시가 기준 세 트레이너 합계).
+          그동안 저절로 벌어진 지갑 크기 차이(표류)는 건드리지 않는다.
+        - 받는 쪽(Δ>0)은 Δ 비율대로 나눠 받고, 주는 쪽(Δ<0)은 자기 대기 자산(지수 단위)까지만 준다("가능한 만큼만").
+        - 지수 단위만 옮기고 비용은 없다(I7). 종목상한 기준 = 시작 예산 × w_new ÷ 기본몫."""
         md = self.md
         tr = self.trainers
-        base = {s.name: (self.cfg.ratios or RATIOS)[s.name] for s in tr}
-        w_new, tstats = h4_weights([s.excess for s in tr], [base[s.name] for s in tr])
-        w_new = dict(zip([s.name for s in tr], w_new))
+        names = [s.name for s in tr]
+        ratios = self.cfg.ratios or RATIOS
+        w_list, tstats = h4_weights([s.excess for s in tr], [ratios[k] for k in names])
+        w_new = dict(zip(names, (float(x) for x in w_list)))
         n = len(tr[0].excess)
-        changed = any(abs(w_new[k] - self.h4_w[k]) > 1e-12 for k in w_new)
+        # 1e-12 보다 작은 차이는 '안 바뀜'으로 본다(정규화 반올림 차이). 옮기는 양이 Δ 에 비례하므로 이 문턱의 영향은 없다.
+        changed = any(abs(w_new[k] - self.h4_w[k]) > 1e-12 for k in names)
         ev = {"date": md.dstr[t], "kind": "H4", "n_months": n, "t": tstats, "w_old": dict(self.h4_w),
               "w_new": w_new, "moved": {}, "changed": changed}
         if not changed:
@@ -623,20 +637,19 @@ class TeamSim:
         vals = {s.name: self._value_at_open(s, t) for s in tr}
         V = sum(vals.values())
         px = md.idx_open[t]
-        excess = {k: vals[k] - w_new[k] * V for k in vals}           # +: 줄 쪽, -: 받을 쪽
-        give = {s.name: min(excess[s.name], s.units(md.idx_code) * px) for s in tr if excess[s.name] > 0}
-        G = sum(give.values())
-        need = {k: -x for k, x in excess.items() if x < 0}
-        N = sum(need.values())
+        delta = {k: (w_new[k] - self.h4_w[k]) * V for k in names}        # B6: 몫 변화분만
+        give = {s.name: min(-delta[s.name], s.units(md.idx_code) * px) for s in tr if delta[s.name] < 0}
+        G = sum(give.values())                                           # 실제로 줄 수 있는 합
+        D = sum(x for x in delta.values() if x > 0)                      # 받을 쪽이 원하는 합
         moved = {}
         for s in tr:
             s.flow = (vals[s.name], None)
-        if G > 0 and N > 0:
-            for s in tr:                                              # 대기 자산(지수 단위)만 옮김, 비용 없음(I7)
+        if G > 0 and D > 0:
+            for s in tr:
                 if s.name in give:
                     du = -give[s.name] / px
-                elif s.name in need:
-                    du = G * need[s.name] / N / px
+                elif delta[s.name] > 0:
+                    du = G * delta[s.name] / D / px                      # Δ 비율대로
                 else:
                     du = 0.0
                 if du:
@@ -645,13 +658,10 @@ class TeamSim:
                     moved[s.name] = du * px
         for s in tr:
             s.flow = (vals[s.name], self._value_at_open(s, t))
-            s.cap_budget = w_new[s.name] * V                          # I5: 종목상한 기준 = 재배분 때 배정액
+            s.cap_budget = s.start_cash * w_new[s.name] / self.h4_base[s.name]   # B6: 시작 예산 × 몫 비율
         self.h4_w = w_new
-        ev["moved"] = moved
-        ev["V"] = V
-        ev["pre"] = vals
-        ev["post"] = {s.name: s.flow[1] for s in tr}
-        ev["short"] = G < sum(x for x in excess.values() if x > 0) - 1e-9 * V   # 옮길 지수가 모자랐나
+        ev.update({"moved": moved, "V": V, "pre": vals, "post": {s.name: s.flow[1] for s in tr}, "delta": delta,
+                   "short": G < D - 1e-9 * V, "cap_budget": {s.name: s.cap_budget for s in tr}})
         self.events.append(ev)
 
     # ------------------------------------------------ 종가: 이자 → 평가 → ②③④ 판단
@@ -689,12 +699,17 @@ class TeamSim:
             s.flow = None
             s.nav_last_close = value
             if md.month_end[t] and s.brain:
-                base_i = md.idx_close[self._last_me] if self._last_me is not None else md.idx_open[self.i0]
-                r_k = s.nav / s.nav_at_me - 1
-                r_i = md.idx_close[t] / base_i - 1
-                s.excess.append(r_k - r_i)
-                s.monthly.append((d, r_k, r_i))
-                s.nav_at_me = s.nav
+                if t == self.i0:
+                    # B7: 국면 첫날이 그 달 마지막 거래일이면 그 하루짜리 관측은 버린다(첫날 매수 비용만 들어간 가짜 관측).
+                    #     다음 달은 이날 종가(트레이너 평가액·지수 종가)부터 잰다.
+                    s.nav_at_me = s.nav
+                else:
+                    base_i = md.idx_close[self._last_me] if self._last_me is not None else md.idx_open[self.i0]
+                    r_k = s.nav / s.nav_at_me - 1
+                    r_i = md.idx_close[t] / base_i - 1
+                    s.excess.append(r_k - r_i)
+                    s.monthly.append((d, r_k, r_i))
+                    s.nav_at_me = s.nav
             row[f"v_{s.name}"] = value
             row[f"stock_{s.name}"] = stock_v
             row[f"index_{s.name}"] = idx_v
@@ -715,11 +730,14 @@ class TeamSim:
         self.rows.append(row)
 
     def _liquidate_orders(self, s: Sleeve, t: int, reason: str):
-        """team.py ③ 처럼 대기 주문을 '보유 전부 매도'로 바꾼다 (매수 대기 주문은 버린다)."""
+        """team.py ③ 처럼 대기 주문을 '보유 전부 매도'로 바꾼다 (매수 대기 주문은 버린다).
+        같은 종가에 ②에서 이미 낸(기록한) 매도 주문은 로그에 다시 적지 않는다(R5)."""
+        already = {o["code"] for o in s.pending if o["action"] == "매도" and o["signal_cal"] == t}
         s.pending = [{"code": c, "action": "매도", "signal_date": self.md.dstr[t], "signal_cal": t,
                       "reason": reason, "cap_mult": 1.0} for c in s.positions]
         for o in s.pending:
-            self.orders.append({"sleeve": s.name, **o})
+            if o["code"] not in already:
+                self.orders.append({"sleeve": s.name, **o})
 
     def _staged(self, s: Sleeve, t: int, value: float):
         """H3 단계적 서킷 (사전 등록 §7 H3). 종가마다 고점 대비 낙폭 d."""
@@ -945,6 +963,17 @@ def index_buy_hold(md: MarketData, i0: int, i1: int, budget: float) -> dict:
             "shares": bh["shares"]}
 
 
+def index_buy_hold_fractional(md: MarketData, i0: int, i1: int, budget: float) -> dict:
+    """B9: 지수 B&H 를 소수 단위로(A1·IDX 와 같은 기준). 첫 시가에 예산 전부, 끝은 마지막 종가 − 매도 비용."""
+    units = budget / (md.idx_open[i0] * (1 + md.idx_slip) * (1 + md.idx_fee))
+    equity = list(units * md.idx_close[i0:i1 + 1])
+    proceeds = md.idx_close[i1] * (1 - md.idx_slip) * units
+    final = proceeds - proceeds * md.idx_fee                 # PaperWallet.sell 과 같은 식 (매도세 0)
+    equity[-1] = final
+    return {"return": final / budget - 1, "mdd": metrics.max_drawdown(equity) or 0.0, "equity": equity,
+            "units": units}
+
+
 def equal_weight_buy_hold(md: MarketData, i0: int, i1: int, total: float, codes=None) -> dict:
     """종목군 동일비중 B&H (R0 buy_hold 와 같은 비용 기준, 국내는 매도세를 국면 끝 날짜 세율로 뺌 —
     main._buy_and_hold 와 같은 식). 국면 첫날까지 상장된 종목만(I12)."""
@@ -1092,7 +1121,8 @@ def run(cfg: Config, md: MarketData | None = None) -> dict:
     if cfg.with_refs:
         bh = index_buy_hold(md, i0, i1, res["total"])
         ew = equal_weight_buy_hold(md, i0, i1, res["total"], cfg.universe)
-        refs = {"index_bh": bh, "ew_bh": ew}
+        bhf = index_buy_hold_fractional(md, i0, i1, res["total"])
+        refs = {"index_bh": bh, "index_bh_frac": bhf, "ew_bh": ew}
         if cfg.arm != "G11":
             g = run(Config(market=cfg.market, period=cfg.period, arm="G11", interest=cfg.interest,
                            total=res["total"], with_refs=False), md)
@@ -1100,6 +1130,7 @@ def run(cfg: Config, md: MarketData | None = None) -> dict:
         res["refs"] = refs
         m = res["metrics"]
         m["vs_index_bh"] = m["return"] - bh["return"]
+        m["vs_index_bh_frac"] = m["return"] - bhf["return"]
         m["vs_ew_bh"] = m["return"] - ew["return"]
     if cfg.n_random > 0:
         res["random"] = random_control(md, res, cfg.n_random, cfg.seed)
@@ -1111,16 +1142,16 @@ A6_SPLIT_SUSPENSIONS = {"005930": "2018-05-03", "035420": "2018-10-11", "035720"
 
 
 def a6_split_volume_buys(md: MarketData, res: dict, bars: int = 20) -> dict:
-    """정지가 끝난 뒤 그 종목의 거래된 봉 20개 안에 체결된 파이오니어 매수 중, 신호 사유가 '거래량 급증'(조건 A)인 건수."""
+    """정지가 끝난 뒤 그 종목의 거래된 봉 20개 안에서 신호가 난 파이오니어 매수 중, 사유가 '거래량 급증'(조건 A)인 건수."""
     out = {}
     for code, last_zero in A6_SPLIT_SUSPENSIONS.items():
         st = md.by_code.get(code)
         if st is None:
             continue
         j0 = int(np.searchsorted(np.array(st.dates), last_zero, side="right"))     # 정지 뒤 첫 거래된 봉
-        window = set(st.dates[j0:j0 + bars])
+        window = set(st.dates[j0:j0 + bars])          # R7: 신호 봉이 정지 뒤 거래된 봉 20개 안
         tr = [t for t in res["trades"] if t["code"] == code and t["trainer"] == "파이오니어"
-              and t["entry_date"] in window]
+              and t["signal_date"] in window]
         out[code] = {"after": st.dates[j0] if j0 < len(st.dates) else None,
                      "pioneer_buys": len(tr), "volume_signal_buys": sum("거래량" in t["signal_reason"] for t in tr)}
     return out

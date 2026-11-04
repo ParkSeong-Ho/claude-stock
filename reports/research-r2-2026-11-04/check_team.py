@@ -24,6 +24,7 @@ sim_team.py 점검 (인터넷 없이 data/ 만 사용). PASS/FAIL 을 찍고, �
 """
 from __future__ import annotations
 
+import bisect
 import importlib.util
 import math
 import statistics
@@ -32,6 +33,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +46,7 @@ for p in (str(ROOT), str(HERE)):          # -I 로 실행하므로 저장소 모
         sys.path.insert(0, p)
 
 import sim_team as S                      # noqa: E402
+import verdict as V                       # noqa: E402
 from paper_wallet import shares_within_cap  # noqa: E402
 
 RESULTS: list = []
@@ -185,6 +188,94 @@ def accounting(res, md, tag):
                 bad.append(f"Volume=0 날 체결 {tr['code']} {dd}")
     if res["metrics"]["open_fallbacks"]:
         bad.append("시가 대신 종가 체결")
+    # R2: 모든 체결가 = 그날 시가 (지수 다리 = 그날 지수 시가, 주식 다리 = 그 종목이 거래된 그날 봉의 시가)
+    dpos = {x: k for k, x in enumerate(md.dstr)}
+    own = {}
+    for f in res["fills"]:
+        if f["kind"] == "index":
+            if f["price"] != md.idx_open[dpos[f["date"]]]:
+                bad.append(f"지수 다리 체결가 ≠ 그날 지수 시가 {f['date']} {f['side']}")
+        else:
+            st = md.by_code[f["code"]]
+            if f["code"] not in own:
+                own[f["code"]] = {x: j for j, x in enumerate(st.dates)}
+            j = own[f["code"]].get(f["date"])
+            if j is None or f["price"] != st.open[j]:
+                bad.append(f"주식 다리 체결가 ≠ 그 종목 그날 시가 {f['code']} {f['date']}")
+    # 주식 수 = shares_within_cap(상한 기준, 종목상한 × 배수, 시가). 상한 기준은 시작 예산(team.py),
+    # H4 면 '그 체결일 전'에 마지막으로 바뀐 몫 기준 시작 예산 × 새 몫 ÷ 기본몫(B6)
+    cfg = res["config"]
+    caps = cfg.caps or S.CAPS
+    h4ev = [e for e in res["events"] if e["kind"] == "H4" and e["changed"]]
+    for tr in res["trades"]:
+        sv = res["sleeves"][tr["sleeve"]]
+        if tr["shares"] != shares_within_cap(tr["cap_budget"], tr["cap"], tr["entry_price"], md.fee, md.slip):
+            bad.append(f"주식 수 ≠ shares_within_cap {tr['code']} {tr['entry_date']}")
+        if tr["cap"] != caps[tr["trainer"]] * tr["cap_mult"]:
+            bad.append(f"종목상한 비율 {tr['code']} {tr['entry_date']}")
+        if cfg.cap_base == "start":
+            want = sv["start_cash"]
+            prior = [e for e in h4ev if e["date"] < tr["entry_date"]]
+            if prior:                                   # 시작 예산 × 새 몫 ÷ 기본몫 (기본몫 = 비율 ÷ 비율 합)
+                ratios = cfg.ratios or S.RATIOS
+                w_new = prior[-1]["w_new"]
+                base_k = ratios[tr["sleeve"]] / sum(ratios[k] for k in w_new)
+                want = sv["start_cash"] * w_new[tr["sleeve"]] / base_k
+            if not close(tr["cap_budget"], want, 1e-12, 1e-9):
+                bad.append(f"상한 기준 금액 {tr['code']} {tr['entry_date']} {tr['cap_budget']} vs {want}")
+    # R5: 같은 (지갑, 종목, 신호일, 행동) 주문이 두 번 기록되면 안 됨
+    dup = Counter((o["sleeve"], o["code"], o["signal_date"], o["action"]) for o in res["orders"])
+    if any(v > 1 for v in dup.values()):
+        bad.append(f"주문 로그 중복 {sum(v - 1 for v in dup.values() if v > 1)}건")
+    # 지수 대기 날 종가 현금 < 1 (H1 '남는 금액 $1 미만'; 이자가 붙은 뒤라 1.01 까지 허용)
+    for name in res["sleeves"]:
+        mcol = f"mode_{name}"
+        if mcol in d:
+            m_idx = d[mcol].to_numpy() == "index"
+            if np.any(d[f"cash_{name}"].to_numpy()[m_idx] >= 1.01):
+                bad.append(f"{name} 지수 대기인데 현금 ≥ 1")
+    # 이자: 점검 쪽이 원래 금리 표로 규칙을 따로 다시 계산 → 매일 이자 = Σ 종가 현금 × q/(1+q)
+    bad += interest_problems(res, md)
+    return bad
+
+
+def independent_rates(md, i0, i1):
+    """A1·A2 금리 규칙을 점검 쪽에서 따로(문자열 날짜 + bisect) 계산. 규칙은 시장으로 정한다(md.rate_rule 을 믿지 않음).
+    미국: 전 거래일 날짜 이하의 마지막 값.  국내: m월 거래일 → m-1월 1일 이하의 마지막 값(월 금리 표의 날짜 = 그 달 1일,
+    값은 그 달 평균이라 그 달이 끝나야 안다)."""
+    raw = md.rates_raw
+    dates = [x.strftime("%Y-%m-%d") for x in raw.index]
+    vals = [float(v) for v in raw.to_numpy()]
+    out = []
+    for t in range(i0, i1 + 1):
+        if md.key.startswith("us"):
+            key = md.dstr[t - 1]
+        else:
+            y, m = int(md.dstr[t][:4]), int(md.dstr[t][5:7])
+            y, m = (y, m - 1) if m > 1 else (y - 1, 12)
+            key = f"{y:04d}-{m:02d}-01"
+        k = bisect.bisect_right(dates, key) - 1
+        out.append(vals[k] if k >= 0 else float("nan"))
+    return np.array(out)
+
+
+def interest_problems(res, md):
+    bad = []
+    d = res["daily"]
+    i0, i1 = res["i0"], res["i1"]
+    if not res["config"].interest:
+        if np.any(d["interest"].to_numpy() != 0):
+            bad.append("이자 끔인데 이자 있음")
+        return bad
+    want = independent_rates(md, i0, i1)
+    got = md.rate_pct[i0:i1 + 1]
+    if not np.array_equal(np.nan_to_num(want, nan=-1.0), np.nan_to_num(got, nan=-1.0)):
+        bad.append(f"금리 규칙 불일치 {int(np.sum(np.nan_to_num(want, nan=-1) != np.nan_to_num(got, nan=-1)))}일")
+    q = np.nan_to_num(want) / 100 / 252
+    cash_pos = sum(np.maximum(d[f"cash_{n}"].to_numpy(float), 0.0) for n in res["sleeves"])
+    exp_int = cash_pos * q / (1 + q)
+    if not np.allclose(d["interest"].to_numpy(float), exp_int, rtol=1e-9, atol=1e-9):
+        bad.append("매일 이자 ≠ 종가 현금 × 금리 규칙")
     return bad
 
 
@@ -273,6 +364,92 @@ def c_window_kr():
 
 
 # ================================================================ 3. 미리보기 없음
+def eqd(a, b):
+    """두 기록(dict)이 같은지 (실수는 1e-12 상대 오차까지)."""
+    if a.keys() != b.keys():
+        return False
+    for k in a:
+        x, y = a[k], b[k]
+        if isinstance(x, float) or isinstance(y, float):
+            if not (x == y or (isinstance(x, (float, int)) and isinstance(y, (float, int)) and close(x, y, 1e-12, 1e-9))):
+                return False
+        elif isinstance(x, dict):
+            if not isinstance(y, dict) or not eqd(x, y):
+                return False
+        elif x != y:
+            return False
+    return True
+
+
+def same_before(full, other, tdate):
+    """교란 점검용: t 시가까지(체결·H4 이동·t 종가 현금·이자)와 t 전날까지(주문·사건·일별 전부)가 같은가."""
+    probs = []
+    fa = [f for f in full["fills"] if f["date"] <= tdate]
+    fb = [f for f in other["fills"] if f["date"] <= tdate]
+    if len(fa) != len(fb) or not all(eqd(a, b) for a, b in zip(fa, fb)):
+        probs.append("t 까지 체결")
+    for name, key in (("주문", "signal_date"),):
+        oa = [o for o in full["orders"] if o[key] < tdate]
+        ob = [o for o in other["orders"] if o[key] < tdate]
+        if len(oa) != len(ob) or not all(eqd(a, b) for a, b in zip(oa, ob)):
+            probs.append(name)
+    if [x for x in full["skips"] if x["date"] <= tdate] != [x for x in other["skips"] if x["date"] <= tdate]:
+        probs.append("보류")
+
+    def ev_keep(e):
+        return e["date"] < tdate or (e["kind"] == "H4" and e["date"] == tdate)
+    ea, eb = [e for e in full["events"] if ev_keep(e)], [e for e in other["events"] if ev_keep(e)]
+    if len(ea) != len(eb) or not all(eqd(a, b) for a, b in zip(ea, eb)):
+        probs.append("사건")
+    da, db = full["daily"], other["daily"]
+    before = [d for d in da.index if d < tdate]
+    for c in da.columns:
+        x, y = da.loc[before, c].to_numpy(), db.loc[before, c].to_numpy()
+        if x.dtype.kind in "fi":
+            if not np.allclose(x.astype(float), y.astype(float), rtol=1e-12, atol=1e-9):
+                probs.append(f"t 전 일별 {c}")
+        elif list(x) != list(y):
+            probs.append(f"t 전 일별 {c}")
+    # t 종가에서 같아야 하는 것: 현금(시가 체결 + 전날 금리 이자)·이자·상태. 평가액·비율(cash_frac 등)은 t 종가로 바뀐다.
+    for c in [c for c in da.columns if (c.startswith(("cash_", "mode_", "flag_")) and c != "cash_frac")
+              or c in ("cash", "interest")]:
+        x, y = da.loc[tdate, c], db.loc[tdate, c]
+        if isinstance(x, float):
+            if not close(x, y, 1e-12, 1e-9):
+                probs.append(f"t 종가 {c}")
+        elif x != y:
+            probs.append(f"t 종가 {c}")
+    return probs
+
+
+def perturbed_market(key, tdate, seed=0):
+    """같은 봉 교란: t 의 종가·고가·저가·거래량과 그 뒤 모든 봉(시가 포함)을 무작위로 바꾸고,
+    정보 시점이 t 이상인 금리 값도 바꾼다(미국 DTB3 = 그날 끝, 국내 월 금리 = 그 달 평균이라 그 달 1일 이후 값 전부)."""
+    idx, frames, rates, rule, zv = S.load_frames(key)
+    T = pd.Timestamp(tdate)
+    rng = np.random.default_rng(seed)
+
+    def pert(df):
+        df = df.copy()
+        df["Volume"] = df["Volume"].astype(float)
+        at, after = df.index >= T, df.index > T
+        n_at, n_after = int(at.sum()), int(after.sum())
+        if n_at:
+            f = rng.uniform(0.8, 1.2, n_at)
+            for c in ("Close", "High", "Low"):
+                df.loc[at, c] = df.loc[at, c].to_numpy() * f
+            df.loc[at, "Volume"] = df.loc[at, "Volume"].to_numpy() * rng.uniform(0.3, 3.0, n_at)
+        if n_after:
+            df.loc[after, "Open"] = df.loc[after, "Open"].to_numpy() * rng.uniform(0.8, 1.2, n_after)
+        return df
+    idx = pert(idx)
+    frames = {c: pert(f) for c, f in frames.items()}
+    info_from = T if rule == "prev_day" else T.to_period("M").to_timestamp()
+    rates = rates.copy()
+    rates[rates.index >= info_from] = rates[rates.index >= info_from] + 3.0
+    return S.MarketData(key, idx, frames, rates, rule, zero_volume=zv)
+
+
 def same_prefix(full, tr, tdate):
     probs = []
 
@@ -329,6 +506,7 @@ def c_lookahead():
                                   dict(arm="A2")], [30, "2020-03-31", 100, 200]),       # 2020-03-31 = 월말
         ("kr", "2018 조정", [dict(arm="A0", cb="staged"), dict(arm="A1T")],
          ["2018-05-02", "2018-10-10", "2018-10-31", 230]),                                # 05-02 = 005930 정지 중
+        ("us_pit", "2020 급락·회복", [dict(arm="A1"), dict(arm="G11")], [60, 150]),
     ]
     for key, per, arms, cuts in plans:
         md = S.get_market(key)
@@ -390,6 +568,15 @@ def c_index_identities():
           np.max(np.abs(v70 - e70)) < 1.0 and sum(1 for f in r2["fills"] if f["sleeve"] == "지수70%") == 1,
           f"최대 차이 {np.max(np.abs(v70 - e70)):.2e}")
     check("A2 지수70% 최종 = 0.7 × IDX 최종", abs(r2["finals"]["지수70%"] - 0.7 * ri["final"]) < 1.0)
+    bf = S.index_buy_hold_fractional(mdn, i0, i1, total)
+    eq = np.asarray(bf["equity"])
+    check("B9: 소수 단위 지수 B&H 참고선 = IDX 실행 (매일·최종), 정수 단위와 1단위 값 안에서 차이",
+          np.max(np.abs(eq[:-1] - ri["daily"]["value"].to_numpy()[:-1])) < 1e-6 * total and abs(eq[-1] - ri["final"]) < 1e-6 * total
+          and abs(bf["return"] * total - bh["return"] * total) < unit_cost,
+          f"소수−정수 {bf['return'] * total - bh['return'] * total:.2f}")
+    rr = S.run(S.Config(market="us", period=per, arm="A1"), md)
+    check("B9: run() 참고선에 index_bh_frac·vs_index_bh_frac 이 있음",
+          "index_bh_frac" in rr["refs"] and math.isfinite(rr["metrics"]["vs_index_bh_frac"]))
 
 
 # ================================================================ 6. 국내 매도세 (합성)
@@ -682,6 +869,62 @@ def c_staged():
 
 
 # ================================================================ 11. H4
+def h4_event_problems(res):
+    """B6: 옮긴 양 = (새 몫 − 이전 몫) × V 만. 받는 쪽 Δ 비율, 주는 쪽은 자기 지수 단위까지. 표류는 그대로.
+    상한 기준 = 시작 예산 × 새 몫 ÷ 기본몫. 이전 몫은 60/30/10 에서 시작해 바뀔 때마다 이어진다."""
+    bad = []
+    names = [n for n, sv in res["sleeves"].items() if sv["brain"]]
+    ratios = res["config"].ratios or S.RATIOS
+    base = {k: ratios[k] / sum(ratios[x] for x in names) for k in names}
+    w_old = dict(base)
+    for e in [e for e in res["events"] if e["kind"] == "H4"]:
+        if any(not close(e["w_old"][k], w_old[k], 1e-12, 1e-15) for k in names):
+            bad.append(f"{e['date']} 이전 몫이 이어지지 않음")
+        if not e["changed"]:
+            continue
+        V_ = e["V"]
+        delta = {k: (e["w_new"][k] - e["w_old"][k]) * V_ for k in names}
+        if any(not close(delta[k], e["delta"][k], 1e-9, 1e-6) for k in names):
+            bad.append(f"{e['date']} Δ ≠ (새 몫 − 이전 몫) × V")
+        mv = {k: e["moved"].get(k, 0.0) for k in names}
+        if abs(sum(mv.values())) > 1e-6 * V_:
+            bad.append(f"{e['date']} 옮긴 합 ≠ 0")
+        D = sum(x for x in delta.values() if x > 0)
+        G = -sum(mv[k] for k in names if delta[k] < 0)
+        for k in names:
+            if delta[k] < 0 and not (delta[k] - 1e-6 <= mv[k] <= 1e-9):     # 주는 쪽: Δ ≤ 옮긴 양 ≤ 0
+                bad.append(f"{e['date']} {k} 주는 양이 Δ 보다 큼")
+            if delta[k] > 0 and not close(mv[k], G * delta[k] / D, 1e-9, 1e-6):
+                bad.append(f"{e['date']} {k} 받는 양 ≠ Δ 비율")
+            if delta[k] == 0 and mv[k] != 0:
+                bad.append(f"{e['date']} {k} Δ=0 인데 이동")
+            if not e["short"] and not close(mv[k], delta[k], 1e-9, 1e-6):
+                bad.append(f"{e['date']} {k} 넉넉한데 옮긴 양 ≠ Δ (표류를 건드림)")
+            if not close(e["post"][k] - e["pre"][k], mv[k], 1e-9, 1e-6):
+                bad.append(f"{e['date']} {k} 옮긴 뒤 − 옮기기 전 ≠ 옮긴 양")
+            want = res["sleeves"][k]["start_cash"] * e["w_new"][k] / base[k]
+            if not close(e["cap_budget"][k], want, 1e-12, 1e-9):
+                bad.append(f"{e['date']} {k} 상한 기준 ≠ 시작 예산 × 새 몫 ÷ 기본몫")
+        w_old = dict(e["w_new"])
+    return bad
+
+
+def identical_runs(a, b):
+    """두 실행이 매일 완전히 같은가(체결·보류·주문·일별 모든 칸·최종)."""
+    probs = []
+    if a["fills"] != b["fills"]:
+        probs.append("체결")
+    if a["skips"] != b["skips"]:
+        probs.append("보류")
+    if a["orders"] != b["orders"]:
+        probs.append("주문")
+    if not a["daily"].equals(b["daily"]):
+        probs.append("일별")
+    if a["final"] != b["final"]:
+        probs.append("최종")
+    return probs
+
+
 @section
 def c_h4():
     """11. H4: 공식, n<20, 실데이터 재배분 재계산, 옮긴 금액 합 0"""
@@ -710,7 +953,7 @@ def c_h4():
           h["fills"] == a["fills"] and np.array_equal(h["equity"], a["equity"]))
     r = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", realloc=True, with_refs=False))
     names = list(S.TRAINERS)
-    ok_w, ok_move, nchg = True, True, 0
+    ok_w, nchg = True, 0
     for e in [e for e in r["events"] if e["kind"] == "H4"]:
         xs = [[rk - ri for d, rk, ri in r["sleeves"][nm]["monthly"] if d < e["date"]] for nm in names]
         if len(xs[0]) != e["n_months"]:
@@ -725,46 +968,106 @@ def c_h4():
             exp = np.array(exp) / sum(exp)
         if not np.allclose([e["w_new"][nm] for nm in names], exp, atol=1e-12):
             ok_w = False
-        if e["changed"]:
-            nchg += 1
-            if abs(sum(e["moved"].values())) > 1e-6 * e["V"]:
-                ok_move = False
-            if not close(sum(e["post"].values()), e["V"], 1e-12, 1e-6):
-                ok_move = False
-            if not e["short"]:          # 지수가 넉넉했으면 옮긴 뒤 평가액 = 새 몫 × 합계
-                if any(not close(e["post"][nm], e["w_new"][nm] * e["V"], 1e-9, 1e-6) for nm in names):
-                    ok_move = False
-            else:                       # 모자랐으면 주는 쪽은 지수 전부, 받는 쪽은 모자란 비율대로
-                gap = {nm: e["w_new"][nm] * e["V"] - e["pre"][nm] for nm in names}
-                recv = [nm for nm in names if gap[nm] > 0]
-                tot_gap = sum(gap[nm] for nm in recv)
-                got = sum(e["moved"].get(nm, 0) for nm in recv)
-                if any(not close(e["moved"].get(nm, 0), got * gap[nm] / tot_gap, 1e-9, 1e-6) for nm in recv):
-                    ok_move = False
+        nchg += e["changed"]
     check("H4 실데이터(2015-17): 분기 첫날마다 몫 = 지난 월 초과수익으로 다시 계산한 값", ok_w and nchg >= 1,
           f"몫 바뀐 분기 {nchg}번")
+    bad = h4_event_problems(r)
     nshort = sum(1 for e in r["events"] if e["kind"] == "H4" and e["changed"] and e["short"])
-    check("H4: 옮긴 금액 합 = 0, 옮긴 뒤 = 새 몫 × 합계(지수 모자라면 가능한 만큼, 받는 쪽은 비율대로)", ok_move,
-          f"지수 모자란 분기 {nshort}번")
-    # 월 수익률 재계산(재배분이 없는 달): r = 월말 평가 / 전 월말 평가 - 1, 첫 달은 시작 금액 기준
+    check("B6: 옮긴 양 = (새 몫 − 이전 몫) × V 만, 받는 쪽 Δ 비율, 표류 그대로, 상한 기준 = 시작 예산 × 새 몫 ÷ 기본몫",
+          not bad, "; ".join(bad[:3]) or f"지수 모자란 분기 {nshort}번")
+    # B7 + 월 수익률 재계산: 국면 첫날(2015-03-31)이 월말 → 하루짜리 첫 관측을 버리고 4월은 그 종가부터 잰다
+    md = S.get_market("us")
+    i0 = r["i0"]
+    first_dates = [m[0] for m in r["sleeves"]["마라토너"]["monthly"]]
+    n_me = int(md.month_end[i0:r["i1"] + 1].sum())
+    check("B7: 첫날이 월말이면 그 관측을 버림 (2015-17: 월말 34개 → 기록 33개, 첫 기록이 2015-03-31 아님)",
+          bool(md.month_end[i0]) and len(first_dates) == n_me - 1 and first_dates[0] != md.dstr[i0],
+          f"월말 {n_me}, 기록 {len(first_dates)}, 첫 기록 {first_dates[0]}")
     chg_months = {e["date"][:7] for e in r["events"] if e["kind"] == "H4" and e["changed"]}
     d = r["daily"]
     ok_m = True
     for nm in names:
-        prev_v, prev_i = r["sleeves"][nm]["start_cash"], md.idx_open[r["i0"]]
+        if md.month_end[i0]:
+            prev_v, prev_i = d.loc[md.dstr[i0], f"v_{nm}"], md.idx_close[i0]
+        else:
+            prev_v, prev_i = r["sleeves"][nm]["start_cash"], md.idx_open[i0]
         for dt, rk, ri in r["sleeves"][nm]["monthly"]:
             v = d.loc[dt, f"v_{nm}"]
             ic = md.idx_close[md.dstr.index(dt)]
             if dt[:7] not in chg_months and not (close(rk, v / prev_v - 1, 1e-9, 1e-12) and close(ri, ic / prev_i - 1, 1e-12, 1e-14)):
                 ok_m = False
             prev_v, prev_i = v, ic
-    check("H4: 월 수익률(트레이너·지수)을 일별 평가로 다시 계산해도 같음", ok_m)
+    check("H4: 월 수익률(트레이너·지수)을 일별 평가로 다시 계산해도 같음 (B7 반영)", ok_m)
     first = min(e["date"] for e in r["events"] if e["kind"] == "H4" and e["changed"])
     a2 = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", with_refs=False))
     check("H4: 첫 재배분 전까지는 A1 과 체결이 같음",
           [f for f in r["fills"] if f["date"] < first] == [f for f in a2["fills"] if f["date"] < first])
     bad = accounting(r, md, "h4")
     check("H4 장부 점검(2015-17)", not bad, "; ".join(bad[:3]))
+    # B6 점검: 몫이 끝까지 안 바뀌는 H4 = A1 (매일 완전히 같음)
+    orig = S.h4_weights
+
+    def always_base(excess_lists, base_):            # 승수를 늘 1 로(= n<20 이 끝까지 이어지는 것과 같음)
+        return orig([x[:0] for x in excess_lists], base_)
+    S.h4_weights = always_base
+    try:
+        z = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", realloc=True, with_refs=False))
+    finally:
+        S.h4_weights = orig
+    probs = identical_runs(z, a2)
+    check("B6: 승수 1로 고정한 H4(몫 안 바뀜) = A1 — 실데이터 2015-17 매일 완전히 같음 (체결·보류·주문·일별·최종)",
+          not probs and not any(e["changed"] for e in z["events"] if e["kind"] == "H4")
+          and all(sv["cap_budget_end"] == sv["start_cash"] for sv in z["sleeves"].values()), ",".join(probs))
+    # 합성 t≡0: 지수 가격이 평평하고 트레이너가 안 사면 월 초과수익이 모두 0 → 표준편차 0 → t=0 → 몫 그대로
+    cal = pd.bdate_range("2019-01-01", "2021-12-31")
+    mdz = synth_market("us", cal, np.full(len(cal), 100.0), {"X": {"close": np.full(len(cal), 10.0)}})
+    k0 = int(np.flatnonzero(mdz.month_end[60:])[0]) + 60          # 60번째 봉 뒤 첫 월말을 국면 첫날로(B7 상황)
+    perz = (cal[k0].date().isoformat(), cal[-1].date().isoformat())
+    hz = S.run(S.Config(market="us", period=perz, arm="A1", realloc=True, interest=False, with_refs=False), mdz)
+    az = S.run(S.Config(market="us", period=perz, arm="A1", interest=False, with_refs=False), mdz)
+    h4z = [e for e in hz["events"] if e["kind"] == "H4" and e["n_months"] >= 20]
+    check("B6 합성 t≡0 (n≥20 인 분기가 있음, t 모두 0, 몫 안 바뀜) → H4 = A1 매일 완전히 같음",
+          h4z and all(e["t"] == [0.0, 0.0, 0.0] and not e["changed"] for e in h4z) and not identical_runs(hz, az),
+          f"n≥20 분기 {len(h4z)}개, 첫날 월말 {bool(mdz.month_end[hz['i0']])}")
+    check("B7 합성: 첫날이 월말이라 첫 관측을 버림(월 기록 수 = 월말 수 − 1, 모두 0)",
+          len(hz["sleeves"]["마라토너"]["monthly"]) == int(mdz.month_end[hz["i0"]:hz["i1"] + 1].sum()) - 1
+          and all(rk == 0.0 and ri == 0.0 for _, rk, ri in hz["sleeves"]["마라토너"]["monthly"]))
+    # B6 합성 '가능한 만큼만': 몫을 [0.5, 0.4, 0.1] 로 강제. 마라토너(주는 쪽)는 95% 를 주식으로 들고 있어 지수가 모자람
+    cal = pd.bdate_range("2021-01-04", periods=200)
+    n = len(cal)
+    sx, sz = np.zeros(n), np.zeros(n)
+    sx[61] = 1                      # 세 트레이너 모두 X 를 62 시가에 (상한 95%/20%/20%)
+    sz[80:200] = 1                  # 재배분(2021-04-01) 뒤 Z 매수 → 새 상한 기준이 쓰이는지
+    mdf = synth_market("us", cal, 100 + np.arange(n) * 0.01, {"X": {"close": np.full(n, 50.0), "sig": sx},
+                                                              "Z": {"close": np.full(n, 20.0), "sig": sz}})
+    forced = [0.5, 0.4, 0.1]
+
+    def forced_w(excess_lists, base_):
+        return list(forced), [0.0, 0.0, 0.0]
+    S.h4_weights = forced_w
+    try:
+        rf = S.run(S.Config(market="us", period=(cal[60].date().isoformat(), cal[-1].date().isoformat()), arm="A1",
+                            realloc=True, interest=False, with_refs=False,
+                            caps={"마라토너": 0.95, "스프린터": 0.2, "파이오니어": 0.2}), mdf)
+    finally:
+        S.h4_weights = orig
+    ev = [e for e in rf["events"] if e["kind"] == "H4" and e["changed"]]
+    e0 = ev[0] if ev else None
+    ok = (len(ev) == 1 and e0["short"] and abs(e0["moved"].get("파이오니어", 0.0)) < 1e-6   # Δ≈0 (정규화 1ulp)
+          and e0["moved"]["마라토너"] < 0 and close(e0["moved"]["스프린터"], -e0["moved"]["마라토너"], 1e-12, 1e-9)
+          and -e0["moved"]["마라토너"] < -e0["delta"]["마라토너"])
+    after = [t for t in rf["trades"] if t["entry_date"] > e0["date"]] if e0 else []
+    ok_cap = (e0 is not None and close(e0["cap_budget"]["마라토너"], 60_000 * 0.5 / 0.6, 1e-12, 1e-9)
+              and close(e0["cap_budget"]["스프린터"], 30_000 * 0.4 / 0.3, 1e-12, 1e-9)
+              and close(e0["cap_budget"]["파이오니어"], 10_000, 1e-12, 1e-9)
+              and any(t["sleeve"] == "스프린터" and close(t["cap_budget"], 40_000, 1e-12, 1e-9) for t in after))
+    units_m = rf["daily"].loc[e0["date"], "index_마라토너"] if e0 else None
+    check("B6 합성 '가능한 만큼만': 주는 쪽 지수가 모자라면 가진 지수만 주고(그 날 지수 0), 받는 쪽이 전부 받음, Δ=0 은 그대로",
+          ok and units_m is not None and abs(units_m) < 1e-6, f"{ {k: round(v, 2) for k, v in e0['moved'].items()} if e0 else None }, Δ마라토너 "
+                                 f"{e0['delta']['마라토너'] if e0 else None:.2f}")
+    check("B6 합성: 상한 기준 = 시작 예산 × 새 몫 ÷ 기본몫 (50,000/40,000/10,000), 그 뒤 매수에 쓰임", ok_cap)
+    bad = h4_event_problems(rf) + accounting(rf, mdf, "h4f")
+    check("B6 합성 장부·사건 점검", not bad, "; ".join(bad[:3]))
 
 
 # ================================================================ 12. 무작위 대조
@@ -799,12 +1102,12 @@ def c_random():
 # ================================================================ 13. 스모크 (실데이터, 2018 한 국면)
 SMOKE = [dict(arm="A0"), dict(arm="A1"), dict(arm="A1T"), dict(arm="A2"), dict(arm="G11"),
          dict(arm="A0", cb="current"), dict(arm="A0", cb="staged"), dict(arm="A1", cb="current"),
-         dict(arm="A1", cb="staged"), dict(arm="A1", realloc=True)]
+         dict(arm="A1", cb="staged"), dict(arm="A1", realloc=True), dict(arm="A1", total=10_000)]
 
 
 @section
 def c_smoke():
-    """13. 스모크: 3시장 × 10설정 × 2018 — 예외·NaN 없음 + 장부 점검 (숫자는 '돌았나'만)"""
+    """13. 스모크: 3시장 × 11설정($10,000 참고 포함) × 2018 — 예외·NaN 없음 + 장부 점검 (숫자는 '돌았나'만)"""
     timing = {}
     for key in ("us", "us_pit", "kr"):
         md = S.get_market(key)
@@ -825,7 +1128,7 @@ def c_smoke():
             refs = r.get("refs", {})
             okref = all(math.isfinite(refs[k]["return"]) for k in refs)
             check(f"스모크 {key} {S.label(r['config'])}: 참고선(지수 B&H·동일비중 B&H·G11) 계산됨", okref)
-        print(f"    {key}: 10설정 {time.time() - t0:.1f}s (판단 호출 {md.decide_calls:,}번)", flush=True)
+        print(f"    {key}: {len(SMOKE)}설정 {time.time() - t0:.1f}s (판단 호출 {md.decide_calls:,}번)", flush=True)
         if key == "kr":
             zero_fills = sum(1 for f in r["fills"] if f["kind"] == "stock" and f["date"] in md.zero_volume.get(f["code"], ()))
             check("스모크 kr: 2018 정지 종목(005930·035420·207940)이 있어도 Volume=0 날 체결 0", zero_fills == 0)
@@ -834,6 +1137,246 @@ def c_smoke():
             check("스모크 kr: A6 보고(분할 정지 뒤 20봉 파이오니어 거래량 신호 매수 수) 계산됨",
                   set(a6) == set(S.A6_SPLIT_SUSPENSIONS), str({k: (v["after"], v["pioneer_buys"]) for k, v in a6.items()}))
     return timing
+
+# ================================================================ 14. 판정식(verdict.py) — 손으로 만든 결과로만 시험
+def fake(ret, mdd, daily=None, bh_frac=(0.0, -0.10), bh_int=(0.0, -0.10), random=None):
+    r = {"metrics": {"return": ret, "mdd": mdd},
+         "refs": {"index_bh_frac": {"return": bh_frac[0], "mdd": bh_frac[1]},
+                  "index_bh": {"return": bh_int[0], "mdd": bh_int[1]}}}
+    if daily is not None:
+        r["daily"] = pd.DataFrame({"value": list(daily.values())}, index=list(daily.keys()))
+    if random is not None:
+        r["random"] = random
+    return r
+
+
+def fake_runs(spec):
+    """spec = {(설정, 국면): (수익률, MDD)} → 없는 국면은 (0, -0.1) 로 채움."""
+    runs = {}
+    labels = {k[0] for k in spec}
+    for lab in labels:
+        for per in S.REGIMES:
+            runs[(lab, per)] = fake(*spec.get((lab, per), (0.0, -0.1)))
+    return runs
+
+
+@section
+def c_verdict():
+    """14. 판정식(verdict.py): MDD 크기 비교, B1 구간, B9 소수 단위, 실패 해석, 확인 단계 계획 — 손으로 만든 dict 만"""
+    F = V.FULL
+    # H1 기준 3: MDD 크기. A1 -0.30 vs SPY -0.24 → 6%p 나쁨 → FAIL (부호 그대로 비교하면 PASS 로 뒤집힘)
+    base = {("A0", F): (1.0, -0.2), ("A2", F): (1.5, -0.25)}
+    r1 = fake_runs({**base, ("A1", F): (2.0, -0.30)})
+    r1[("A1", F)] = fake(2.0, -0.30, bh_frac=(2.1, -0.24), bh_int=(2.05, -0.255))
+    v = V.h1(r1)
+    check("verdict H1-3: MDD 를 크기로 비교 (−30% vs −24% → 5%p 넘게 나쁨 → FAIL), 정수 단위면 판정이 달라져 '민감' 표시",
+          not v["criteria"]["3"]["pass"] and v["criteria"]["3"]["numbers"]["sensitive"] is True
+          and math.isclose(v["criteria"]["3"]["numbers"]["gap_frac"], 0.06))
+    r1[("A1", F)] = fake(2.0, -0.28, bh_frac=(2.1, -0.24), bh_int=(2.05, -0.24))
+    check("verdict H1-3: −28% vs −24% (4%p) → PASS", V.h1(r1)["criteria"]["3"]["pass"])
+    # 시장에 안 짐: B9 소수 단위로 판정, 정수 단위 값도 적음
+    r1[("A1", F)] = fake(2.60, -0.28, bh_frac=(2.62, -0.24), bh_int=(2.58, -0.24))
+    nl = V.h1(r1)["not_lost"]
+    check("verdict 시장에 안 짐: 소수 단위 B&H(2.62) 기준 FAIL, 정수 단위(2.58)였으면 PASS 라고 같이 적음",
+          not nl["pass"] and nl["numbers"]["pass_if_int"] is True and nl["numbers"]["bh_int"] == 2.58)
+    # H1 기준 1·2 와 해석
+    up = {("A1", "2015-17 상승"): (0.5, -0.1), ("A0", "2015-17 상승"): (0.4, -0.1),
+          ("A1", "2020 급락·회복"): (0.1, -0.2), ("A0", "2020 급락·회복"): (0.2, -0.1),
+          ("A1", "2023-26 상승"): (0.9, -0.1), ("A0", "2023-26 상승"): (0.5, -0.1)}
+    r2 = fake_runs({**base, **up, ("A1", F): (2.0, -0.2)})
+    r2[("A1", F)] = fake(2.0, -0.2, bh_frac=(2.5, -0.2))
+    v2 = V.h1(r2)
+    check("verdict H1-1·2: A1>A0·A1≥A2 PASS, 상승 3국면 중 2개 → PASS, 채택 후보",
+          v2["criteria"]["1"]["pass"] and v2["criteria"]["2"]["pass"] and v2["adopt"])
+    r3 = fake_runs({**base, ("A1", F): (1.2, -0.2)})
+    r3[("A1", F)] = fake(1.2, -0.2, bh_frac=(1.0, -0.2))
+    v3 = V.h1(r3)
+    check("verdict H1-1: A1 ≥ A2 실패 → 'cash drag 가 아니라 트레이너 매매' 해석", not v3["adopt"] and "cash drag" in v3["note"])
+    # H2: 5%p 경계(≥), A1 음수일 때 0.9 배 규칙(글자 그대로), MDD 크기
+    h2 = fake_runs({("A1T", "2022 하락"): (0.05, -0.15), ("A1", "2022 하락"): (0.0, -0.2),     # 차이 = 0.05 그대로
+                    ("A1T", F): (-0.095, -0.20), ("A1", F): (-0.10, -0.25), ("A2", F): (-0.2, -0.3)})
+    v = V.h2(h2)
+    check("verdict H2: 2022 정확히 5%p 덜 잃음 → 기준 1 PASS(≥)", v["criteria"]["1"]["pass"])
+    check("verdict H2-2: A1 이 음수(−10%)면 A1×0.9 = −9% → A1-T −9.5% 는 FAIL, 음수 표시",
+          not v["criteria"]["2"]["pass"] and v["criteria"]["2"]["numbers"]["A1_negative"] and "보험료" in v["note"])
+    check("verdict H2-3: MDD 크기 −20% < −25% → PASS (부호 그대로면 FAIL)", v["criteria"]["3"]["pass"])
+    # H3: A0·A1 둘 다 필요
+    h3 = fake_runs({("A0", F): (1.0, -0.30), ("A0+CB:current", F): (0.8, -0.2), ("A0+CB:staged", F): (0.9, -0.26),
+                    ("A1", F): (2.0, -0.35), ("A1+CB:current", F): (1.5, -0.3), ("A1+CB:staged", F): (1.6, -0.33)})
+    v = V.h3(h3)
+    check("verdict H3: A0 은 통과(4%p↓·(다)>(나)), A1 은 MDD 2%p 만 줄어 실패 → 채택 아님, '폐기'",
+          v["criteria"]["A0"]["pass"] and not v["criteria"]["A1"]["pass"] and not v["adopt"] and "폐기" in v["note"])
+    # B1 구간 수익률: 종가 평가액(매도 비용 없음), 구간 첫 거래일 전날 종가 기준
+    days = {"2019-12-30": 99.0, "2019-12-31": 100.0, "2020-01-02": 101.0, "2020-12-31": 120.0, "2021-01-04": 121.0,
+            "2021-12-31": 130.0, "2022-01-03": 129.0, "2022-12-30": 117.0, "2023-01-03": 118.0, "2026-11-03": 150.0}
+    h1d = dict(days)
+    h4d = {**days, "2020-12-31": 125.0, "2022-12-30": 110.0, "2026-11-03": 160.0}
+    rh = {("A1", F): fake(0.40, -0.2, daily=h1d), ("A1+H4", F): fake(0.30, -0.2, daily=h4d)}
+    w = V.window_return(rh[("A1", F)], "2020-01-02", "2020-12-31")
+    check("verdict B1 구간: 2020 = 120/100 − 1 (2019-12-31 종가 기준), 2022 = 117/130 − 1, 2023-26 = 150/117 − 1",
+          math.isclose(w, 0.2) and math.isclose(V.window_return(rh[("A1", F)], "2022-01-03", "2022-12-30"), 117 / 130 - 1)
+          and math.isclose(V.window_return(rh[("A1", F)], "2023-01-03", "2026-11-03"), 150 / 117 - 1))
+    v = V.h4(rh)
+    check("verdict H4: 기준 1(전체 수익률 0.30 < 0.40) FAIL, B1 은 2020·2023-26 두 구간에서 높아 PASS → 채택 아님",
+          not v["criteria"]["1"]["pass"] and v["criteria"]["2_B1"]["pass"] and not v["adopt"])
+    try:
+        V.window_return(fake(0, 0, daily={"2021-01-04": 1.0}), "2020-01-02", "2020-12-31")
+        ok = False
+    except ValueError:
+        ok = True
+    check("verdict B1: 구간을 잴 수 없으면 오류(조용히 넘어가지 않음)", ok)
+    # 7.5: 계획과 국내 방향
+    us = {"H1": {"adopt": True}, "H2": {"adopt": False}, "H3": {"adopt": False}, "H4": {"adopt": True}}
+    plan = V.holdout_plan(us)
+    check("verdict 7.5 계획: 미국 통과 가설만 국내(H1·H4), us_pit 은 H1 통과일 때만", plan == {"kr": ["H1", "H4"], "us_pit_h1": True}
+          and V.holdout_plan({**us, "H1": {"adopt": False}})["us_pit_h1"] is False)
+    kr = {("A1", F): fake(0.5, -0.2), ("A0", F): fake(0.6, -0.2), ("A1+H4", F): fake(0.55, -0.2)}
+    check("verdict 7.5-1 방향: 국내 A1 < A0 → H1 방향 다름(FAIL), H4 > H1 → 같음(PASS)",
+          not V.kr_direction("H1", kr)["pass"] and V.kr_direction("H4", kr)["pass"])
+    try:
+        V.h1({})
+        ok = False
+    except KeyError as e:
+        ok = "판정에 필요한 실행이 없음" in str(e)
+    check("verdict: 필요한 실행이 없으면 이름을 밝히고 멈춤", ok)
+    md_text = V.to_markdown({"H1": v2, "H4": v})
+    check("verdict 표 만들기(to_markdown) 동작", "H1" in md_text and "PASS" in md_text)
+
+
+# ================================================================ 15. 음성 대조 — 검토 t2 의 미리보기를 넣으면 잡는가
+def _raise_cash_at_close(self, s, need, t):          # 검토 t2 (가) 와 같은 '같은 봉 미리보기'
+    short = need - s.wallet.cash
+    if short <= 0:
+        return
+    held = s.units(self.md.idx_code)
+    px = self.md.idx_close[t]
+    w = s.wallet
+    net = px * (1 - w.slippage) * (1 - w.fee_rate)
+    u = min(held, short / net * (1 + 1e-9))
+    if u > 0:
+        self._sell(s, self.md.idx_code, px, u, t, 0.0, "index")
+
+
+def _rate_same_month(orig):                           # 검토 t2 (나): m월 평균을 m월에 사용
+    def f(cal, series, rule):
+        if rule == "prev_month":
+            return S._asof(series, cal.to_period("M").to_timestamp().values)
+        return orig(cal, series, rule)
+    return f
+
+
+@section
+def c_negative():
+    """15. 음성 대조: 검토 t2 의 미리보기 (가)·(나)를 넣으면 장부·교란 점검이 FAIL 을 낸다"""
+    orig = S.TeamSim._raise_cash
+    S.TeamSim._raise_cash = _raise_cash_at_close
+    try:
+        md = S.get_market("us")
+        cfg = S.Config(market="us", period="2018 조정", arm="A1", with_refs=False)
+        r = S.run(cfg)
+        bad = accounting(r, md, "neg")
+        pos = {x: k for k, x in enumerate(md.dstr)}
+        hit = [f["date"] for f in r["fills"] if f["kind"] == "index" and f["side"] == "매도"
+               and f["price"] != md.idx_open[pos[f["date"]]]]
+        tdate = hit[len(hit) // 2]
+        rp = S.run(cfg, perturbed_market("us", tdate, seed=11))
+        probs = same_before(r, rp, tdate)
+    finally:
+        S.TeamSim._raise_cash = orig
+    check("음성 대조 (가) 지수 다리를 그날 종가에 체결: 장부 점검이 잡음", any("지수 다리 체결가" in b for b in bad),
+          f"{sum('지수 다리 체결가' in b for b in bad)}건")
+    check("음성 대조 (가): 같은 봉 교란 점검도 잡음", bool(probs), ",".join(probs[:3]))
+    orig_rate = S.rate_for_days
+    S.rate_for_days = _rate_same_month(orig_rate)
+    try:
+        idx, frames, rates, rule, zv = S.load_frames("kr")
+        mdb = S.MarketData("kr", idx, frames, rates, rule, zero_volume=zv)
+        cfg = S.Config(market="kr", period="2018 조정", arm="A0", with_refs=False)
+        r = S.run(cfg, mdb)
+        bad = accounting(r, mdb, "neg")
+        tdate = "2018-06-15"
+        rp = S.run(cfg, perturbed_market("kr", tdate, seed=12))
+        probs = same_before(r, rp, tdate)
+    finally:
+        S.rate_for_days = orig_rate
+    check("음성 대조 (나) 국내 월 금리를 m월 값으로: 장부 점검의 금리 규칙 점검이 잡음(m-1월이어야 함)",
+          any("금리 규칙" in b for b in bad) and any("매일 이자" in b for b in bad), "; ".join(bad[:2]))
+    check("음성 대조 (나): 같은 봉 교란(그 달 1일 이후 금리 바꿈) 점검도 잡음", bool(probs), ",".join(probs[:3]))
+
+
+# ================================================================ 16. 같은 봉 교란 (R2)
+def pick_dates(res, fracs=(0.05, 0.4, 0.8)):
+    """주식 매수 체결이 있었던 날을 국면 앞·가운데·뒤에서 하나씩(겹치지 않게)."""
+    ds = sorted({f["date"] for f in res["fills"] if f["kind"] == "stock" and f["side"] == "매수"})
+    return sorted({ds[int(q * (len(ds) - 1))] for q in fracs})
+
+
+@section
+def c_perturb():
+    """16. 같은 봉 교란: t 종가·고가·저가·거래량과 그 뒤 모든 봉·정보 시점 t 이상 금리를 바꿔도 t 시가 체결까지 같다"""
+    plans = [("us", "2020 급락·회복", [dict(arm="A0", cb="current"), dict(arm="A1", cb="staged"), dict(arm="A1T"),
+                                       dict(arm="A2")], None),
+             ("kr", "2018 조정", [dict(arm="A0", cb="staged"), dict(arm="A1"), dict(arm="A1T")],
+              ["2018-05-04", "2018-06-15", "2018-10-12"]),
+             ("us_pit", "2018 조정", [dict(arm="A1")], None)]
+    for key, per, arms, dates in plans:
+        fulls = [S.run(S.Config(market=key, period=per, with_refs=False, **a)) for a in arms]
+        dates = dates or pick_dates(fulls[-1])            # 서킷 없는 설정(A2 / A1)의 매수일
+        for n, tdate in enumerate(dates):
+            mdp = perturbed_market(key, tdate, seed=100 + n)
+            for a, full in zip(arms, fulls):
+                rp = S.run(S.Config(market=key, period=per, with_refs=False, **a), mdp)
+                probs = same_before(full, rp, tdate)
+                moved = full["daily"].loc[tdate, "value"] != rp["daily"].loc[tdate, "value"]
+                holds = (full["daily"].loc[tdate, "stock"] + full["daily"].loc[tdate, "index"]) > 0
+                # 교란이 실제로 효과가 있었는지(헛점검 방지): t 에 주식·지수를 들고 있으면 t 종가 평가가 바뀌어야 함.
+                # 서킷으로 모두 현금이 된 지갑은 가격과 무관하므로 그 조건을 묻지 않는다.
+                check(f"같은 봉 교란 {key} {per} {S.label(S.Config(**a))} t={tdate} "
+                      f"(보유 {'있음' if holds else '없음(전부 현금)'}, t 종가 평가 바뀜: {moved})",
+                      not probs and (moved or not holds), ",".join(probs[:3]))
+    # H4: 재배분 날 t 를 교란해도 그날 시가 이동이 같아야 함
+    full = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", realloc=True, with_refs=False))
+    ch = [e["date"] for e in full["events"] if e["kind"] == "H4" and e["changed"]]
+    for n, tdate in enumerate(ch[:2]):
+        rp = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", realloc=True, with_refs=False),
+                   perturbed_market("us", tdate, seed=200 + n))
+        probs = same_before(full, rp, tdate)
+        check(f"같은 봉 교란 us 2015-17 A1+H4 t={tdate}(재배분 날): 그날 시가 이동·체결 같음", not probs, ",".join(probs[:3]))
+
+
+# ================================================================ 17. 전체 2015-26 장부 (R3)
+FULL_CONFIGS = [dict(arm="A0"), dict(arm="A1"), dict(arm="A1T"), dict(arm="A2"), dict(arm="G11"), dict(arm="IDX"),
+                dict(arm="A0", cb="current"), dict(arm="A0", cb="staged"), dict(arm="A1", cb="current"),
+                dict(arm="A1", cb="staged"), dict(arm="A1", realloc=True)]
+B1_BASES = {"2020-01-02": "2019-12-31", "2022-01-03": "2021-12-31", "2023-01-03": "2022-12-30"}
+
+
+@section
+def c_fullperiod():
+    """17. 전체 2015-26: 3시장 × 11설정 — 예외·NaN 없음, 장부(4번 전부), H4 사건, 참고선, B1 구간 (숫자는 '돌았나'만)"""
+    for key in ("us", "us_pit", "kr"):
+        md = S.get_market(key)
+        t0 = time.time()
+        for a in FULL_CONFIGS:
+            r = S.run(S.Config(market=key, period=V.FULL, **a))
+            print("    " + S.sanity_line(r), flush=True)
+            bad = accounting(r, md, key)
+            if a.get("realloc"):
+                bad += h4_event_problems(r)
+            refs = r.get("refs", {})
+            if not all(math.isfinite(refs[k]["return"]) for k in refs):
+                bad.append("참고선 NaN")
+            try:
+                for _, s0, e0 in V.B1_WINDOWS:
+                    V.window_return(r, s0, e0)
+                if key.startswith("us"):
+                    if not all(b in r["daily"].index for b in B1_BASES.values()):
+                        bad.append("B1 기준일 없음")
+            except ValueError as ex:
+                bad.append(str(ex))
+            check(f"전체 국면 {key} {S.label(r['config'])}: 예외·NaN 없음, 장부·사건·참고선·B1 구간 OK", not bad,
+                  "; ".join(bad[:3]))
+        print(f"    {key}: {len(FULL_CONFIGS)}설정 {time.time() - t0:.0f}s", flush=True)
 
 
 def main():
@@ -848,8 +1391,12 @@ def main():
     c_staged()
     c_h4()
     c_random()
+    c_verdict()
     c_smoke()
+    c_negative()
+    c_perturb()
     c_lookahead()
+    c_fullperiod()
     n_fail = sum(1 for _, ok in RESULTS if not ok)
     print(f"\n합계: PASS {len(RESULTS) - n_fail} / FAIL {n_fail}  ({time.time() - t:.0f}s)")
     sys.exit(1 if n_fail else 0)
