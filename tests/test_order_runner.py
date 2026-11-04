@@ -91,7 +91,7 @@ def _install_fake_markets():
 
     MARKETS = {
         "us": Market("us", "USD", 0.001, 0.0, 0.0005, "SPY", "America/New_York", "16:15", 10_000),
-        "kr": Market("kr", "KRW", 0.00015, 0.0020, 0.0005, "069500", "Asia/Seoul", "16:00", 10_000_000),
+        "kr": Market("kr", "KRW", 0.00015, 0.0020, 0.0005, "KS200", "Asia/Seoul", "16:00", 10_000_000),
     }
 
     def _kr_tick(p):

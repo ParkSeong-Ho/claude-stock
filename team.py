@@ -17,7 +17,9 @@ v1 규칙 (docs/v1-design.md):
 
 실행: python team.py [N] [--market us|kr]   (N = 스크리너가 훑을 종목 수, 기본 40 / 시장 기본 us)
   국내(--market kr, docs/kr-broker-design.md K-D7~K-D11):
-  - 종목군은 markets.KR_UNIVERSE (KOSPI 대형주 약 30개 고정), 기준 날짜·비교는 KODEX 200(069500)
+  - 종목군은 markets.KR_UNIVERSE (KOSPI 대형주 약 30개 고정), 기준 날짜·비교는 KOSPI 200 가격지수(KS200)
+    (2026-11-04 까지는 KODEX 200(069500). 네이버 069500 시세는 분배금 반영이라 배당 빠진 주식과 기준이 달라 바꿈)
+  - 거래정지일(거래량 0) 봉은 시세에서 빠진다 → 그동안 주문은 체결되지 않고 다음 거래된 봉 시가에 체결
   - 확정 봉은 한국 시간 16:00 기준, 비용 수수료 0.015%·매도세 0.20%·슬리피지 0.05%, 가상자금 1,000만원
   - 상태 파일은 state/kr/team_<트레이너>.json (미국 state/team_<트레이너>.json 과 섞이지 않음)
 """
@@ -145,6 +147,8 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
     held_before = set(positions)
 
     # ① 어제 낸 주문을 '신호 다음 거래일' 시가로 체결 (D3)
+    #    신호 다음 봉 ~ 기준 봉 중 '시가가 있는 첫 봉'에 체결한다. 시가가 없는 봉(open_price 가 None,
+    #    예: 거래정지일)은 체결할 수 없으니 건너뛴다 (S0-2, 2026-11-04 — 예전엔 종가로 대신 체결했음).
     still = []
     for order in st["pending"]:
         code = order["code"]
@@ -152,13 +156,16 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
         nxt = None
         if df is not None:
             ds = _dates(df)
-            idx = [i for i, d in enumerate(ds) if order["signal_date"] < d <= bar_date]
-            nxt = (df.iloc[idx[0]], ds[idx[0]]) if idx else None
+            for i, day in enumerate(ds):
+                if order["signal_date"] < day <= bar_date:
+                    o = main.open_price(df.iloc[i])
+                    if o is not None:
+                        nxt = (o, day)
+                        break
         if nxt is None:
-            still.append(order)          # 다음 봉이 아직 없음 → 다음 실행에서 다시
+            still.append(order)          # 체결할 봉이 아직 없음(다음 봉 전·거래정지 중) → 다음 실행에서 다시
             continue
-        bar, d = nxt
-        px = main.open_price(bar)
+        px, d = nxt
         changed = True
         if order["action"] == "매수" and code not in positions:
             n = shares_within_cap(budget, cap, px, wallet.fee_rate, wallet.slippage)
@@ -254,7 +261,7 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
 
 
 def _summary(states, spy, mk=None):
-    """D7: 트레이너별 '시작일부터 지금까지' 손익을 같은 돈으로 벤치마크(SPY / KODEX 200) 들고 있기와 비교."""
+    """D7: 트레이너별 '시작일부터 지금까지' 손익을 같은 돈으로 벤치마크(SPY / KOSPI 200 가격지수) 들고 있기와 비교."""
     m = main.mkt(mk)
     label = markets.BENCH_NAMES[m.key]
     print("-" * 60)
@@ -282,7 +289,7 @@ def run(n=40, market="us"):
     if m.key == "us":
         spy = main.load_benchmark(START)     # 기준 날짜(마지막 확정 봉) + D7 비교. 한 번만 받는다
     else:
-        spy = main.load_benchmark(START, m)  # 국내: KODEX 200(069500)
+        spy = main.load_benchmark(START, m)  # 국내: KOSPI 200 가격지수(KS200) — 기준 날짜도 이 지수의 마지막 확정 봉
     bar_date = spy.index[-1].date().isoformat() if spy is not None and len(spy) else None
     states = {t: _load(t, m) for t in BRAINS}
 

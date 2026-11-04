@@ -7,7 +7,8 @@
 - 통화 분리: 국내 지갑·로그는 전부 KRW, 국내 시세에 미국 티커 거부, 달러 상태 파일은 국내에서 안 이어 씀
 - 상태 파일 경로: 국내 state/kr/team_<트레이너>.json, 미국 state/team_<트레이너>.json
 - 스크리너: 국내는 KR_UNIVERSE 만(KRX 전체 목록 조회 안 함)
-- 출력: 국내 team/live/main 에 '$'·'nan' 없음, 금액은 '원', KODEX 200 비교 줄
+- 출력: 국내 team/live/main 에 '$'·'nan' 없음, 금액은 '원', KOSPI 200(가격지수) 비교 줄
+  (2026-11-04 S0-1: 벤치마크 KODEX 200(069500) → KS200. 거래정지·KS200 세부는 tests/test_kr_fix_s0.py)
 """
 import json
 import sys
@@ -105,7 +106,8 @@ def test_money_통화별_표기():
 def test_시장_값():
     kr, us = markets.get_market("kr"), markets.get_market("US")
     assert (kr.currency, kr.fee_rate, kr.sell_tax_rate, kr.slippage) == ("KRW", 0.00015, 0.0020, 0.0005)
-    assert (kr.benchmark, kr.tz, kr.close_cutoff, kr.total_cash) == ("069500", "Asia/Seoul", "16:00", 10_000_000)
+    assert (kr.benchmark, kr.tz, kr.close_cutoff, kr.total_cash) == ("KS200", "Asia/Seoul", "16:00", 10_000_000)
+    assert markets.BENCH_NAMES == {"us": "SPY", "kr": "KOSPI 200(가격지수)"}
     assert (us.currency, us.fee_rate, us.sell_tax_rate, us.benchmark, us.close_cutoff) == \
         ("USD", 0.001, 0.0, "SPY", "16:15")
     with pytest.raises(ValueError):
@@ -185,7 +187,7 @@ def test_국내_백테스트_상한_안에서만_사고_로그는_전부_KRW():
     from pioneer_brain import PioneerBrain
     from risk_guard import CircuitBreaker
     cfg = main.market_config("kr")
-    assert cfg["총_가상자금"] == 10_000_000 and cfg["벤치마크"] == "069500"
+    assert cfg["총_가상자금"] == 10_000_000 and cfg["벤치마크"] == "KS200"
     for seed, base in ((1, 70_000), (2, 400_000)):
         df = synth(seed, start="2023-01-01", base=base)
         for name, cls in (("마라토너", MarathonerBrain), ("스프린터", SprinterBrain), ("파이오니어", PioneerBrain)):
@@ -211,12 +213,13 @@ def test_국내_buy_and_hold_는_매도세까지_뺀다():
     assert bh["profit"] == pytest.approx(raw["profit"] - tax)
 
 
-def test_국내_compare_줄은_원과_KODEX_200():
+def test_국내_compare_줄은_원과_KOSPI_200():
     df = synth(4, start="2026-10-01", end="2026-10-20")
     bench = synth(8, start="2026-10-01", end="2026-10-20", base=40_000)
     days = [d(x) for x in df.index]
     line = main.compare("마라토너", 12_345.0, df, 1_800_000, bench, days[0], days[-1], mk="kr")
-    assert "KODEX 200" in line and "원" in line and "$" not in line and "SPY" not in line
+    assert "KOSPI 200" in line and "원" in line and "$" not in line and "SPY" not in line
+    assert "KODEX" not in line
     assert "nan" not in line.lower() and "계산 불가" not in line
     first = main.compare("마라토너", 0.0, df, 1_800_000, bench, days[0], days[0], mk="kr")
     assert "다음 확정 봉부터" in first and "$" not in first
@@ -226,17 +229,21 @@ def test_국내_compare_줄은_원과_KODEX_200():
 
 @pytest.fixture
 def kr_market(monkeypatch, tmp_path):
-    """가짜 국내 시장: cut[0] 날짜까지의 데이터만 '확정'된 것처럼. 국내 코드만 받는다."""
+    """가짜 국내 시장: cut[0] 날짜까지의 데이터만 '확정'된 것처럼. 국내 코드만 받는다.
+    예외 하나: 벤치마크 KS200 은 allow_index=True(=main.load_benchmark 경로)로 올 때만 받는다."""
     full = synth(5)
     bench = synth(9, base=40_000)
     cut = [full.index[-2]]
     seen = []
 
-    def fake_load(code, start, now=None, market="us"):
+    def fake_load(code, start, now=None, market="us", allow_index=False):
         seen.append((code, market))
         assert market == "kr", "국내 실행에서 미국 시장으로 시세를 받음"
-        assert markets.code_ok("kr", code), code
-        src = bench if code == "069500" else full
+        if code == "KS200":
+            assert allow_index, "KS200 은 벤치마크 경로(allow_index=True)로만 받아야 함"
+        else:
+            assert markets.code_ok("kr", code) and not allow_index, code
+        src = bench if code == "KS200" else full
         return src.loc[start:cut[0]]
 
     monkeypatch.setattr(main, "load_prices", fake_load)
@@ -289,8 +296,9 @@ def test_team_국내_상태_파일_경로와_체결_통화(kr_market, monkeypatc
     out = capsys.readouterr().out
     assert "이미 처리됨" in out
     assert "nan" not in out.lower() and "$" not in out and "SPY" not in out
-    assert "KODEX 200" in out and "원" in out
+    assert "KOSPI 200" in out and "원" in out and "KODEX" not in out
     assert all(m == "kr" for _, m in kr_market["seen"])
+    assert ("KS200", "kr") in kr_market["seen"]                       # 기준 날짜·비교는 KS200
 
 
 def test_team_국내_세_트레이너_다_처리됐으면_스캔_생략(kr_market, monkeypatch, capsys):
@@ -338,14 +346,14 @@ def test_live_국내_두번_실행_멱등_원화(kr_market, capsys):
         st = json.loads(f.read_text(encoding="utf-8"))
         assert st["wallet"]["currency"] == "KRW" and st["schema"] == main.STATE_SCHEMA_KR
     assert out.count("새 확정 봉 없음") == 3
-    assert "nan" not in out.lower() and "$" not in out and "KODEX 200" in out and "원" in out
+    assert "nan" not in out.lower() and "$" not in out and "KOSPI 200" in out and "원" in out
 
 
-def test_main_국내_출력은_원과_KODEX_200(kr_market, capsys):
+def test_main_국내_출력은_원과_KOSPI_200(kr_market, capsys):
     main.main("kr")
     out = capsys.readouterr().out
     assert "nan" not in out.lower() and "$" not in out and "SPY" not in out
-    assert "KODEX 200" in out and "원" in out and "진짜 돈 0원" in out
+    assert "KOSPI 200" in out and "원" in out and "진짜 돈 0원" in out and "KODEX" not in out
 
 
 def test_스크리너_국내는_KR_UNIVERSE_만_KRX_목록_조회_안_함(monkeypatch):

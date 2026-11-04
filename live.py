@@ -161,7 +161,7 @@ def run(market="us"):
     if m.key == "us":
         spy = main.load_benchmark(cfg["시작일"])   # SPY 는 한 번만
     else:
-        spy = main.load_benchmark(cfg["시작일"], m)   # KODEX 200 도 한 번만
+        spy = main.load_benchmark(cfg["시작일"], m)   # KOSPI 200 가격지수(KS200)도 한 번만
 
     summary = []
     for 종목명, code in cfg["종목목록"].items():
