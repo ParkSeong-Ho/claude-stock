@@ -10,6 +10,13 @@ analyst.py - 로직이 팀장(Claude)에게 연락하는 다리. (운영모델 2
 🔒 안전 원칙(중요): 내가 없어도(미설치·타임아웃·한도초과·JSON깨짐) 프로그램은 멈추지 않는다.
    그 경우 analyze()는 None을 돌려주고, apply()는 후보를 규칙 그대로 통과시킨다(팀장 부재 → 규칙만).
    즉 내 응답은 '있으면 반영하는 오버레이'일 뿐, 매수/매도 방아쇠는 규칙이 당긴다.
+
+H1 포워드 모의매매용 추가 (docs/h1-forward-design.md §3.4, 2026-11-04):
+- normalize_verdict(): 팀장 판정 글자 정리(" VETO" → "veto", "Hold" → "hold"). H1 판정 기록에서만 쓴다.
+  운영 apply()·team.py 는 지금 그대로(공백·대문자가 섞인 글자는 veto·hold 로 보지 않음).
+- analyze_logged(): analyze() 와 같은 프롬프트·같은 호출·같은 파싱으로 같은 결과를 내고,
+  "어떻게 됐는지"(상태·물은 시각·걸린 시간·종료 코드·모델·CLI 버전)를 함께 돌려준다 → 나중 채점·폴백 비율용.
+  _build_prompt()·analyze()·apply() 는 한 글자도 바꾸지 않았다(프롬프트는 운영과 같음, 설계 Q4).
 """
 
 from __future__ import annotations
@@ -17,8 +24,10 @@ from __future__ import annotations
 import os
 import re
 import json
+import time
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -94,6 +103,90 @@ def apply(candidates: list[dict], analysis):
             c = {**c, "conviction": a.get("conviction"), "note": a.get("note")}
         kept.append(c)
     return kept
+
+
+# ---------------- H1 용 추가 (위 함수들은 그대로) ----------------
+
+VERDICTS = ("buy", "hold", "veto")
+VERSION_TIMEOUT = 20   # 초. `claude --version` 이 이보다 오래 걸리면 버전은 "모름"(None)
+
+
+def normalize_verdict(v):
+    """팀장 판정 글자를 정리한다. 앞뒤 공백을 지우고 소문자로 바꿔 "buy"/"hold"/"veto" 이면 그 값, 아니면 None.
+    예) " VETO" → "veto", "Hold" → "hold", "BUY\n" → "buy", "maybe"·""·None·숫자 → None."""
+    if not isinstance(v, str):
+        return None
+    w = v.strip().lower()
+    return w if w in VERDICTS else None
+
+
+def _cli_version(env):
+    """`claude --version` 의 첫 줄. 어떤 이유로든 실패하면 None (판정 결과에는 영향 없음)."""
+    try:
+        r = subprocess.run(["claude", "--version"], capture_output=True, text=True,
+                           timeout=VERSION_TIMEOUT, env=env)
+        if r.returncode != 0:
+            return None
+        lines = (r.stdout or "").strip().splitlines()
+        return lines[0].strip() if lines and lines[0].strip() else None
+    except Exception:      # 시간 초과·OSError·이상한 출력 등 무엇이든 "모름"
+        return None
+
+
+def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT):
+    """analyze() 와 같은 일을 하고 (결과, meta) 를 돌려준다. 결과는 analyze() 와 같은 값이다
+    (같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
+
+    meta (설계 §3.4):
+      status      "ok" | "no_claude" | "timeout" | "os_error" | "nonzero_exit" | "bad_json" | "empty"
+                  (bad_json = JSON 이 없거나 깨짐, 또는 "analysis" 키가 없음 / empty = 후보가 없어 묻지 않음)
+      asked_at    물은 시각(시간대가 붙은 ISO 문자열, 예 "2026-11-10T07:11:22+09:00")
+      elapsed_s   `claude -p` 가 걸린 초(묻지 않았으면 0.0)
+      returncode  `claude -p` 종료 코드(끝까지 돌지 못했으면 None)
+      model       환경변수 ANTHROPIC_MODEL (없으면 None = "모름". launchd 에서는 보통 None)
+      cli_version `claude --version` 첫 줄(실패하면 None)
+    후보가 빈 목록이면 claude 를 부르지 않는다."""
+    meta = {"status": None, "asked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "elapsed_s": 0.0, "returncode": None,
+            "model": os.environ.get("ANTHROPIC_MODEL") or None, "cli_version": None}
+    if not candidates:
+        meta["status"] = "empty"
+        return None, meta
+    if shutil.which("claude") is None:
+        meta["status"] = "no_claude"
+        return None, meta
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}  # 구독 강제 (analyze 와 같음)
+    prompt = _build_prompt(trainer, candidates)
+    meta["asked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    t0 = time.monotonic()
+    try:
+        r = subprocess.run(
+            ["claude", "-p", prompt],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+    except subprocess.TimeoutExpired:
+        meta["status"] = "timeout"
+    except OSError:
+        meta["status"] = "os_error"
+    meta["elapsed_s"] = round(time.monotonic() - t0, 3)
+    meta["cli_version"] = _cli_version(env)       # 판정을 물은 뒤에 따로 묻는다(실패해도 결과와 무관)
+    if meta["status"] is not None:
+        return None, meta
+    meta["returncode"] = r.returncode
+    if r.returncode != 0:
+        meta["status"] = "nonzero_exit"
+        return None, meta
+    data = _extract_json(r.stdout)
+    if not isinstance(data, dict) or "analysis" not in data:
+        meta["status"] = "bad_json"
+        return None, meta
+    try:
+        result = {it["code"]: it for it in data["analysis"] if isinstance(it, dict) and "code" in it}
+    except TypeError:      # "analysis" 가 목록이 아님(숫자 등)·code 가 dict 열쇠가 될 수 없음 → 폴백
+        meta["status"] = "bad_json"
+        return None, meta
+    meta["status"] = "ok"
+    return result, meta
 
 
 if __name__ == "__main__":

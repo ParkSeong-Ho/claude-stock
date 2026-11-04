@@ -7,7 +7,7 @@
 초보자용 설명:
 - deposit(): 지갑에 가짜 돈을 넣는다
 - buy():     가짜 돈으로 주식을 산다 (수수료도 흉내)
-- sell():    가진 주식을 판다
+- sell():    가진 주식을 판다 (tax_rate 를 주면 그 건만 그 매도세율로 — H1 지수 다리 0, 국내 날짜별 세율)
 - skip():    "사려다 안 산" 일도 이유와 함께 기록한다 (예: 상한 안에서 1주도 못 삼)
 - value():   지금 이 지갑이 총 얼마짜리인지 계산한다
 - shares_within_cap(): 상한(예산×비율) 안에서 비용까지 내고 살 수 있는 최대 주식 수
@@ -65,7 +65,7 @@ def shares_within_cap(budget: float, cap: float, price: float,
 @dataclass
 class Holding:
     """한 종목을 얼마에 몇 주 샀는지 기록."""
-    shares: int          # 보유 주식 수
+    shares: float        # 보유 수량. 주식은 정수 값(21 처럼), H1 대기 자산(지수 SPY·KS200)은 소수 단위(74.2187… 처럼)
     avg_price: float     # 평균 매입 단가
 
 
@@ -112,14 +112,18 @@ class PaperWallet:
         return True
 
     # --- 팔기 ---
-    def sell(self, code: str, price: float, shares: int, date: str | None = None) -> bool:
-        """가진 주식을 판다. 가진 것보다 많이 팔 수는 없다. date 는 buy() 와 같음."""
+    def sell(self, code: str, price: float, shares: int, date: str | None = None,
+             tax_rate: float | None = None) -> bool:
+        """가진 주식을 판다. 가진 것보다 많이 팔 수는 없다. date 는 buy() 와 같음.
+        tax_rate: 이 매도 한 건에만 쓸 매도세율. None(기본)이면 지갑의 sell_tax_rate — 지금까지와 똑같다.
+          H1 장부만 넘긴다: 대기 자산(지수) 매도는 0.0, 국내 주식은 체결일의 세율(설계 §3.4).
+          지갑의 sell_tax_rate 자체는 바꾸지 않는다."""
         if shares <= 0 or code not in self.holdings or self.holdings[code].shares < shares:
             return False
         exec_price = price * (1 - self.slippage)   # 팔 땐 조금 더 싸게 체결(현실)
         proceeds = exec_price * shares
         fee = proceeds * self.fee_rate
-        tax = proceeds * self.sell_tax_rate        # 매도세 (미국 기본 0)
+        tax = proceeds * (self.sell_tax_rate if tax_rate is None else tax_rate)   # 매도세 (미국 기본 0)
         net = proceeds - fee - tax
         self.cash += net
         self.holdings[code].shares -= shares

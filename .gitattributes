@@ -1,0 +1,2 @@
+# 골든 파일은 바이트까지 비교하므로 줄바꿈 변환 금지 (tests/test_h1_golden.py)
+tests/golden/** -text
