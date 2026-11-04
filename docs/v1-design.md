@@ -68,11 +68,11 @@ main.confirmed_bars(df, now=None) -> pd.DataFrame          # 순수 함수, 테�
 
 | 세션 | 브랜치 | 소유 파일 (이 파일만 수정) | 내용 |
 |---|---|---|---|
-| S0 기반 | `v1/s0-ci` | `tests/conftest.py`, `tests/test_analyst.py`, `tests/test_risk_guard.py`, `tests/test_team_filter.py`, `pytest.ini`, `requirements.txt`, `.github/workflows/test.yml` | 기존 `__main__` assert를 pytest로 옮김(네트워크 없음). CI: push·PR에서 `pytest` 실행. |
-| S1 지갑 | `v1/s1-wallet` | `paper_wallet.py`, `tests/test_paper_wallet.py` | D4·D5·D8, 거래일 기록, `skip`, `shares_within_cap`. |
-| S2 지표 | `v1/s2-metrics` | `metrics.py`, `tests/test_metrics.py` | D7 함수들. |
-| S3 검증도구 | `v1/s3-validate` | `tune.py`, `validate.py`, `tests/test_tune_validate.py` | 조합 단위 예외 처리, NaN이면 "계산 불가"로 기록하고 계속, 끝에 실패 요약. 전략 숫자는 건드리지 않음. |
-| S4 흐름 (2차) | `v1/s4-flow` | `main.py`, `live.py`, `team.py`, `screener.py`, `universe_check.py`, `README.md` | D1·D2·D3·D5 적용, S1·S2 연결, 미국 전용 종목 목록. S0~S3 합친 뒤 시작. |
+| S0 기반 | `v1-s0-ci` | `tests/conftest.py`, `tests/test_analyst.py`, `tests/test_risk_guard.py`, `tests/test_team_filter.py`, `pytest.ini`, `requirements.txt`, `.github/workflows/test.yml` | 기존 `__main__` assert를 pytest로 옮김(네트워크 없음). CI: push·PR에서 `pytest` 실행. |
+| S1 지갑 | `v1-s1-wallet` | `paper_wallet.py`, `tests/test_paper_wallet.py` | D4·D5·D8, 거래일 기록, `skip`, `shares_within_cap`. |
+| S2 지표 | `v1-s2-metrics` | `metrics.py`, `tests/test_metrics.py` | D7 함수들. |
+| S3 검증도구 | `v1-s3-validate` | `tune.py`, `validate.py`, `tests/test_tune_validate.py` | 조합 단위 예외 처리, NaN이면 "계산 불가"로 기록하고 계속, 끝에 실패 요약. 전략 숫자는 건드리지 않음. |
+| S4 흐름 (2차) | `v1-s4-flow` | `main.py`, `live.py`, `team.py`, `screener.py`, `universe_check.py`, `README.md` | D1·D2·D3·D5 적용, S1·S2 연결, 미국 전용 종목 목록. S0~S3 합친 뒤 시작. |
 | 실측 (3차) | `run/v1-measure` | `reports/` | 기준선과 같은 절차로 실측, 기준선과 나란히 비교. |
 
 공통 규칙
