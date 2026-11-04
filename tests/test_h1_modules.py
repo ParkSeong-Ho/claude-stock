@@ -1,13 +1,19 @@
 """H1 단계 2a — 작은 모듈 변경 시험 (설계 docs/h1-forward-design.md §3.4, §6). 인터넷·claude·키 없음.
 
-확인하는 것 (설계 시험 ID)
+확인하는 것 (설계 시험 ID — 이 단계에서 할 수 있는 부분만. 나머지는 단계 3 에서 h1.py 와 함께 한다)
 - T-PW   paper_wallet.sell(tax_rate=None) 은 지금과 똑같고, tax_rate 를 주면 그 건만 그 세율(0.0 이면 세금 0)
 - T-A1-7 (지갑 부분) 지수 소수 단위 매수·매도, 전 단위 매도 시 보유 삭제, JSON 저장 → 읽기 float.hex 같음,
-         정수 주식은 int 로 돌아옴, Holding.shares 표기 float
-- T-AN   analyst.analyze_logged: 프롬프트 == _build_prompt, 호출·환경 == analyze, 결과 == analyze 결과, meta 칸
-- T-F5c  analyze_logged 상태별: claude 없음·시간 초과·OSError·0 아닌 종료·JSON 깨짐·analysis 키 없음·빈 후보
-- T-F5d  normalize_verdict(" VETO"·"Hold" → 정리 값), 운영 analyst.apply 는 " VETO" 를 veto 로 보지 않는 지금 그대로
-- T-SCR  screener.scan_frames: asof 로 자른 결과 == 미리 자른 시세 결과, brains·min_bars 인자, scan() 이 scan_frames 를 부름
+         정수 주식은 int 로 돌아옴, Holding.shares 표기 float.  ※ "화면 6자리"는 단계 3 에서(h1 요약 출력)
+- T-AN   analyst.analyze_logged: 프롬프트 == _build_prompt, 호출·환경 == analyze, 결과 == analyze 결과(정상 답),
+         meta 칸, asked_at = 묻기 직전 시각·elapsed_s = 판정 호출 한 번의 시간(가짜 시계), 안에서 --version 안 부름,
+         claude_cli_version()
+- T-F5c  (analyst 부분) analyze_logged 상태별: claude 없음·시간 초과·OSError·0 아닌 종료·디코드 실패·JSON 깨짐·
+         analysis 키 없음·analysis 가 목록 아님·빈 후보.  ※ "답에서 빠진 종목 → missing_in_reply", 규칙 폴백 동작은
+         단계 3 에서(h1.Leader)
+- T-F5d  (analyst 부분) normalize_verdict(" VETO"·"Hold" → 정리 값), 운영 analyst.apply 는 " VETO" 를 veto 로 보지 않는
+         지금 그대로.  ※ "H1 에서 veto·hold 로 동작"은 단계 3 에서(h1.Leader·team 갈고리)
+- T-SCR  screener.scan_frames: asof 로 자른 결과 == 미리 자른 시세 결과, 후보 모양·반올림, brains·min_bars 인자,
+         asof 형식 검사, None 시세 건너뜀, scan() 이 scan_frames 를 부름(받기 실패는 예외 종류와 상관없이 건너뜀)
 - T-RSI  2024-06-01 부터 계산한 RSI 와 훨씬 앞에서부터 계산한 RSI 의 2026-06 이후 차 < 1e-9 (합성 시세)
 
 claude CLI 는 절대 부르지 않는다: shutil.which·subprocess.run 을 가짜로 바꿔 끼운다(tests/test_analyst.py 와 같은 방식).
@@ -17,9 +23,10 @@ import subprocess
 import sys
 import typing
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -177,31 +184,56 @@ def _done(stdout, returncode=0):
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
 
 
+KST = ZoneInfo("Asia/Seoul")
+
+
 class FakeCLI:
-    """claude 가 '설치돼 있다'고 속이고 subprocess.run 호출을 기록한다.
-    reply: `claude -p` 의 결과(또는 던질 예외), version: `claude --version` 의 결과(또는 예외)."""
+    """claude 가 '설치돼 있다'고 속이고 subprocess.run 호출을 기록한다. 시계도 가짜다.
+    reply: `claude -p` 의 결과(또는 던질 예외), version: `claude --version` 의 결과(또는 예외).
+    wall: 가짜 벽시계(analyze_logged(now=cli.now) 로 넘김), mono: 가짜 monotonic(analyst.time 만 바꿔 끼움).
+    shutil.which 를 부르면 5초, `claude -p` 를 부르면 41.2초가 흐른다(묻기 전·묻는 동안 시간이 지나는 것을 흉내)."""
+    WHICH_S, ASK_S = 5.0, 41.2
 
     def __init__(self, monkeypatch):
-        self.calls, self.which_calls = [], []
+        self.calls, self.which_calls, self.asked_wall = [], [], []
         self.installed = True
         self.reply = _done(GOOD)
         self.version = _done("2.1.7 (Claude Code)\n둘째 줄\n")
+        self.wall = datetime(2026, 11, 10, 7, 11, 0, tzinfo=KST)
+        self.mono = 1000.0
         monkeypatch.setattr(analyst.shutil, "which", self._which)
         monkeypatch.setattr(analyst.subprocess, "run", self._run)
+        monkeypatch.setattr(analyst, "time", SimpleNamespace(monotonic=lambda: self.mono))
+
+    def now(self):
+        return self.wall
+
+    def _tick(self, sec):
+        self.wall += timedelta(seconds=sec)
+        self.mono += sec
 
     def _which(self, name):
         self.which_calls.append(name)
+        self._tick(self.WHICH_S)
         return "/usr/bin/claude" if self.installed else None
 
     def _run(self, cmd, **kw):
         self.calls.append((cmd, kw))
-        res = self.version if cmd[1:] == ["--version"] else self.reply
+        if cmd[1:] == ["--version"]:
+            res = self.version
+        else:
+            self.asked_wall.append(self.wall)
+            self._tick(self.ASK_S)
+            res = self.reply
         if isinstance(res, BaseException):
             raise res
         return res
 
     def ask_calls(self):
         return [(c, k) for c, k in self.calls if c[:2] == ["claude", "-p"]]
+
+    def version_calls(self):
+        return [c for c, _ in self.calls if c[1:] == ["--version"]]
 
 
 @pytest.fixture
@@ -213,7 +245,7 @@ def cli(monkeypatch):
 
 def test_T_AN_정상_답은_analyze_와_같은_결과_같은_프롬프트_같은_호출(cli):
     want = analyst.analyze("마라토너", CANDS)
-    got, meta = analyst.analyze_logged("마라토너", CANDS)
+    got, meta = analyst.analyze_logged("마라토너", CANDS, now=cli.now, cli_version="2.1.7 (Claude Code)")
     assert got == want
     assert set(got) == {"AAPL", "MSFT"} and got["MSFT"]["verdict"] == " VETO"   # 결과는 원래 글자 그대로
     (c1, k1), (c2, k2) = cli.ask_calls()
@@ -224,9 +256,35 @@ def test_T_AN_정상_답은_analyze_와_같은_결과_같은_프롬프트_같은
     assert k2["env"] == k1["env"] and "ANTHROPIC_API_KEY" not in k2["env"]       # 구독 강제
     assert meta["status"] == "ok" and meta["returncode"] == 0
     assert meta["cli_version"] == "2.1.7 (Claude Code)" and meta["model"] is None
-    assert isinstance(meta["elapsed_s"], float) and meta["elapsed_s"] >= 0
-    assert datetime.fromisoformat(meta["asked_at"]).tzinfo is not None
+    assert cli.version_calls() == []                                             # 안에서 --version 안 부름
     assert set(meta) == {"status", "asked_at", "elapsed_s", "returncode", "model", "cli_version"}
+
+
+@pytest.mark.parametrize("reply", [_done(GOOD), subprocess.TimeoutExpired(["claude", "-p"], 150),
+                                   _done("JSON 없음"), _done(GOOD, returncode=3)])
+def test_T_AN_asked_at_은_묻기_직전_시각_elapsed_s_는_판정_호출_한_번(cli, reply):
+    """가짜 시계: 함수가 불린 뒤 which 에서 5초, claude -p 안에서 41.2초가 흐른다.
+    asked_at 은 claude -p 를 부르기 직전(= 시작 + 5초), elapsed_s 는 claude -p 한 번(41.2초)."""
+    cli.reply = reply
+    start = cli.wall
+    _, meta = analyst.analyze_logged("마라토너", CANDS, now=cli.now)
+    (asked,) = cli.asked_wall
+    assert meta["asked_at"] == asked.isoformat(timespec="seconds") == "2026-11-10T07:11:05+09:00"
+    assert meta["asked_at"] != start.isoformat(timespec="seconds")              # 함수 시작 시각이 아님
+    assert meta["elapsed_s"] == FakeCLI.ASK_S                                    # which·그 밖 시간은 빠짐
+    assert datetime.fromisoformat(meta["asked_at"]) <= asked
+
+
+def test_T_AN_now_를_안_주면_이_컴퓨터의_시간대_있는_지금(cli):
+    before = datetime.now().astimezone().replace(microsecond=0)
+    _, meta = analyst.analyze_logged("마라토너", CANDS)
+    t = datetime.fromisoformat(meta["asked_at"])
+    assert t.tzinfo is not None and before <= t <= datetime.now().astimezone() + timedelta(seconds=1)
+
+
+def test_T_AN_now_가_시간대_없는_시각이면_ValueError(cli):
+    with pytest.raises(ValueError):
+        analyst.analyze_logged("마라토너", CANDS, now=lambda: datetime(2026, 11, 10, 7, 0))
 
 
 def test_T_AN_timeout_인자를_그대로_넘긴다(cli):
@@ -241,19 +299,33 @@ def test_T_AN_model_은_ANTHROPIC_MODEL(cli, monkeypatch, value, want):
     assert meta["model"] == want
 
 
+@pytest.mark.parametrize("cands", [CANDS, []])
+@pytest.mark.parametrize("given", [None, "2.1.7 (Claude Code)", "모름"])
+def test_T_AN_cli_version_은_받은_값을_그대로_적고_부르지_않는다(cli, cands, given):
+    _, meta = analyst.analyze_logged("마라토너", cands, cli_version=given)
+    assert meta["cli_version"] == given and cli.version_calls() == []
+
+
 @pytest.mark.parametrize("version,want", [
+    (_done("2.1.7 (Claude Code)\n둘째 줄\n"), "2.1.7 (Claude Code)"),
+    (_done("  3.0.1 (Claude Code)  \n"), "3.0.1 (Claude Code)"),
     (OSError("없음"), None),
     (subprocess.TimeoutExpired(["claude", "--version"], 20), None),
+    (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), None),
     (_done("2.0.0", returncode=1), None),
     (_done(""), None),
-    (_done("  3.0.1 (Claude Code)  \n"), "3.0.1 (Claude Code)"),
 ])
-def test_T_AN_cli_version_이_실패해도_판정_결과는_같다(cli, version, want):
+def test_claude_cli_version_은_첫_줄_실패하면_None(cli, version, want):
     cli.version = version
-    want_result = analyst.analyze("마라토너", CANDS)
-    got, meta = analyst.analyze_logged("마라토너", CANDS)
-    assert got == want_result and meta["status"] == "ok"
-    assert meta["cli_version"] == want
+    assert analyst.claude_cli_version() == want
+    (cmd, kw), = cli.calls
+    assert cmd == ["claude", "--version"] and kw["timeout"] == analyst.VERSION_TIMEOUT
+    assert "ANTHROPIC_API_KEY" not in kw["env"]
+
+
+def test_claude_cli_version_claude_없으면_부르지_않고_None(cli):
+    cli.installed = False
+    assert analyst.claude_cli_version() is None and cli.calls == []
 
 
 @pytest.mark.parametrize("reply,status,rc", [
@@ -271,8 +343,8 @@ def test_T_F5c_상태별_결과는_analyze_와_같다(cli, reply, status, rc):
     got, meta = analyst.analyze_logged("파이오니어", CANDS)
     assert want is None and got is None                   # 규칙 폴백
     assert meta["status"] == status and meta["returncode"] == rc
-    assert meta["cli_version"] == "2.1.7 (Claude Code)"   # claude 는 있으니 버전은 기록
     assert len(cli.ask_calls()) == 2                       # analyze 1번 + analyze_logged 1번
+    assert cli.version_calls() == []
 
 
 def test_T_F5c_claude_없음은_부르지_않고_no_claude(cli):
@@ -286,14 +358,27 @@ def test_T_F5c_claude_없음은_부르지_않고_no_claude(cli):
 
 def test_T_F5c_빈_후보는_claude_를_부르지_않고_empty(cli):
     assert analyst.analyze("마라토너", []) is None
-    got, meta = analyst.analyze_logged("마라토너", [])
+    start = cli.wall
+    got, meta = analyst.analyze_logged("마라토너", [], now=cli.now)
     assert got is None and meta["status"] == "empty"
     assert cli.calls == [] and cli.which_calls == []
-    assert datetime.fromisoformat(meta["asked_at"]).tzinfo is not None
+    assert meta["asked_at"] == start.isoformat(timespec="seconds") and meta["elapsed_s"] == 0.0
+
+
+def test_T_F5c_출력_디코드_실패는_decode_error_폴백(cli):
+    """claude 출력이 UTF-8 이 아니면 subprocess.run(text=True) 이 UnicodeDecodeError 를 낸다.
+    운영 analyze() 는 그대로 멈추고(고치지 않음, 개선 후보), analyze_logged 는 decode_error 로 기록하고 폴백한다(2a 검토 A-6)."""
+    cli.reply = UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "invalid start byte")
+    with pytest.raises(UnicodeDecodeError):
+        analyst.analyze("마라토너", CANDS)
+    got, meta = analyst.analyze_logged("마라토너", CANDS)
+    assert got is None and meta["status"] == "decode_error"
+    assert meta["returncode"] is None and meta["elapsed_s"] == FakeCLI.ASK_S
 
 
 def test_T_F5c_analysis_가_목록이_아니면_bad_json_폴백(cli):
-    """analyze() 는 이 경우 TypeError 로 멈춘다(지금 동작, 고치지 않음). analyze_logged 는 폴백으로 기록한다."""
+    """analyze() 는 이 경우 TypeError 로 멈춘다(지금 동작, 고치지 않음). analyze_logged 는 폴백으로 기록한다
+    (설계 §3.4 에 적힌 '정당한 차이', 2a 검토 A-6)."""
     cli.reply = _done('{"analysis": 3}')
     with pytest.raises(TypeError):
         analyst.analyze("마라토너", CANDS)
@@ -359,19 +444,53 @@ def test_T_SCR_asof_로_자른_결과는_미리_자른_시세의_결과와_같�
     assert n_cands > 0                                     # 후보가 실제로 나온 날이 있어야 의미 있음
 
 
-def test_T_SCR_세는_종목과_후보_모양():
+def test_T_SCR_후보_모양과_반올림은_그날_자료와_같다():
+    """후보가 실제로 나온 날들에서 후보 dict 의 키·값을 그날 자료로 다시 계산한 값과 견준다(2a 검토 A-3).
+    합성 가격은 소수 셋째 자리 이하가 있어서 반올림 자리가 바뀌면 바로 걸린다."""
+    fr = _frames()
+    seen = fine = 0
+    for asof in ASOFS:
+        found, _ = screener.scan_frames(fr, ORDER, asof=asof)
+        assert list(found) == list(screener.BRAINS)
+        for tname, cs in found.items():
+            cls = screener.BRAINS[tname]
+            assert [c["code"] for c in cs] == [x for x in ORDER if x in {c["code"] for c in cs}]   # order 순서
+            for c in cs:
+                d = cls().add_indicators(fr[c["code"]][fr[c["code"]].index <= pd.Timestamp(asof)])
+                close = float(d["Close"].iloc[-1])
+                assert set(c) == {"code", "price", "date", "rsi", "reason"}
+                assert c["date"] == d.index[-1].date().isoformat()
+                assert c["price"] == round(close, 2)
+                fine += round(close, 3) != round(close, 2)       # 셋째 자리가 있는 가격(반올림 자리 차이를 잡을 수 있음)
+                assert c["rsi"] == round(float(d["RSI"].iloc[-1]), 1)
+                assert c["reason"] == cls().decide(d, None)[1]
+                seen += 1
+    assert seen >= 10 and fine >= seen // 2, (seen, fine)   # 후보가 충분히 나와야 의미 있음
+
+
+def test_T_SCR_세는_종목():
     fr = _frames()
     found, used = screener.scan_frames(fr, ORDER)
     assert used == 6                                       # A~E·T (X 없음, S 는 70봉 미만)
-    assert list(found) == list(screener.BRAINS)
-    for cs in found.values():
-        for c in cs:
-            assert set(c) == {"code", "price", "date", "rsi", "reason"}
-            assert c["price"] == round(c["price"], 2) and c["rsi"] == round(c["rsi"], 1)
-            assert c["code"] != "T" and c["date"] == "2026-11-03"   # 오래된 봉 종목은 빠짐
     assert screener.scan_frames(fr, ORDER, min_bars=50)[1] == 7      # S(약 60봉)도 셈
     assert screener.scan_frames(fr, ORDER, asof="2026-10-20")[1] == 6
     assert screener.scan_frames({}, ORDER) == ({t: [] for t in screener.BRAINS}, 0)
+
+
+@pytest.mark.parametrize("bad", ["2026-10-7", "20261007", "2026/10/07", " 2026-10-07", "2026-10-07 ",
+                                 "2026-02-30", "2026-10-07T00:00", "", 20261007, pd.Timestamp("2026-10-07")])
+def test_T_SCR_asof_는_YYYY_MM_DD_10자리만(bad):
+    """글자로 날짜를 비교하므로 다른 모양은 조용히 미래 봉을 보게 된다 → ValueError (2a 검토 A-8)."""
+    with pytest.raises(ValueError):
+        screener.scan_frames(_frames(), ORDER, asof=bad)
+
+
+def test_T_SCR_None_시세는_받기_실패처럼_건너뛴다():
+    fr = _frames()
+    with_none = {**fr, "X": None, "B": None}
+    without = {k: v for k, v in fr.items() if k != "B"}
+    for asof in (None, "2026-10-21"):
+        assert screener.scan_frames(with_none, ORDER, asof=asof) == screener.scan_frames(without, ORDER, asof=asof)
 
 
 def _fake_brain(buy_on):
@@ -407,13 +526,18 @@ def test_T_SCR_brains_인자와_기본값(monkeypatch):
 
 
 def test_T_SCR_scan_은_시세를_받아_scan_frames_를_한_번_부른다(monkeypatch):
-    fr = {c: synth(seed=20 + i) for i, c in enumerate(screener.universe(6, "kr"))}
-    failing = screener.universe(6, "kr")[2]
+    codes = screener.universe(7, "kr")
+    fr = {c: synth(seed=20 + i) for i, c in enumerate(codes)}
+    # 받기 실패는 예외 종류와 상관없이 건너뛴다(예전 scan 의 except Exception 그대로, 2a 검토 A-4).
+    # load_prices 의 실제 실패: 네트워크 오류, "데이터를 가져오지 못했어요"·"확정된 봉이 하나도 없어요"(ValueError), 칸 없음 등
+    failing = {codes[2]: ConnectionError("가짜 네트워크 오류"),
+               codes[4]: ValueError(f"'{codes[4]}' 데이터를 가져오지 못했어요."),
+               codes[5]: KeyError("Close")}
 
     def fake_load(code, start, now=None, market="us"):
         assert market == "kr" and start == screener.START
-        if code == failing:
-            raise ConnectionError("가짜 네트워크 오류")
+        if code in failing:
+            raise failing[code]
         return fr[code]
 
     monkeypatch.setattr(main, "load_prices", fake_load)
@@ -425,13 +549,13 @@ def test_T_SCR_scan_은_시세를_받아_scan_frames_를_한_번_부른다(monke
         return real(frames, order, *a, **k)
 
     monkeypatch.setattr(screener, "scan_frames", spy)
-    got = screener.scan(6, market="kr")
+    got = screener.scan(7, market="kr")
     assert len(seen) == 1
     frames, order, a, k = seen[0]
-    assert order == screener.universe(6, "kr") and a == () and k == {}
-    assert list(frames) == [c for c in order if c != failing]          # 받기 실패 종목은 빠짐
+    assert order == codes and a == () and k == {}
+    assert list(frames) == [c for c in order if c not in failing]       # 받기 실패 종목은 빠짐
     assert all(frames[c] is fr[c] for c in frames)
-    assert got == real(frames, order) and got[1] == 5
+    assert got == real(frames, order) and got[1] == 4
 
 
 # ======================= T-RSI: 지표 길이 =======================

@@ -5,6 +5,9 @@
   "stock_cut": "2026-09-23",
   "bench_cut": "2026-09-23",
   "claude": "nonzero",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "② 체결 / 팀장 0 아닌 종료 → 폴백"
  },
  "claude_calls": [

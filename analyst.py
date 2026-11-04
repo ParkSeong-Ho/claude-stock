@@ -16,6 +16,9 @@ H1 포워드 모의매매용 추가 (docs/h1-forward-design.md §3.4, 2026-11-04
   운영 apply()·team.py 는 지금 그대로(공백·대문자가 섞인 글자는 veto·hold 로 보지 않음).
 - analyze_logged(): analyze() 와 같은 프롬프트·같은 호출·같은 파싱으로 같은 결과를 내고,
   "어떻게 됐는지"(상태·물은 시각·걸린 시간·종료 코드·모델·CLI 버전)를 함께 돌려준다 → 나중 채점·폴백 비율용.
+  analyze() 와 결과가 다른 곳은 둘뿐이다(2a 검토 A-6): 답의 "analysis" 가 목록이 아니면 analyze() 는 TypeError 로
+  멈추지만 analyze_logged 는 bad_json 폴백, 출력 글자를 읽지 못하면(UnicodeDecodeError 등) decode_error 폴백.
+- claude_cli_version(): `claude --version` 첫 줄(실패하면 None). H1 은 실행마다 한 번 불러 analyze_logged 에 넘긴다.
   _build_prompt()·analyze()·apply() 는 한 글자도 바꾸지 않았다(프롬프트는 운영과 같음, 설계 Q4).
 """
 
@@ -120,8 +123,12 @@ def normalize_verdict(v):
     return w if w in VERDICTS else None
 
 
-def _cli_version(env):
-    """`claude --version` 의 첫 줄. 어떤 이유로든 실패하면 None (판정 결과에는 영향 없음)."""
+def claude_cli_version():
+    """`claude --version` 의 첫 줄(예 "2.1.7 (Claude Code)"). claude 가 없거나 어떤 이유로든 실패하면 None.
+    H1 은 실행마다 한 번만 불러 analyze_logged(cli_version=…) 에 넘긴다(판정 호출마다 부르지 않음)."""
+    if shutil.which("claude") is None:
+        return None
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}  # 판정 호출과 같은 환경
     try:
         r = subprocess.run(["claude", "--version"], capture_output=True, text=True,
                            timeout=VERSION_TIMEOUT, env=env)
@@ -129,26 +136,44 @@ def _cli_version(env):
             return None
         lines = (r.stdout or "").strip().splitlines()
         return lines[0].strip() if lines and lines[0].strip() else None
-    except Exception:      # 시간 초과·OSError·이상한 출력 등 무엇이든 "모름"
+    except Exception:      # 시간 초과·OSError·글자 깨짐 등 무엇이든 "모름"
         return None
 
 
-def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT):
+def _local_now():
+    return datetime.now().astimezone()
+
+
+def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None):
     """analyze() 와 같은 일을 하고 (결과, meta) 를 돌려준다. 결과는 analyze() 와 같은 값이다
     (같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
+    다른 곳은 둘뿐: "analysis" 가 목록이 아님 → bad_json 폴백(analyze 는 TypeError), 출력 디코드 실패 → decode_error 폴백.
+
+    now: 시간대가 있는 datetime 을 돌려주는 함수(시험·재현에서 시계를 바꿔 끼울 때). 없으면 이 컴퓨터의 지금 시각.
+    cli_version: 이번 실행의 `claude --version` 값(claude_cli_version() 으로 한 번 구해 넘김). 받은 그대로 meta 에 적고,
+                 이 함수는 `claude --version` 을 부르지 않는다.
 
     meta (설계 §3.4):
-      status      "ok" | "no_claude" | "timeout" | "os_error" | "nonzero_exit" | "bad_json" | "empty"
-                  (bad_json = JSON 이 없거나 깨짐, 또는 "analysis" 키가 없음 / empty = 후보가 없어 묻지 않음)
-      asked_at    물은 시각(시간대가 붙은 ISO 문자열, 예 "2026-11-10T07:11:22+09:00")
-      elapsed_s   `claude -p` 가 걸린 초(묻지 않았으면 0.0)
+      status      "ok" | "no_claude" | "timeout" | "os_error" | "nonzero_exit" | "decode_error" | "bad_json" | "empty"
+                  (bad_json = JSON 이 없거나 깨짐, "analysis" 키가 없음, "analysis" 가 목록이 아님 /
+                   decode_error = claude 출력 글자를 읽지 못함 / empty = 후보가 없어 묻지 않음)
+      asked_at    `claude -p` 를 부르기 직전 시각(시간대가 붙은 ISO, 예 "2026-11-10T07:11:22+09:00").
+                  묻지 않았으면(empty·no_claude) 이 함수를 부른 시각
+      elapsed_s   `claude -p` 한 번이 걸린 초(묻지 않았으면 0.0)
       returncode  `claude -p` 종료 코드(끝까지 돌지 못했으면 None)
-      model       환경변수 ANTHROPIC_MODEL (없으면 None = "모름". launchd 에서는 보통 None)
-      cli_version `claude --version` 첫 줄(실패하면 None)
+      model       환경변수 ANTHROPIC_MODEL (없거나 빈 값이면 None = "모름". launchd 에서는 보통 None)
+      cli_version 넘겨받은 값 그대로
     후보가 빈 목록이면 claude 를 부르지 않는다."""
-    meta = {"status": None, "asked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "elapsed_s": 0.0, "returncode": None,
-            "model": os.environ.get("ANTHROPIC_MODEL") or None, "cli_version": None}
+    clock = _local_now if now is None else now
+
+    def stamp():
+        t = clock()
+        if t.tzinfo is None:
+            raise ValueError("now() 는 시간대가 있는 시각을 돌려줘야 해요")
+        return t.isoformat(timespec="seconds")
+
+    meta = {"status": None, "asked_at": stamp(), "elapsed_s": 0.0, "returncode": None,
+            "model": os.environ.get("ANTHROPIC_MODEL") or None, "cli_version": cli_version}
     if not candidates:
         meta["status"] = "empty"
         return None, meta
@@ -157,7 +182,7 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT)
         return None, meta
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}  # 구독 강제 (analyze 와 같음)
     prompt = _build_prompt(trainer, candidates)
-    meta["asked_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    meta["asked_at"] = stamp()                    # 묻기 직전
     t0 = time.monotonic()
     try:
         r = subprocess.run(
@@ -168,8 +193,9 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT)
         meta["status"] = "timeout"
     except OSError:
         meta["status"] = "os_error"
+    except ValueError:     # UnicodeDecodeError 등: claude 출력 글자를 읽지 못함 → 멈추지 않고 폴백
+        meta["status"] = "decode_error"
     meta["elapsed_s"] = round(time.monotonic() - t0, 3)
-    meta["cli_version"] = _cli_version(env)       # 판정을 물은 뒤에 따로 묻는다(실패해도 결과와 무관)
     if meta["status"] is not None:
         return None, meta
     meta["returncode"] = r.returncode
@@ -187,7 +213,6 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT)
         return None, meta
     meta["status"] = "ok"
     return result, meta
-
 
 if __name__ == "__main__":
     # 자체 점검: JSON 파싱 + 폴백/veto (실제 claude 호출은 하지 않음)

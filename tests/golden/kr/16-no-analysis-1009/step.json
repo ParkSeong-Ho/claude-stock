@@ -5,6 +5,9 @@
   "stock_cut": "2026-10-09",
   "bench_cut": "2026-10-09",
   "claude": "no_analysis",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "⑥ 정리 매도 체결 / 팀장 답에 analysis 없음 → 폴백"
  },
  "claude_calls": [

@@ -55,9 +55,18 @@ import main             # noqa: E402
 import team             # noqa: E402
 import screener         # noqa: E402
 import analyst          # noqa: E402
+import paper_wallet     # noqa: E402
+import markets          # noqa: E402
+import metrics          # noqa: E402
+import risk_guard       # noqa: E402
+import sprinter_brain   # noqa: E402
+import marathoner_brain  # noqa: E402
+import pioneer_brain    # noqa: E402
 
-for _mod in (main, team, screener, analyst):
-    # 다른 폴더의 같은 이름 모듈을 읽으면 "자기와 비교"가 된다 → 바로 멈춘다
+# 장면이 (직접·간접으로) 읽는 저장소 모듈 전부. 다른 폴더의 같은 이름 모듈이 섞이면 "자기와 비교"가 된다 → 바로 멈춘다
+REPO_MODULES = (main, team, screener, analyst, paper_wallet, markets, metrics, risk_guard,
+                sprinter_brain, marathoner_brain, pioneer_brain)
+for _mod in REPO_MODULES:
     if Path(_mod.__file__).resolve().parent != ROOT:
         raise RuntimeError(f"{_mod.__name__} 를 {ROOT} 가 아닌 곳에서 읽었어요: {_mod.__file__}")
 
@@ -112,6 +121,15 @@ def make_frame(seed, base, kr, first=None, last=None, crash=None, crash_mult=0.7
     return df
 
 
+def with_no_open(df, rows):
+    """그날 시가만 없는 행으로 바꾼다(거래량은 그대로 → 정지가 아님). form "nan": Open=NaN / "zero": Open=0.
+    확정 봉에는 남지만 main.open_price 가 None 이라 그 봉에서는 체결할 수 없다."""
+    df = df.copy()
+    for day, form in rows:
+        df.loc[pd.Timestamp(day), "Open"] = float("nan") if form == "nan" else 0.0
+    return df
+
+
 def with_halts(df, halts):
     """거래정지일 행으로 바꾼다 (네이버 실제 모양 두 가지, tests/test_kr_fix_s0.py 와 같음).
     form "zero": Open=High=Low=0, Close=직전 종가, Volume=0 / "flat": OHLC 전부 직전 종가, Volume=0."""
@@ -136,6 +154,7 @@ class Spec:
     first: str | None = None        # 상장일(짧은 이력)
     last: str | None = None         # 자료 끝(오래된 봉)
     halts: tuple = ()               # 국내 거래정지 ((첫날, 일수, 모양), ...)
+    no_open: tuple = ()             # 시가 없는 행 ((날짜, "nan"|"zero"), ...)
 
 
 class World:
@@ -151,12 +170,14 @@ class World:
                 self.fail.add(code)
                 continue
             df = make_frame(sp.seed, sp.base, kr, sp.first, sp.last, crash=crash)
-            self.frames[code] = with_halts(df, sp.halts) if sp.halts else df
+            df = with_halts(df, sp.halts) if sp.halts else df
+            self.frames[code] = with_no_open(df, sp.no_open) if sp.no_open else df
         self.frames[bench_code] = make_frame(bench_spec.seed, bench_spec.base, False)
         self.stock_cut = self.bench_cut = None
+        self.down = frozenset()     # 이번 장면에만 받기에 실패하는 코드(기준 지수 포함)
 
     def DataReader(self, code, start):          # noqa: N802 (FinanceDataReader 이름 그대로)
-        if code in self.fail:
+        if code in self.fail or code in self.down:
             raise ConnectionError(f"가짜 네트워크 오류 ({code})")
         cut = self.bench_cut if code == self.bench_code else self.stock_cut
         return self.frames[code].loc[pd.Timestamp(start):pd.Timestamp(cut)].copy()
@@ -277,6 +298,8 @@ class Step:
     bench_cut: str      # 기준 지수(SPY/KS200) 원본 시세가 있는 마지막 날짜
     claude: str = "answer"
     note: str = ""      # 이 장면이 지나야 하는 가지(사람용 설명)
+    down: tuple = ()    # 이 장면에서만 받기에 실패하는 코드(보유·대기 종목, 기준 지수 SPY/KS200)
+    edit: str = ""      # 실행 전에 상태 파일을 손으로 고치는 장면(EDITS 의 이름)
 
 
 def us_now(bar):
@@ -300,6 +323,8 @@ def us_world():
     specs["FAIL"] = Spec(seed=0, base=1.0, fail=True)
     specs["NEWB"] = Spec(seed=301, base=25.0, first=US_NEWB_FIRST)
     specs["STAL"] = Spec(seed=310, base=60.0, last=US_STAL_LAST)
+    for code, rows in US_NO_OPEN.items():
+        specs[code] = Spec(seed=specs[code].seed, base=specs[code].base, no_open=rows)
     return World("us", specs, "SPY", Spec(seed=9, base=500.0), listing=US_LISTING, crash=US_CRASH)
 
 
@@ -313,6 +338,9 @@ def kr_world():
     specs["329180"] = Spec(seed=401, base=150_000.0, first=KR_SHORT_FIRST)
     for code, halts in KR_HALTS.items():
         specs[code] = Spec(seed=specs[code].seed, base=specs[code].base, halts=halts)
+    for code, rows in KR_NO_OPEN.items():
+        sp = specs[code]
+        specs[code] = Spec(seed=sp.seed, base=sp.base, halts=sp.halts, no_open=rows)
     return World("kr", specs, "KS200", Spec(seed=19, base=400.0), crash=KR_CRASH)
 
 
@@ -320,12 +348,14 @@ def kr_world():
 US_NEWB_FIRST = "2026-06-22"      # NEWB: 이 날 상장 → 2026-09-25 에 처음 70봉이 되어 스캔에 들어옴
 US_STAL_LAST = "2026-09-08"       # STAL: 자료가 이 날 끝남(이 봉에서 스프린터·파이오니어 매수 신호) → 오래된 봉 제외
 US_CRASH = "2026-09-30"           # 미국 종목 전부 이날 종가 −30% → 서킷 브레이커
+US_NO_OPEN = {"LIMA": (("2026-10-01", "nan"),)}   # 스프린터 매도 대기 중인 날 시가 NaN → 다음 봉에 체결
 KR_SHORT_FIRST = "2026-06-22"     # 329180: 짧은 이력 → 2026-09-25 에 처음 70봉
 KR_HALTS = {
     "012450": (("2026-09-25", 3, "zero"),),   # 스프린터 매수 대기 중 3일 정지 → 정지 뒤 첫 거래일 시가 체결
     "000270": (("2026-10-01", 2, "flat"),),   # 마라토너 보유 중 2일 정지 → 판단 쉼, 스크리너 오래된 봉 제외
 }
 KR_CRASH = "2026-10-08"           # 국내 종목 전부 이날 종가 −30% → 서킷 브레이커
+KR_NO_OPEN = {"000660": (("2026-09-25", "zero"),)}  # 파이오니어 매수 대기 중인 날 Open=0(거래량 있음) → 다음 봉 체결
 
 
 def us_steps():
@@ -340,25 +370,28 @@ def us_steps():
         S("04-same-bar-0922", us_now("2026-09-22"), "2026-09-22", "2026-09-22",
           note="④ 같은 봉 다시: 저장 안 된 트레이너가 있어 스캔은 하고, 저장된 트레이너는 '이미 처리됨'"),
         S("05-no-claude-0923", us_now("2026-09-23"), "2026-09-23", "2026-09-23", claude="missing",
-          note="팀장(claude) 없음 → 규칙 폴백"),
+          down=("INDA",), note="팀장(claude) 없음 → 규칙 폴백 / 대기 주문 종목 INDA 시세 받기 실패 → 주문 그대로 남김"),
         S("06-0924", us_now("2026-09-24"), "2026-09-24", "2026-09-24",
           note="③ 보유 종목 매도 신호 → 다음 시가 매도 주문"),
         S("07-timeout-0925", us_now("2026-09-25"), "2026-09-25", "2026-09-25", claude="timeout",
-          note="③ 매도 체결 / 팀장 시간 초과 → 폴백 / NEWB 가 처음 70봉"),
+          down=("HTEL",), note="③ 매도 체결 / 팀장 시간 초과 → 폴백 / NEWB 가 처음 70봉 / "
+                               "보유 종목 HTEL 시세 받기 실패 → 평가·판단 건너뜀"),
         S("08-oserror-0928", us_now("2026-09-28"), "2026-09-28", "2026-09-28", claude="oserror",
           note="팀장 OSError → 폴백"),
-        S("09-0929", us_now("2026-09-29"), "2026-09-29", "2026-09-29",
-          note="0주 보류(상한 안에서 1주도 못 삼)·매도 신호"),
+        S("09-spy-down-0929", us_now("2026-09-29"), "2026-09-29", "2026-09-29", down=("SPY",),
+          note="기준 지수 SPY 받기 실패 → 후보의 봉 날짜를 기준 봉으로, 비교는 '계산 불가' / 0주 보류·매도 신호"),
         S("10-crash-0930", us_now("2026-09-30"), "2026-09-30", "2026-09-30",
           note="⑥ 폭락 → 서킷 브레이커 발동(다음 시가 전량 정리, 정지)"),
         S("11-liquidate-1001", us_now("2026-10-01"), "2026-10-01", "2026-10-01",
-          note="⑥ 서킷 정리 매도 체결"),
+          note="⑥ 서킷 정리 매도 체결 / LIMA 시가 NaN(거래량 있음) → 매도 대기 그대로, "
+               "대기 주문이 있는 보유 종목은 매도 판단 건너뜀"),
         S("12-intraday-1002", datetime(2026, 10, 2, 15, 0, tzinfo=ET), "2026-10-02", "2026-10-02",
           note="뉴욕 15:00(16:15 전) 실행: 오늘 봉은 아직 확정 아님 → 어제 봉 기준"),
         S("13-1002", us_now("2026-10-02"), "2026-10-02", "2026-10-02",
           note="정지된 트레이너는 변화 없음 → 저장 안 함"),
-        S("14-1005", us_now("2026-10-05"), "2026-10-05", "2026-10-05",
-          note="보유+매수 대기 5개(MAX_POSITIONS) → 신규 후보를 보지 않음"),
+        S("14-1005", us_now("2026-10-05"), "2026-10-05", "2026-10-05", edit="bogus_orders",
+          note="상태 파일을 손으로 고친 장면: 이미 보유한 종목의 매수·보유 없는 종목의 매도 주문은 버려지고, "
+               "지갑보다 많은 주식의 매도는 실패 / 보유+매수 대기 5개(MAX_POSITIONS) → 신규 후보 안 봄"),
     ]
 
 
@@ -367,6 +400,8 @@ def kr_steps():
     return [
         S("01-no-candidates-0921", kr_now("2026-09-21"), "2026-09-21", "2026-09-21",
           note="⑤ 후보 없음 → 세 트레이너 모두 저장 안 함"),
+        S("01b-ks200-down-0921", kr_now("2026-09-21"), "2026-09-21", "2026-09-21", down=("KS200",),
+          note="기준 지수 KS200 받기 실패 + 후보 없음 → 기준 날짜를 못 정해 아무것도 저장 안 함"),
         S("02-first-0922", kr_now("2026-09-22"), "2026-09-22", "2026-09-22",
           note="① 후보 + 팀장 판정 → 주문"),
         S("03-nonzero-0923", kr_now("2026-09-23"), "2026-09-23", "2026-09-23", claude="nonzero",
@@ -374,7 +409,8 @@ def kr_steps():
         S("04-0924", kr_now("2026-09-24"), "2026-09-24", "2026-09-24",
           note="① 후보·판정 → 012450 매수 주문(다음날부터 정지)"),
         S("05-halt-0925", kr_now("2026-09-25"), "2026-09-25", "2026-09-25",
-          note="⑦ 012450 거래정지(원본 Volume=0) → 대기 주문 그대로, 스크리너 오래된 봉 제외"),
+          note="⑦ 012450 거래정지(원본 Volume=0) → 대기 주문 그대로, 스크리너 오래된 봉 제외 / "
+               "000660 시가 0(거래량 있음) → 매수 대기 그대로"),
         S("06-halt-0928", kr_now("2026-09-28"), "2026-09-28", "2026-09-28", note="⑦ 정지 2일째"),
         S("07-halt-0929", kr_now("2026-09-29"), "2026-09-29", "2026-09-29", note="⑦ 정지 3일째"),
         S("08-after-halt-0930", kr_now("2026-09-30"), "2026-09-30", "2026-09-30",
@@ -399,9 +435,35 @@ def kr_steps():
     ]
 
 
+def _edit_bogus_orders(state_dir, market, trainer="파이오니어"):
+    """상태 파일을 손으로 고친다(옛 파일·사람 손질로 상태가 어긋난 경우 흉내). team.run 의 ① 이 조용히 버리는 주문 셋:
+    (1) 이미 보유한 종목의 매수 (2) 보유하지 않은 종목의 매도
+    (3) positions 의 주식 수를 지갑보다 1주 많게 한 종목의 매도 → PaperWallet.sell 이 False(체결 안 됨)."""
+    path = Path(state_dir) / _state_key(market, trainer)
+    st = json.loads(path.read_text(encoding="utf-8"))
+    held = sorted(st["positions"])
+    if len(held) < 2:
+        raise AssertionError(f"{trainer} 보유가 2종목 미만이라 손질 장면을 만들 수 없어요: {held}")
+    busy = set(held) | {o["code"] for o in st["pending"]}
+    codes = [c for c in SCENARIOS[market]["codes"] if c not in busy]
+    sig = st["last_date"]
+    st["positions"][held[1]]["shares"] += 1
+    st["pending"] += [
+        {"code": held[0], "action": "매수", "signal_date": sig, "reason": "손질: 이미 보유한 종목의 매수", "note": None},
+        {"code": codes[0], "action": "매도", "signal_date": sig, "reason": "손질: 보유 없는 종목의 매도"},
+        {"code": held[1], "action": "매도", "signal_date": sig, "reason": "손질: 지갑보다 많은 주식의 매도"},
+    ]
+    path.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"trainer": trainer, "buy_held": held[0], "sell_not_held": codes[0], "sell_fail": held[1]}
+
+
+EDITS = {"bogus_orders": _edit_bogus_orders}
+
+
 SCENARIOS = {
-    "us": {"world": us_world, "steps": us_steps, "n": US_N},
-    "kr": {"world": kr_world, "steps": kr_steps, "n": KR_N},
+    "us": {"world": us_world, "steps": us_steps, "n": US_N,
+           "codes": tuple(s for s in US_LISTING if isinstance(s, str))},
+    "kr": {"world": kr_world, "steps": kr_steps, "n": KR_N, "codes": KR_CODES},
 }
 
 
@@ -470,8 +532,10 @@ def run_market(market: str):
         with patched(world, claude, state_dir, results_dir):
             for step in sc["steps"]():
                 world.stock_cut, world.bench_cut = step.stock_cut, step.bench_cut
+                world.down = frozenset(step.down)
                 main.datetime = make_clock(step.now)
                 claude.mode = step.claude
+                edited = EDITS[step.edit](state_dir, market) if step.edit else None
                 n_calls = len(claude.calls)
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -485,13 +549,14 @@ def run_market(market: str):
                 files[f"{base}/stdout.txt"] = stdout.encode("utf-8")
                 files[f"{base}/step.json"] = _dumps({
                     "step": {"label": step.label, "now": step.now.isoformat(), "stock_cut": step.stock_cut,
-                             "bench_cut": step.bench_cut, "claude": step.claude, "note": step.note},
+                             "bench_cut": step.bench_cut, "claude": step.claude, "down": list(step.down),
+                             "edit": step.edit, "edited": edited, "note": step.note},
                     "claude_calls": calls,
                     "scan": scan,
                 })
                 for rel, data in raw.items():
                     files[f"{base}/state/{rel}"] = data
-                steps.append({"step": step, "stdout": stdout, "calls": calls, "scan": scan, "raw": raw,
+                steps.append({"step": step, "stdout": stdout, "calls": calls, "scan": scan, "raw": raw, "edited": edited,
                               "states": {k: json.loads(v) for k, v in raw.items()}})
     return files, {"world": world, "steps": steps}
 
@@ -647,9 +712,19 @@ def check_branches(market: str, info: dict) -> list[str]:
                  f"⑥ {t}: 정리 주문이 전부 '서킷 브레이커' 매도가 아님")
             s1 = nxt["states"][_state_key(market, t)]
             need(not s1["positions"] and not s1["pending"] and s1["stopped"], f"⑥ {t}: 다음 시가에 전량 정리 안 됨")
-    # 스크리너: 받기 실패 종목은 건너뛰고, 70봉 미만은 세지 않음
-    used = [st["scan"]["used"] for st in steps]
-    need(len(set(used)) == 2 and used == sorted(used), f"스크리너 used 가 70봉 경계에서 한 번 늘어야 함: {used}")
+    # 스크리너 used: 받기 실패(늘 실패·그 장면만 실패) 종목은 건너뛰고, 확정 봉 70개 미만은 세지 않음 — 따로 다시 센 값과 같다
+    universe = SCENARIOS[market]["codes"]
+    for st in steps:
+        sp = st["step"]
+        want = sum(1 for c in universe if c not in world.fail and c not in sp.down
+                   and len(_confirmed(world, market, c, sp.now, sp.stock_cut)) >= 70)
+        need(st["scan"]["used"] == want, f"{sp.label}: 스크리너 used {st['scan']['used']} ≠ 다시 센 값 {want}")
+    plain = [st["scan"]["used"] for st in steps if not st["step"].down]
+    need(len(set(plain)) == 2, f"70봉 경계(짧은 이력 종목이 처음 들어옴)를 못 지남: {plain}")
+    # 받기 실패 장면: 실패한 코드가 실제로 그 장면에서만 실패(다른 장면에서는 받힘)
+    for st in steps:
+        for c in st["step"].down:
+            need(c in world.frames, f"{st['step'].label}: {c} 는 늘 실패하는 종목이라 장면 실패 확인이 안 됨")
 
     if market == "us":
         # 오래된 봉(STAL): 마지막 봉에 매수 신호가 있는데 후보에서 빠짐
@@ -660,6 +735,54 @@ def check_branches(market: str, info: dict) -> list[str]:
              "STAL 이 후보로 나옴")
         intr = by["12-intraday-1002"]
         need("마지막 확정 봉 2026-10-01" in intr["stdout"], "뉴욕 15:00 실행인데 오늘 봉(10-02)을 썼음")
+        mk = _state_key("us", "마라토너")
+        # A-2 ① 대기 주문 종목 시세 받기 실패 → 주문을 버리지 않고 그대로 남김 (team.run_trainer ①)
+        b, a = by["04-same-bar-0922"]["states"][mk], by["05-no-claude-0923"]["states"][mk]
+        inda = [o for o in b["pending"] if o["code"] == "INDA" and o["action"] == "매수"]
+        need(inda and [o for o in a["pending"] if o["code"] == "INDA"] == inda and "INDA" not in a["positions"],
+             "A-2 받기 실패한 대기 주문(INDA)이 그대로 남지 않음")
+        nxt = by["06-0924"]["states"][mk]
+        need(not any(o["code"] == "INDA" for o in nxt["pending"]), "A-2 다음날 INDA 주문을 처리하지 않음")
+        # A-2 ② 보유 종목 시세 받기 실패 → 평가·판단 건너뜀(보유일수 그대로, 보유 유지)
+        b, a = by["06-0924"]["states"][mk], by["07-timeout-0925"]["states"][mk]
+        need("HTEL" in b["positions"] and "HTEL" in a["positions"]
+             and a["positions"]["HTEL"]["days_held"] == b["positions"]["HTEL"]["days_held"]
+             and a["last_date"] == "2026-09-25", "A-2 시세 못 받은 보유 종목(HTEL) 처리가 다름")
+        # A-2 ③ 기준 지수 받기 실패 → 후보 날짜를 기준 봉으로, 비교는 계산 불가
+        sd = by["09-spy-down-0929"]
+        need("벤치마크 SPY 받기 실패" in sd["stdout"] and "(기준 확정 봉 ?)" in sd["stdout"]
+             and "SPY 계산 불가" in sd["stdout"]
+             and any(sd["scan"]["found"].values())
+             and all(sd["states"][_state_key("us", t)]["last_date"] == "2026-09-29" for t in TRAINERS),
+             "A-2 SPY 받기 실패 장면이 후보 날짜로 처리하지 않음")
+        # A-2 ④ 시가 NaN(거래량 있음) → 매도 대기 그대로 + 대기 주문 있는 보유 종목은 매도 판단 건너뜀
+        sk = _state_key("us", "스프린터")
+        row = world.frames["LIMA"].loc[pd.Timestamp("2026-10-01")]
+        need(row["Open"] != row["Open"] and row["Volume"] > 0, "LIMA 10-01 이 시가 NaN 행이 아님")
+        b, a = by["10-crash-0930"]["states"][sk], by["11-liquidate-1001"]["states"][sk]
+        sells = [o for o in a["pending"] if o["code"] == "LIMA"]
+        need([o for o in b["pending"] if o["code"] == "LIMA"] == sells and len(sells) == 1
+             and sells[0]["action"] == "매도" and "LIMA" in a["positions"],
+             "A-2 시가 없는 날 매도 대기가 그대로 하나만 남지 않음")
+        from sprinter_brain import SprinterBrain
+        df = _confirmed(world, "us", "LIMA", by["11-liquidate-1001"]["step"].now, "2026-10-01")
+        need(SprinterBrain().decide(SprinterBrain().add_indicators(df), a["positions"]["LIMA"])[0] == "매도",
+             "LIMA 가 10-01 에 매도 신호가 아니라 '대기 주문 있는 보유 종목 판단 건너뜀'을 확인할 수 없음")
+        c = by["13-1002"]["states"][sk]
+        need("LIMA" not in c["positions"] and any(
+            e["종류"] == "매도" and e["종목"] == "LIMA" and e["시각"] == "2026-10-02" for e in c["wallet"]["log"]),
+            "A-2 시가 NaN 다음 봉(10-02)에 매도 체결 안 됨")
+        # A-2 ⑤ 손질한 상태: 보유 종목 매수·보유 없는 매도는 버려지고, 지갑보다 많은 주식 매도는 실패
+        ed = by["14-1005"]
+        info_e = ed["edited"]
+        a = ed["states"][_state_key("us", info_e["trainer"])]
+        need(info_e and not any(o.get("reason", "").startswith("손질") for o in a["pending"]),
+             "A-2 손질 주문이 대기 목록에 남음")
+        fail = info_e["sell_fail"]
+        need(a["positions"][fail]["shares"] == a["wallet"]["holdings"][fail]["shares"] + 1,
+             "A-2 지갑보다 많은 주식 매도가 실패하지 않음")
+        need(not any(e["시각"] == "2026-10-05" and e["종목"] in (fail, info_e["sell_not_held"], info_e["buy_held"])
+                     for e in a["wallet"]["log"]), "A-2 버려야 할 주문이 지갑 기록에 남음")
     else:
         # ⑦-1 정지 중 대기 주문은 그대로, 정지 뒤 첫 거래일 시가에 체결
         for lab in ("05-halt-0925", "06-halt-0928", "07-halt-0929"):
@@ -693,6 +816,19 @@ def check_branches(market: str, info: dict) -> list[str]:
         need(all(by["14-ks200-2231-1007"]["states"][_state_key("kr", t)]["last_date"] == "2026-10-07"
                  for t in TRAINERS), "⑧ 22:31 에 오늘 봉(10-07)을 처리하지 않음")
         need(not by["01-no-candidates-0921"]["raw"], "⑤ 첫날 후보 없음인데 파일이 생김")
+        # A-2 기준 지수 받기 실패 + 후보 없음 → 기준 날짜를 못 정해 아무것도 저장 안 함
+        kd = by["01b-ks200-down-0921"]
+        need("기준 날짜(마지막 확정 봉)를 정하지 못했어요" in kd["stdout"] and not kd["raw"]
+             and "KS200] 받기 실패" in kd["stdout"], "A-2 KS200 받기 실패·후보 없음 장면이 다름")
+        # A-2 시가 0(거래량 있음) → 매수 대기 그대로, 다음 봉 시가 체결
+        pk = _state_key("kr", "파이오니어")
+        row = world.frames["000660"].loc[pd.Timestamp("2026-09-25")]
+        need(row["Open"] == 0 and row["Volume"] > 0, "000660 09-25 가 시가 0·거래량 있음 행이 아님")
+        a = by["05-halt-0925"]["states"][pk]
+        need(any(o["code"] == "000660" and o["action"] == "매수" for o in a["pending"])
+             and "000660" not in a["positions"], "A-2 시가 0 인 날 매수 대기가 남지 않음")
+        pos = by["06-halt-0928"]["states"][pk]["positions"].get("000660")
+        need(pos is not None and pos["buy_date"] == "2026-09-28", "A-2 시가 0 다음 봉(09-28)에 체결 안 됨")
     return bad
 
 

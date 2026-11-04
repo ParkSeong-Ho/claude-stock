@@ -1,0 +1,37 @@
+{
+  "positions": {},
+  "pending": [
+    {
+      "code": "ECHO",
+      "action": "매수",
+      "signal_date": "2026-09-21",
+      "reason": "많이 빠졌다가(RSI 31) 반등이 시작됐어요. 반등을 노려요.",
+      "note": "가짜 팀장 메모 ECHO"
+    }
+  ],
+  "prev_value": 1000.0,
+  "stopped": false,
+  "last_date": "2026-09-21",
+  "start_cash": 1000.0,
+  "start_date": "2026-09-21",
+  "wallet": {
+    "name": "파이오니어",
+    "cash": 1000.0,
+    "currency": "USD",
+    "fee_rate": 0.001,
+    "sell_tax_rate": 0.0,
+    "slippage": 0.0005,
+    "holdings": {},
+    "log": [
+      {
+        "시각": "2026-09-21",
+        "종류": "입금",
+        "종목": null,
+        "수량": 0,
+        "금액": 1000.0,
+        "통화": "USD"
+      }
+    ]
+  },
+  "schema": "v1-usd-1"
+}

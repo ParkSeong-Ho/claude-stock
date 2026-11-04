@@ -5,6 +5,9 @@
   "stock_cut": "2026-09-30",
   "bench_cut": "2026-09-30",
   "claude": "answer",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "⑦ 정지 뒤 첫 거래일 시가에 체결"
  },
  "claude_calls": [],

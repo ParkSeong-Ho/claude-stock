@@ -27,6 +27,7 @@ scan() = 시세 받기 + scan_frames() (H1 설계 §3.4, 2026-11-04):
 import sys
 import csv
 import random
+from datetime import date
 
 import main
 import markets
@@ -51,25 +52,43 @@ def universe(n, market="us"):
     return syms[:n]
 
 
+def _check_asof(asof):
+    """asof 는 None 이거나 'YYYY-MM-DD' 10자리 날짜 글자여야 한다. 글자로 날짜를 비교하므로
+    '2026-10-7' 같은 값을 받으면 조용히 미래 봉을 보게 된다 → 바로 ValueError (2a 검토 A-8)."""
+    if asof is None:
+        return
+    ok = isinstance(asof, str) and len(asof) == 10
+    if ok:
+        try:
+            ok = date.fromisoformat(asof).isoformat() == asof
+        except ValueError:
+            ok = False
+    if not ok:
+        raise ValueError(f"asof 는 'YYYY-MM-DD' 10자리 날짜여야 해요 (받은 값: {asof!r})")
+
+
 def scan_frames(frames, order, asof=None, min_bars=70, brains=None):
     """이미 받은 시세로 트레이너별 '매수' 후보를 찾는다. 인터넷을 쓰지 않는다.
 
-    frames: {종목코드: 확정 봉 시세 DataFrame}. order 에 있는데 frames 에 없는 종목(받기 실패)은 건너뛴다.
+    frames: {종목코드: 확정 봉 시세 DataFrame}. order 에 있는데 frames 에 없거나 값이 None 인 종목은
+            받기 실패로 보고 건너뛴다(세지도 않음. team._prices 캐시처럼 실패를 None 으로 담아 넘겨도 된다).
     order: 훑는 순서(= 후보 목록의 순서).
-    asof: 'YYYY-MM-DD'. 주면 각 시세를 그 날짜 이하로 자른 뒤 판단한다(미래 봉을 보지 않게). None 이면 자르지 않음.
+    asof: 'YYYY-MM-DD'(10자리). 주면 각 시세를 그 날짜 이하로 자른 뒤 판단한다(미래 봉을 보지 않게).
+          None 이면 자르지 않음. 다른 모양이면 ValueError.
     min_bars: 이보다 봉이 적은 종목은 지표 워밍업 부족으로 빼고, 세지도 않는다(기본 70).
     brains: {트레이너: 브레인 클래스}. None 이면 이 모듈의 BRAINS (부를 때의 값).
     돌려주는 값: (found, used) — found = {트레이너: [후보 dict, ...]}, used = 판단한 종목 수.
     후보 dict 는 code·price(종가 소수 2자리)·date(신호 봉)·rsi(소수 1자리, 없으면 None)·reason.
     마지막 봉이 이번 스캔의 가장 최근 봉보다 앞인 종목(거래정지 등)의 후보는 뺀다(M1)."""
+    _check_asof(asof)
     brains = BRAINS if brains is None else brains
     found = {t: [] for t in brains}
     used = 0
     latest = None                 # 이번 스캔에서 본 가장 최근 봉 날짜 (오래된 봉 후보를 빼는 기준)
     for code in order:
-        if code not in frames:
+        df = frames.get(code)
+        if df is None:
             continue              # 받기 실패한 종목
-        df = frames[code]
         if asof is not None:
             df = df[[x.date().isoformat() <= asof for x in df.index]]
         if len(df) < min_bars:    # 지표 워밍업 부족 종목 제외

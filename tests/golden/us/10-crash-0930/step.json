@@ -5,6 +5,9 @@
   "stock_cut": "2026-09-30",
   "bench_cut": "2026-09-30",
   "claude": "answer",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "⑥ 폭락 → 서킷 브레이커 발동(다음 시가 전량 정리, 정지)"
  },
  "claude_calls": [],

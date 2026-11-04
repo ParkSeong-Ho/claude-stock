@@ -5,7 +5,12 @@
   "stock_cut": "2026-09-25",
   "bench_cut": "2026-09-25",
   "claude": "timeout",
-  "note": "③ 매도 체결 / 팀장 시간 초과 → 폴백 / NEWB 가 처음 70봉"
+  "down": [
+   "HTEL"
+  ],
+  "edit": "",
+  "edited": null,
+  "note": "③ 매도 체결 / 팀장 시간 초과 → 폴백 / NEWB 가 처음 70봉 / 보유 종목 HTEL 시세 받기 실패 → 평가·판단 건너뜀"
  },
  "claude_calls": [
   {
@@ -30,7 +35,7 @@
   }
  ],
  "scan": {
-  "used": 14,
+  "used": 13,
   "found": {
    "마라토너": [],
    "스프린터": [

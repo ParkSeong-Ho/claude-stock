@@ -5,11 +5,16 @@
   "stock_cut": "2026-09-23",
   "bench_cut": "2026-09-23",
   "claude": "missing",
-  "note": "팀장(claude) 없음 → 규칙 폴백"
+  "down": [
+   "INDA"
+  ],
+  "edit": "",
+  "edited": null,
+  "note": "팀장(claude) 없음 → 규칙 폴백 / 대기 주문 종목 INDA 시세 받기 실패 → 주문 그대로 남김"
  },
  "claude_calls": [],
  "scan": {
-  "used": 13,
+  "used": 12,
   "found": {
    "마라토너": [
     {

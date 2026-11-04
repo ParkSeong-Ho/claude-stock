@@ -11,6 +11,8 @@ __pycache__/
 # 런타임 생성물 (매매 상태·결과·로그 — 코드 아님)
 # state/kis_token.json (KIS 접속 토큰) 도 state/ 아래라 무시됨
 state/
+# 예외: 골든(시험 기준 자료)의 상태 파일은 커밋해야 한다 (tests/golden/<시장>/<장면>/state/, docs/h1-review-2a.md A-1)
+!tests/golden/**/state/
 results/
 *.log
 error_log.txt

@@ -5,6 +5,9 @@
   "stock_cut": "2026-10-01",
   "bench_cut": "2026-10-01",
   "claude": "bad_json",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "⑦ 보유 종목 000270 정지 → 판단 쉼, 스크리너 오래된 봉 제외 / 팀장 JSON 깨짐 → 폴백"
  },
  "claude_calls": [

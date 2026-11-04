@@ -5,6 +5,9 @@
   "stock_cut": "2026-09-22",
   "bench_cut": "2026-09-22",
   "claude": "answer",
+  "down": [],
+  "edit": "",
+  "edited": null,
   "note": "④ 같은 봉 다시: 저장 안 된 트레이너가 있어 스캔은 하고, 저장된 트레이너는 '이미 처리됨'"
  },
  "claude_calls": [],

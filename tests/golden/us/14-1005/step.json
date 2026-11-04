@@ -5,7 +5,15 @@
   "stock_cut": "2026-10-05",
   "bench_cut": "2026-10-05",
   "claude": "answer",
-  "note": "보유+매수 대기 5개(MAX_POSITIONS) → 신규 후보를 보지 않음"
+  "down": [],
+  "edit": "bogus_orders",
+  "edited": {
+   "trainer": "파이오니어",
+   "buy_held": "CHRL",
+   "sell_not_held": "ALFA",
+   "sell_fail": "DLTA"
+  },
+  "note": "상태 파일을 손으로 고친 장면: 이미 보유한 종목의 매수·보유 없는 종목의 매도 주문은 버려지고, 지갑보다 많은 주식의 매도는 실패 / 보유+매수 대기 5개(MAX_POSITIONS) → 신규 후보 안 봄"
  },
  "claude_calls": [],
  "scan": {
