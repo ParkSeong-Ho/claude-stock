@@ -1,0 +1,6 @@
+# claude-stock 의존성 (하한만 고정; 설치: python -m pip install -r requirements.txt)
+pandas>=2.0
+ta>=0.11
+finance-datareader>=0.9.50
+backtesting>=0.3.3
+pytest>=7.0
