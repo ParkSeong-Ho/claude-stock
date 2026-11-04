@@ -532,7 +532,7 @@ class IdleBar:
 
 def decision_key(market, date, trainer, code) -> str        # "us|2026-11-09|마라토너|AAPL"
 class DecisionLog:                                           # state/h1/analyst_cache.jsonl
-    def __init__(self, path)                                 # 읽기: 중복 열쇠·깨진 줄 → H1LogicError
+    def __init__(self, path, read_only=False)                # 읽기: 중복 열쇠·깨진 줄 → H1LogicError(L18/L24). read_only 면 반쯤 쓴 마지막 줄을 자르지 않고 알리기만(2b-1 검토 B-8)
                                                              #       (마지막 줄만 반쯤 쓰였으면 잘라내고 runs.jsonl 에 기록)
     def get(self, key) -> dict | None
     def append(self, records: list[dict]) -> None            # 줄 추가 + flush + fsync. 이미 있는 열쇠면 H1LogicError
@@ -559,7 +559,16 @@ def live_source(market) -> DataSource                        # main.load_benchma
 
 def start(market, root=H1_DIR, source=None, leader_mode="llm") -> int
 def run(market, root=H1_DIR, source=None, leader_mode="llm", gate=True) -> int   # 종료 코드(§3.9)
-def run_bar(market, t, states, frames, universe, idle: IdleBar, leader, halted, delist) -> dict
+def run_bar(market, t, states, frames, universe, idle: IdleBar, *, decisions, leader_mode, halted, prev_cal_date,
+            calendar, now, ask, cli_version, code_hash, env, allowed, head, universe_sha256, meta_universe_sha256,
+            brains=None) -> BarResult
+    # 실제 인자는 h1.py docstring 이 기준(2b-1 구현). 입력 장부는 고치지 않고 BarResult.states 로 돌려준다.
+    # BarResult: date, states, problems(L+W), lines, found, used, mode, late, llm_calls, late_calls, new_records,
+    #            fingerprint(처리 뒤 장부 6개의 ledger_fingerprint), errors, ok(False 면 저장 금지)
+    # 상장폐지 정보는 장부 corp_actions 하나에서만 읽는다(2b-1 검토 B-4).
+    # 사전 조건(앞 거래일 == last_date, 지수 봉 날짜, S 의 prev_cal_date 등) 위반은 L 이 아니라 H1Refused/ValueError —
+    # 달력·자료 문제는 h1.run 이 D4·D5 로 먼저 거른다(2b-1 검토 B-3·B-10)
+def apply_split(states, code, r, date, source, at) -> dict   # ⑦-2: 6개 장부에 같게 적용, 정수가 아니면 거절
 def restart(market, reason, root=H1_DIR) -> Path
 def corp_action(market, code, *, split=None, date=None, delist=False, last_date=None, last_close=None,
                 accept_correction=False, source=None, root=H1_DIR, source_data=None) -> int
@@ -676,7 +685,9 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
 | `purpose` | 지수 다리: `"start"`(S+1 첫 전부 지수), `"fund:<종목>"`(그 매수 자금), `"sweep"` / 주식 다리: `"order"`, `"delist"` |
 | `need`, `short` | 매수 필요 금액, 지수로 메운 금액(A1) |
 
-**보류 기록 (`skips` 한 줄)**: `date, code, kind("0주"|"현금부족"|"팀장hold"|"확신도낮음"), reason, need, avail, order_id(있으면)`.
+**보류 기록 (`skips` 한 줄)**: `date, code, kind("0주"|"현금부족"|"팀장hold"|"확신도낮음"), reason, need, avail, price, order_id(있으면)`. `price` 는 L12 가 "0주" 를 다시 계산하려고 둔다.
+
+**기업 행위 기록 (`corp_actions` 한 줄)**: 분할 `{"kind": "split", "code", "r", "date": 출처의 분할 기준일, "applied_after": 적용 때 장부 last_date, "source", "at"}` / 상장폐지 `{"kind": "delist", "code", "last_date", "last_close", "source", "at"}`(`last_date` ≤ 등록 때 장부 last_date 여야 함) / 정정 확정 `{"kind": "correction", "code", "items": [{date, field, old, new}], "source", "at"}`. 점검(L7·L8·L15·L23)은 `applied_after` 시점에 수량 ×r·매수가 ÷r 를 반영해 원장을 다시 걷는다(2b-1 검토 B-2).
 - 빈자리가 모자라 주문을 못 낸 후보는 보류가 아니라 하루 기록의 `over_slots` 로 센다(R2 I23).
 
 **하루 기록 (`days` 한 줄, 처리한 봉마다 꼭 하나)**
@@ -713,7 +724,8 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
  "note": "실적 발표 전 변동성 주의",   // 500자까지
  "source": "llm",             // "llm" | "fallback"
  "status": "ok",              // ok | missing_in_reply | no_claude | timeout | os_error | nonzero_exit
-                              // | decode_error | bad_json | empty | late_no_llm | replay_no_llm
+                              // | decode_error | bad_json | empty | bad_verdict | late_no_llm | replay_no_llm
+                              // bad_verdict: LLM 이 답했지만 판정 글자를 정리하면 buy/hold/veto 가 아님 → source="fallback", 폴백으로 셈(2b-1 검토 B-5)
  "model": null, "cli_version": "2.x.y (Claude Code)",
  "asked_at": "2026-11-10T07:11:22+09:00", "elapsed_s": 41.2, "next_open": "2026-11-10T09:30:00-05:00",
  "call_id": "us|2026-11-09|마라토너|1", "batch": ["AAPL", "MSFT"],
@@ -1236,6 +1248,21 @@ which claude                                       # launchd PATH 에 넣을 경
 | 보고서 위치 | `state/h1/reports/`(F8 의 `reports/h1-forward/` 를 바꿈) | m8 |
 | 맥 | H1 전용 worktree(태그 고정)·전용 venv, launchd 는 `h1.py` | I8·m4 |
 | 잘라 낸 것 | 장부의 실현손익·취득가 칸(보고서 계산만 남김), 서킷 켠 재현, 1판 C16·T-CB·G3, `h1.py check`, 1판 M10, Q4 프롬프트 변경, 종목군 지문 경고 | §5 잘라도 되는 것 |
+
+### 10.2c 구현 중 정한 것 (단계 2a·2b-1 독립 검토 반영)
+
+| 항목 | 결정 | 근거 |
+|---|---|---|
+| 팀장 래퍼 | `analyze_logged(now, cli_version)`, `claude_cli_version()` 실행마다 한 번. "analysis" 가 목록이 아니면 bad_json, 디코드 실패는 decode_error(운영 `analyze()` 는 그대로) | 2a A-6·A-9 |
+| 모르는 판정 글자 | `bad_verdict`, 폴백으로 셈(운영 team 과 달리 그 답의 확신도는 쓰지 않음) | 2b-1 B-5 |
+| 예외로 끝난 L | 엔진은 장부 논리 점검을 되도록 `Problem` 으로 모아 처리 뒤 장부·내용 지문을 남긴다. 끝까지 갈 수 없어 예외(L 번호 있음)로 끝난 봉은 지문이 없어 ④-(나) 를 쓸 수 없다 → 재시작. 예상 밖 예외(코드 버그)도 종료 코드 2·지문 없음으로 같게 본다 | 2b-1 B-3 |
+| 사전 조건 위반 | 앞 거래일 ≠ last_date, 지수 봉 날짜, S 의 `prev_cal_date` 등은 L 이 아니다(실행기가 D4·D5 를 먼저 보고, 그래도 어긋나면 거절) | 2b-1 B-3·B-10 |
+| 상장폐지 | 장부 `corp_actions` 하나가 출처. `corp-action --delist` 는 `last_date` ≤ 장부 last_date 만 받는다. L23 은 장부마다 "등록 뒤 첫 처리 봉에 들고 있었으면 정리 체결" + 두 장부의 그 날짜가 같은지 | 2b-1 B-1·B-4 |
+| 분할 | `apply_split` 순수 함수 + `corp_actions` 분할 기록 모양(위 §3.5). 점검이 반영 | 2b-1 B-2 |
+| L4·L5·L12 넓힘 | L4: 정지가 아닌 처리 봉을 지난 대기 주문도 오류, 같은 시가에 주식 매수 체결이 매도 체결보다 앞이면 오류. L5: 그날그날 보유+매수 대기 ≤ 5. L12: 보류 순간 `avail` 을 그날 체결 순서로 다시 계산 | 2b-1 구현·B-6 |
+| check_day 의 L3 | 오늘 체결만 그날 시세와 맞춘다(뒤에 시세가 고쳐져도 지난 체결이 거짓 L3 이 되지 않게). 지난 체결은 `check_ledger(frames=…)` 에서만 | 2b-1 구현 |
+| L22 허용 지문 | `(code_hash, env_key(env))` 짝. `env_key` = env 정렬 JSON 의 sha256 | 2b-1 구현 |
+| L18 | `check_decisions(market, decisions, head)` 로 판정 기록 앞부분 지문·중복 열쇠 | 2b-1 구현 |
 
 ### 10.2b 2차 검토 반영으로 정한 것 (3판)
 
