@@ -146,8 +146,10 @@ class H:
         self.src.at(t, hh=hh, mm=mm)
         return self
 
-    def start(self, gate=False, **kw):
+    def start(self, gate=False, clock=None, **kw):
         self.at(self.S)
+        if clock is not None:
+            self.src.clock = clock
         return self._call(h1.start, self.mk, self.arg_root, self.src, gate=gate, **kw)
 
     def run(self, t=None, gate=False, hh=None, mm=None, clock=None, **kw):
@@ -165,6 +167,7 @@ class H:
     def corp(self, code, **kw):
         kw.setdefault("source", "https://example.com/공시")
         kw.setdefault("source_data", self.src)                   # 기록 시각(at)도 가짜 시계로(같은 실행 = 같은 지문)
+        kw.setdefault("gate", False)                             # 시험은 관문 끔(관문 시험은 따로)
         return self._call(h1.corp_action, self.mk, code, root=self.arg_root, **kw)
 
     @property
@@ -546,10 +549,10 @@ def test_T_RETRO_분할_의심_corp_action_split_다음_실행_정상(tmp_path):
 def test_T_RETRO_정수가_아니면_split_거절(tmp_path):
     h = us_h(tmp_path, upto=2)
     snap = h.snap()
-    assert h.corp("BBB", split=1.0001, date=h.D[3]) == 1         # 주식 수 × r 이 정수가 아님 → ⑦-3
+    assert h.corp("BBB", split=1.0001, date=h.D[3]) == 9         # 주식 수 × r 이 정수가 아님 → ⑦-3
     assert h.snap() == snap
-    assert h.corp("SPY", split=2, date=h.D[3]) == 1               # 지수에는 분할 없음
-    assert h.corp("BBB", split=2, delist=True, date=h.D[3]) == 1  # 하나만
+    assert h.corp("SPY", split=2, date=h.D[3]) == 9               # 지수에는 분할 없음
+    assert h.corp("BBB", split=2, delist=True, date=h.D[3]) == 9  # 하나만
 
 
 # ============================ T-DELIST ============================
@@ -562,10 +565,10 @@ def test_T_DELIST_시세를_못_받는_상태에서_등록_다음_run_진행(tmp
     assert holders
     h.src.missing = {"CCC"}
     assert h.run(t) == 4                                          # D2
-    assert h.corp("CCC", delist=True, last_date=t) == 1           # last_date > 장부 last_date → 거절
+    assert h.corp("CCC", delist=True, last_date=t) == 9           # last_date > 장부 last_date → 거절
     P = 12.3456
     assert h.corp("CCC", delist=True, last_date=h.D[4], last_close=P) == 0
-    assert h.corp("CCC", delist=True, last_date=h.D[4], last_close=P) == 1   # 두 번 등록 거절
+    assert h.corp("CCC", delist=True, last_date=h.D[4], last_close=P) == 9   # 두 번 등록 거절
     assert h.run(t) == 0 and h.last() == t
     st = h.states()
     m = markets.MARKETS["us"]
@@ -627,7 +630,7 @@ def test_T_CORR_정정_확정(tmp_path):
             assert ca["kind"] == "correction" and ca["code"] == "BBB"
             assert {"date": bump, "field": "close", "old": old_close, "new": old_close * 1.003} in ca["items"]
     assert h.run(h.D[5]) == 0 and h.last() == h.D[5]
-    assert h.corp("BBB", accept_correction=True, source_data=h.src) == 1   # 이제 차이가 없음
+    assert h.corp("BBB", accept_correction=True, source_data=h.src) == 9   # 이제 차이가 없음
     no_l_logs(h)
 
 
@@ -641,7 +644,7 @@ def test_T_AMEND_세율_줄_추가(tmp_path, monkeypatch):
     monkeypatch.setattr(h1, "KR_SELL_TAX", added)
     assert h.run(h.D[3]) == 3 and h.snap() == snap               # 규칙 다름 → 아무것도 저장 안 함
     assert "stock_sell_tax" in h.ends()[-1]["message"]
-    assert h1.amend_rules("kr", "", h.root, gate=False) == 1      # 출처 없음
+    assert h1.amend_rules("kr", "", h.root, gate=False) == 9      # 출처 없음
     assert h1.amend_rules("kr", "https://law.go.kr/세율", h.root, gate=False) == 0
     assert h.meta()["rules"]["stock_sell_tax"][-1] == ["2027-01-01", 0.0015]
     assert h.ledger_shas() == {k: v for k, v in snap.items() if k in h1.LEDGER_RELS}   # 장부 내용은 그대로
@@ -682,27 +685,29 @@ def test_T_CAL_국내_22시29분_22시31분(tmp_path):
 
 
 def test_T_CAL_2026_에서_2027_첫_봉_연도_파일_늦음(tmp_path):
-    w = kr_world(start="2026-06-01", end="2027-02-26")
+    # 실제 KRX 처럼 12-25·12-31·01-01 휴장(2b-2 검토 C-18): 2026 마지막 봉 12-30 → 2027 첫 봉 01-04
+    w = fs.drop_days(kr_world(start="2026-06-01", end="2027-02-26"), ["2026-12-25", "2026-12-31", "2027-01-01"])
     S = "2026-12-24"
-    h = kr_h(tmp_path, world=w, S=S, upto=2)                      # 12-25, 12-28 처리
-    h.src.idle_until = "2026-12-31"                               # 2027.csv 가 아직 없음
-    jan1 = "2027-01-01"
-    assert h.run(clock=datetime(2027, 1, 1, 23, 5, tzinfo=KST)) == 7
-    assert h.last() == "2026-12-31"                               # 12-29·30·31 은 처리해 저장
-    assert h.ends()[-1]["bars"] == ["2026-12-29", "2026-12-30", "2026-12-31"]
+    h = kr_h(tmp_path, world=w, S=S, upto=2)                      # 12-28, 12-29 처리
+    h.src.idle_until = "2026-12-30"                               # 2027.csv 가 아직 없음
+    jan4 = "2027-01-04"
+    assert h.run(clock=datetime(2027, 1, 4, 23, 5, tzinfo=KST)) == 7
+    assert h.last() == "2026-12-30"                               # 처리할 수 있던 12-30 은 저장
+    assert h.ends()[-1]["bars"] == ["2026-12-30"]
     h.src.idle_until = None
-    assert h.run(clock=datetime(2027, 1, 1, 23, 10, tzinfo=KST)) == 0 and h.last() == jan1
+    assert h.run(clock=datetime(2027, 1, 4, 23, 10, tzinfo=KST)) == 0 and h.last() == jan4
     h.src.idle_from = "2027-01-01"                                # 2026.csv 를 한 번 못 받음 → 처리한 날짜가 사라짐
     snap = h.snap()
-    assert h.run(clock=datetime(2027, 1, 4, 23, 5, tzinfo=KST)) == 4
+    assert h.run(clock=datetime(2027, 1, 5, 23, 5, tzinfo=KST)) == 4
     assert [p["code"] for p in h.ends()[-1]["problems"] if p["level"] == "D"] == ["D4"]
     assert h.snap() == snap
     h.src.idle_from = None
-    assert h.run(clock=datetime(2027, 1, 4, 23, 5, tzinfo=KST)) == 0 and h.last() == "2027-01-04"
+    assert h.run(clock=datetime(2027, 1, 5, 23, 5, tzinfo=KST)) == 0 and h.last() == "2027-01-05"
     cal = fs.read_lines(h.mdir / "calendar.jsonl")
-    assert [c["check"] for c in cal][-3:] == ["ok", "D4", "ok"]
+    assert [c["check"] for c in cal][-4:] == ["D7", "ok", "D4", "ok"]
     last = cal[-1]
-    assert last["dates"][0] == w.prev(S) and last["dates"][-1] == "2027-01-04" and last["processed"] == ["2027-01-04"]
+    assert last["dates"][0] == w.prev(S) and last["dates"][-1] == "2027-01-05" and last["processed"] == ["2027-01-05"]
+    assert "2026-12-31" not in last["dates"] and "2027-01-01" not in last["dates"]
     assert last["sha256"] == h1._sha256_bytes(json.dumps(last["dates"], separators=(",", ":")).encode())
     no_l_logs(h)
 
@@ -795,30 +800,79 @@ def test_T_LLMTIME_국내_08시59분은_llm_10시는_late(tmp_path):
 
 # ============================ T-GATE ============================
 
-def _write_pass(root, ch, env):
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "replay_pass.json").write_text(json.dumps([{"code_hash": ch, "env": env, "files": {},
-                                                        "ledger_fingerprints": {}, "passed_at": "2026-11-04"}]),
-                                           encoding="utf-8")
+def _pass(root, ch, env, **kw):
+    return h1.record_replay_pass({"code_hash": ch, "env": env, "files": {}, "ledger_fingerprints": {},
+                                  "fingerprint_version": 1, "passed_at": "2026-11-04", **kw}, root)
 
 
-def test_T_GATE_지문_env_다르면_3_파일_0개(tmp_path):
+def test_T_GATE_지문_env_다르면_3_파일_0개(tmp_path, monkeypatch):
     h = us_h(tmp_path)
-    assert h.start(gate=True) == 3                                # replay_pass.json 없음
+    early = fs.run_at("us", hs.S_A, hh=6, mm=0)                   # 시작 전 거절은 성공한 start 보다 앞 시각
+    assert h.start(gate=True, clock=early) == 3                   # replay_pass.json 없음
     assert sorted(p.name for p in h.root.iterdir()) == ["h1.lock", "runs.jsonl"]
-    assert h.ends()[-1]["exit_code"] == 3 and h.ends()[-1]["command"] == "start"
+    end = h.ends()[-1]
+    assert end["exit_code"] == 3 and end["command"] == "start" and end["start_date"] == "unknown"
     ch, env = h1.code_hash()[0], h1.env_info()
-    _write_pass(h.root, ch, {**env, "pandas": "0.0.1"})           # 지문은 같고 env 가 다름
-    assert h.start(gate=True) == 3
-    assert sorted(p.name for p in h.root.iterdir()) == ["h1.lock", "replay_pass.json", "runs.jsonl"]
-    _write_pass(h.root, "0" * 64, env)                            # env 는 같고 지문이 다름
-    assert h.start(gate=True) == 3
-    _write_pass(h.root, ch, env)
+    assert _pass(h.root, ch, {**env, "pandas": "0.0.1"}) == 1     # 지문은 같고 env 가 다름
+    assert h.start(gate=True, clock=early) == 3
+    assert sorted(p.name for p in h.root.iterdir()) == ["changes.jsonl", "h1.lock", "replay_pass.json",
+                                                         "replay_pass.seal.json", "runs.jsonl"]
+    _pass(h.root, "0" * 64, env)                                  # env 는 같고 지문이 다름
+    assert h.start(gate=True, clock=early) == 3
+    _pass(h.root, ch, env)
+    assert len(h1.replay_pass_entries(h.root)) == 3               # 추가만(지난 줄 그대로)
     assert h.start(gate=True) == 0 and h.run(h.D[1], gate=True) == 0
     snap = h.snap()
-    _write_pass(h.root, "f" * 64, env)                            # 코드가 바뀐 것처럼
+    monkeypatch.setattr(h1, "code_hash", lambda *a, **k: ("f" * 64, {}))   # 코드가 바뀐 것처럼
     assert h.run(h.D[2], gate=True) == 3 and h.snap() == snap
-    assert h.ends()[-1]["exit_code"] == 3
+    end = h.ends()[-1]
+    assert end["exit_code"] == 3 and end["start_date"] == hs.S_A   # 관문 거절도 창 S 로 기록(C-3)
+    monkeypatch.undo()
+    assert "관문 거절 1" in "\n".join(h1.status("us", h.root))
+
+
+def test_C5_통과_기록이_줄거나_바뀌면_L_이_아니라_3(tmp_path, monkeypatch):
+    h = us_h(tmp_path)
+    ch, env = h1.code_hash()[0], h1.env_info()
+    _pass(h.root, "a" * 64, env)                                  # 옛 코드 A
+    monkeypatch.setattr(h1, "code_hash", lambda *a, **k: ("a" * 64, {}))
+    assert h.start(gate=True) == 0 and h.run(h.D[1], gate=True) == 0
+    monkeypatch.undo()
+    _pass(h.root, ch, env)                                        # ⑥-i 허용 변경: 새 코드 B 통과 기록을 더함
+    assert h.run(h.D[2], gate=True) == 0
+    rp = h.root / "replay_pass.json"
+    whole = rp.read_bytes()
+    entries = json.loads(whole)
+    rp.write_text(json.dumps(entries[1:]), encoding="utf-8")      # 재현 도구가 옛 줄을 지우고 새로 씀
+    snap = h.snap()
+    assert h.run(h.D[3], gate=True) == 3 and h.snap() == snap     # L22(종료 코드 2) 가 아니라 관문 거절
+    assert "줄었거나 바뀜" in h.ends()[-1]["message"] and not (h.root / "errors.jsonl").exists()
+    entries[0]["env"] = {**env, "numpy": "9"}
+    rp.write_text(json.dumps(entries), encoding="utf-8")          # 지난 줄 내용 바뀜
+    assert h.run(h.D[3], gate=True) == 3
+    rp.write_text(json.dumps(json.loads(whole) + [{"code_hash": "c" * 64, "env": env}]), encoding="utf-8")
+    assert h.run(h.D[3], gate=True) == 3                          # 봉인 없이 손으로 더한 줄
+    assert "봉인 없이" in h.ends()[-1]["message"]
+    with pytest.raises(h1.H1Refused):
+        _pass(h.root, "d" * 64, env)                              # 망가진 상태에서는 기록도 거절(아무것도 안 씀)
+    rp.write_bytes(whole)
+    assert h.run(h.D[3], gate=True) == 0
+    # 봉인을 쓴 뒤 목록을 쓰기 전에 꺼짐 → 목록이 한 줄 짧음은 받아 줌, 다음 기록이 봉인을 맞춤
+    seal = h.root / "replay_pass.seal.json"
+    with monkeypatch.context() as mp:
+        _crash_on(mp, lambda dst, seen: dst.name == "replay_pass.json")
+        with pytest.raises(Crash):
+            _pass(h.root, "e" * 64, env)
+    assert len(json.loads(seal.read_text())["digests"]) == 3 and len(json.loads(rp.read_text())) == 2
+    assert h.run(h.D[4], gate=True) == 0
+    assert _pass(h.root, "e" * 64, env) == 3
+    # 지난 봉 지문이 통과 기록에 없으면(봉인째 지워짐) 3
+    seal.unlink()
+    rp.unlink()
+    _pass(h.root, ch, env)
+    assert h.run(h.D[5], gate=True) == 3
+    assert "replay_pass.json 에 없어요" in h.ends()[-1]["message"]
+    assert not (h.root / "errors.jsonl").exists()
 
 
 def test_T_GATE_규칙_상수가_다르면_3(tmp_path, monkeypatch):
@@ -1015,7 +1069,8 @@ def test_T_NEWSTART_명시_시작_규칙(tmp_path):
     path = h1.restart("us", "시험: 폴더 보관", h.root)
     assert path.parent.name == "archive" and path.name.startswith("us-") and not h.mdir.exists()
     rs = fs.read_lines(h.root / "restarts.jsonl")
-    assert len(rs) == 1 and rs[0]["reason"] == "시험: 폴더 보관"
+    assert [r["status"] for r in rs] == ["moving", "done"] and rs[0]["reason"] == "시험: 폴더 보관"
+    assert rs[0]["restart_id"] == rs[1]["restart_id"] and rs[0]["archive"] == f"archive/{path.name}"
     assert h.start() == 0                                         # restart 뒤 start 는 됨
     assert h.meta()["restart_no"] == 1 and h.states()["A0"]["마라토너"]["h1"]["restart_no"] == 1
     assert h.ends()[-1]["exit_code"] == 0
@@ -1050,7 +1105,7 @@ def test_T_NEWSTART_재시작_상한(tmp_path):
     assert e.value.code == 8 and h.mdir.is_dir()
     with pytest.raises(h1.H1Refused) as e:
         h1.restart("us", "  ", h.root)
-    assert e.value.code == 1
+    assert e.value.code == 9
 
 
 # ============================ T-UNIV ============================
@@ -1303,11 +1358,11 @@ def test_status_와_요약(tmp_path):
     assert s[1].startswith("  A0 쉬는 돈=현금  $100,000 → $") and "자료 멈춤 1" in s[4]
 
 
-def test_cli_인자_오류는_1(tmp_path, monkeypatch, capsys):
+def test_cli_인자_오류는_9(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(h1, "H1_DIR", tmp_path / "h1")
-    assert h1.cli(["run"]) == 1                                   # --market 없음
-    assert h1.cli(["run", "--market", "jp"]) == 1
-    assert h1.cli(["fly", "--market", "us"]) == 1
+    assert h1.cli(["run"]) == 9                                   # --market 없음
+    assert h1.cli(["run", "--market", "jp"]) == 9
+    assert h1.cli(["fly", "--market", "us"]) == 9
     assert h1.cli(["status", "--market", "us"]) == 8              # 장부 없음
     assert "장부 없음" in capsys.readouterr().out
     assert h1.cli(["restart", "--market", "us", "--reason", "x"]) == 8
@@ -1317,7 +1372,7 @@ def test_cli_python_h1_py_로_돌면_같은_모듈(tmp_path):
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     r = subprocess.run([sys.executable, str(ROOT / "h1.py"), "run"], capture_output=True, text=True, cwd=str(tmp_path),
                        env=env, timeout=120)
-    assert r.returncode == 1 and "명령 인자 오류" in r.stdout
+    assert r.returncode == 9 and "명령 인자 오류" in r.stdout
     src = (ROOT / "h1.py").read_text(encoding="utf-8")
     assert src.rstrip().endswith("sys.exit(_h1.cli())")
 

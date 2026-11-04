@@ -129,3 +129,14 @@ def tree_sha(root):
 
 def read_lines(p):
     return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] if p.exists() else []
+
+
+def drop_days(world, days):
+    """합성 세계에서 휴장일을 뺀다(모든 종목·대기 자산·달력). 예: KRX 2026-12-31·2027-01-01 휴장(2b-2 검토 C-18)."""
+    gone = {pd.Timestamp(d) for d in days}
+    keep = lambda df: df[[x not in gone for x in df.index]]   # noqa: E731
+    world.raw = {c: keep(df) for c, df in world.raw.items()}
+    world.frames = {c: keep(df) for c, df in world.frames.items()}
+    world.idle = keep(world.idle)
+    world.dates = [d for d in world.dates if pd.Timestamp(d) not in gone]
+    return world
