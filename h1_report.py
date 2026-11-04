@@ -51,7 +51,8 @@ h1_report.py - H1 포워드 월간·최종 보고서 (설계 docs/h1-forward-des
   M7: a0_interest(…) 의 rates 를 R2 sim_team.rate_for_days(같은 달력, 같은 금리 파일)[i0:i1+1] 과, interest 를 같은 식으로
       따로 계산한 값과 비교.
 
-import 관계: h1_report → h1·h1_check·markets·metrics. h1 은 h1_report 를 import 하지 않는다.
+import 관계: h1_report → h1·h1_check·markets·metrics. h1 은 모듈을 읽을 때 h1_report 를 import 하지 않고, status·실행 끝
+요약을 찍을 때만 함수 안에서 늦게 import 해 window_counts 를 부른다(L 오류 등 일지 세기를 보고서와 한 구현으로, 단계 3).
 """
 from __future__ import annotations
 
@@ -576,9 +577,19 @@ def _load(mk, root) -> _Ctx:
         decisions = h1.DecisionLog(h1.decisions_path(root), read_only=True)
     except h1.H1LogicError as e:
         raise ReportError(EXIT_ERROR, f"판정 기록을 읽지 못함({e.code}): {e}")
+    return _context(mk, root, loaded, decisions)
+
+
+def _context(mk, root, loaded, decisions=None, exclude_run_ids=()) -> _Ctx:
+    """이미 읽은 장부(loaded: meta·head·states)에 일지(runs/errors/changes/restarts.jsonl·calendar.jsonl)를 붙인 묶음.
+    exclude_run_ids: runs.jsonl 에서 뺄 실행(아직 끝 줄을 쓰지 않은 '지금 이 명령' — status·실행 요약이 자기 시작 줄을
+    '끝 기록 없는 실행'으로 세지 않게. 보고서는 runs.jsonl 에 쓰지 않으므로 늘 빈 값)."""
     logs, broken = {}, {}
     for name in JOURNALS:
         logs[name], broken[name] = _read_counted(h1.h1_path(root, name))
+    if exclude_run_ids:
+        gone = set(exclude_run_ids)
+        logs["runs.jsonl"] = [r for r in logs["runs.jsonl"] if r.get("run_id") not in gone]
     cal_lines, broken["calendar.jsonl"] = _read_counted(h1.h1_path(root, mk, "calendar.jsonl"))
     return _Ctx(mk, root, loaded, decisions, h1._last_ok_calendar_line(root, mk), logs, broken, cal_lines)
 
@@ -846,61 +857,12 @@ def _ops(c, bar_upto, B, unknown_in, end_at, allowed, allowed_why):
         out["cal_at"] = None
     out["ledger_dates_differ"] = sorted(f"{arm}/{tn}" for arm in h1.ARMS for tn in h1.TRAINERS
                                         if [r["date"] for r in _rows(c, arm, tn, bar_upto)] != dates)
-    out["late"] = sorted({r["date"] for arm in h1.ARMS for tn in h1.TRAINERS
-                          for r in _rows(c, arm, tn, bar_upto) if r.get("late")})
+    out["late"] = _late_dates(c, bar_upto)
     out["late_calls"] = sum(r.get("late_calls") or 0 for arm in h1.ARMS for tn in h1.TRAINERS
                             for r in _rows(c, arm, tn, bar_upto))
     # 실행 일지: 이 창(h1._in_window) + 처리하려던 봉이 범위(≤ B) 안인 것
-    J = _journal(c)
-    unknown = Counter()
-
-    def pick(evs, label):
-        got = []
-        for ev in evs:
-            sc = _scope(ev, B, unknown_in)
-            if sc == "in":
-                got.append(ev)
-            elif sc == "unknown":
-                unknown[label] += 1
-        return got
-
-    ends = [ev for ev in J["events"] if ev["kind"] == "end"]
-    procs = [ev for ev in ends if ev["rec"].get("command") in ("run", "start") and ev["bars"]]
-    out["batch_max"] = max((len(ev["bars"]) for ev in procs if any(b <= B for b in ev["bars"])), default=0)
-    code = lambda ev: ev["rec"].get("exit_code")   # noqa: E731
-    out["backlog_fail"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_BACKLOG], "밀린 봉 초과(6)"))
-    out["gate_refused"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_GATE], "관문 거절(3)"))
-    stops = pick([ev for ev in ends if code(ev) in (h1.EXIT_DATA, h1.EXIT_D7)], "자료 멈춤(4·7)")
-    out["data_stops"] = len(stops)
-
-    def kinds_of(ev):
-        ks = sorted({str(p.get("code")) for p in ev["rec"].get("problems") or []
-                     if isinstance(p, dict) and p.get("level") == "D"})
-        return ks or ["(종류 없음)"]
-    out["data_kinds"] = dict(sorted(Counter(k for ev in stops for k in kinds_of(ev)).items()))
-    out["data_by_exit"] = {x: {"n": sum(1 for ev in stops if code(ev) == x),
-                               "kinds": dict(sorted(Counter(k for ev in stops if code(ev) == x
-                                                            for k in kinds_of(ev)).items()))}
-                           for x in (h1.EXIT_DATA, h1.EXIT_D7)}
-    out["lock_timeouts"] = len(pick([ev for ev in J["events"] if ev["kind"] == "lock"], "잠금 초과(5)"))
-    out["no_end"] = len(pick([ev for ev in J["events"] if ev["kind"] == "orphan"], "끝 기록 없는 실행"))
-    # ②-1 L 오류: errors.jsonl ∪ runs.jsonl 종료 코드 2 (run_id 로 한 번), 사전 등록 ④ 거짓 양성 판정은 빼고 따로
-    lev = []
-    for e in _l_events(c, J):
-        sc = _scope(e, B, unknown_in)
-        if sc == "unknown":
-            unknown["장부 논리 오류(L)"] += 1
-        elif sc == "in":
-            lev.append(e)
-    errs = [e for e in lev if not e["false_positive"]]
-    out["l_errors"] = len(errs)
-    out["l_false_positive"] = len(lev) - len(errs)
-    out["l_codes"] = dict(sorted(Counter(k for e in errs for k in e["codes"]).items()))
-    out["l_runs_only"] = sum(1 for e in errs if e["src"] == {"runs"})
-    out["l_list"] = [(e["at"], e["target"], ", ".join(sorted(e["codes"]))) for e in errs]
-    out["unknown"] = dict(sorted(unknown.items()))
-    out["outside"] = J["outside"]
-    out["broken"] = {k: v for k, v in c.broken.items() if v}
+    jc, procs = _journal_counts(c, B, unknown_in)
+    out.update(jc)
     # 다른 지문으로 처리한 봉 (②-3): 하루 기록·실행 일지의 (code_hash, env) 가 재현 통과 기록에 없음
     bad_rows = sorted({r["date"] for arm in h1.ARMS for tn in h1.TRAINERS for r in _rows(c, arm, tn, bar_upto)
                        if allowed is None or (r.get("code_hash"), h1.env_key(r.get("env"))) not in allowed})
@@ -965,6 +927,72 @@ def _ops(c, bar_upto, B, unknown_in, end_at, allowed, allowed_why):
     out["max_late_total"] = int(c.rule("max_late_total", h1.MAX_LATE_TOTAL))
     out["max_late_batch"] = int(c.rule("max_late_batch", h1.MAX_LATE_BATCH))
     return out
+
+
+def _late_dates(c, bar_upto) -> list:
+    """늦은 봉(②-2): 두 장부 여섯 트레이너 하루 기록 중 late 인 날짜(bar_upto 까지)."""
+    return sorted({r["date"] for arm in h1.ARMS for tn in h1.TRAINERS
+                   for r in _rows(c, arm, tn, bar_upto) if r.get("late")})
+
+
+def _journal_counts(c, B, unknown_in) -> tuple:
+    """실행 일지 숫자 — 이 창(h1._in_window, _Ctx.inwin) + 처리하려던 봉이 범위(≤ B) 안인 줄만(_journal·_scope):
+    ②-1 L 오류(errors.jsonl ∪ runs.jsonl 종료 코드 2, run_id 로 한 번, 사전 등록 ④ 거짓 양성은 빼고 따로),
+    자료 멈춤(4·7, 종류별)·관문 거절(3)·밀린 봉 초과(6)·한 번에 따라잡은 최대 봉·잠금 초과·끝 기록 없는 실행.
+    보고서(_ops)와 h1.py status·실행 요약(window_counts)이 이 함수 하나를 같이 쓴다(설계 §10.2e 'status 와 보고서').
+    돌려줌: (숫자 dict, 봉을 처리한 실행 이벤트 목록 — _ops 의 ②-3 이 씀)."""
+    out = {}
+    J = _journal(c)
+    unknown = Counter()
+
+    def pick(evs, label):
+        got = []
+        for ev in evs:
+            sc = _scope(ev, B, unknown_in)
+            if sc == "in":
+                got.append(ev)
+            elif sc == "unknown":
+                unknown[label] += 1
+        return got
+
+    ends = [ev for ev in J["events"] if ev["kind"] == "end"]
+    procs = [ev for ev in ends if ev["rec"].get("command") in ("run", "start") and ev["bars"]]
+    out["batch_max"] = max((len(ev["bars"]) for ev in procs if any(b <= B for b in ev["bars"])), default=0)
+    code = lambda ev: ev["rec"].get("exit_code")   # noqa: E731
+    out["backlog_fail"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_BACKLOG], "밀린 봉 초과(6)"))
+    out["gate_refused"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_GATE], "관문 거절(3)"))
+    stops = pick([ev for ev in ends if code(ev) in (h1.EXIT_DATA, h1.EXIT_D7)], "자료 멈춤(4·7)")
+    out["data_stops"] = len(stops)
+
+    def kinds_of(ev):
+        ks = sorted({str(p.get("code")) for p in ev["rec"].get("problems") or []
+                     if isinstance(p, dict) and p.get("level") == "D"})
+        return ks or ["(종류 없음)"]
+    out["data_kinds"] = dict(sorted(Counter(k for ev in stops for k in kinds_of(ev)).items()))
+    out["data_by_exit"] = {x: {"n": sum(1 for ev in stops if code(ev) == x),
+                               "kinds": dict(sorted(Counter(k for ev in stops if code(ev) == x
+                                                            for k in kinds_of(ev)).items()))}
+                           for x in (h1.EXIT_DATA, h1.EXIT_D7)}
+    out["lock_timeouts"] = len(pick([ev for ev in J["events"] if ev["kind"] == "lock"], "잠금 초과(5)"))
+    out["no_end"] = len(pick([ev for ev in J["events"] if ev["kind"] == "orphan"], "끝 기록 없는 실행"))
+    # ②-1 L 오류: errors.jsonl ∪ runs.jsonl 종료 코드 2 (run_id 로 한 번), 사전 등록 ④ 거짓 양성 판정은 빼고 따로
+    lev = []
+    for e in _l_events(c, J):
+        sc = _scope(e, B, unknown_in)
+        if sc == "unknown":
+            unknown["장부 논리 오류(L)"] += 1
+        elif sc == "in":
+            lev.append(e)
+    errs = [e for e in lev if not e["false_positive"]]
+    out["l_errors"] = len(errs)
+    out["l_false_positive"] = len(lev) - len(errs)
+    out["l_codes"] = dict(sorted(Counter(k for e in errs for k in e["codes"]).items()))
+    out["l_runs_only"] = sum(1 for e in errs if e["src"] == {"runs"})
+    out["l_list"] = [(e["at"], e["target"], ", ".join(sorted(e["codes"]))) for e in errs]
+    out["unknown"] = dict(sorted(unknown.items()))
+    out["outside"] = J["outside"]
+    out["broken"] = {k: v for k, v in c.broken.items() if v}
+    return out, procs
 
 
 # ============================ 값·비율·매매 (§3.8-3~5) ============================
@@ -1108,9 +1136,9 @@ def _realized_all(c, cut, period_start, year_start):
 
 
 def _window_keys(c, start, cut) -> set:
-    """이 창이 실제로 쓴 판정 기록 열쇠 = 두 장부 하루 기록(start ~ cut)의 팀장 칸(leader)에 적힌 열쇠."""
-    return {e.get("key") for arm in h1.ARMS for tn in h1.TRAINERS for r in _rows(c, arm, tn, cut, start)
-            for e in r.get("leader") or [] if e.get("key")}
+    """이 창이 실제로 쓴 판정 기록 열쇠 = 두 장부 하루 기록(start ~ cut)의 팀장 칸(leader)에 적힌 열쇠
+    (h1.window_decision_keys — h1.py 요약의 팀장 LLM/폴백 수도 같은 함수)."""
+    return h1.window_decision_keys(c.states, start, cut)
 
 
 def _leader(c, start, cut):
@@ -1387,14 +1415,47 @@ def _extension(c, s62) -> dict:
     """연장 기록: 판정 창(S+62) 뒤에 처리한 봉. 판정에 쓰지 않는다(사전 등록 ①)."""
     ext = [d for d in c.dates if d > s62]
     last = ext[-1]
-    lev = _l_events(c, _journal(c))
     out = {"n": len(ext), "first": ext[0], "last": last,
            "late": sum(1 for r in c.canon if r["date"] > s62 and r.get("late")),
-           "l_errors": sum(1 for e in lev if _scope(e, s62, True) == "out" and not e["false_positive"])}
+           "l_errors": _ext_l_errors(c, s62)}
     for arm in h1.ARMS:
         team = _team(c, arm, last)
         base = next(r["value"] for r in reversed(team) if r["date"] <= s62)
         out[arm] = {"value": team[-1]["value"], "ret_ext": _ret(team[-1]["value"], base)}
+    return out
+
+
+def _ext_l_errors(c, s62) -> int:
+    """연장 구간(S+62 뒤에 처리하려던 봉)의 L 오류 수(거짓 양성 판정 뺌) — 판정에는 쓰지 않는다(사전 등록 ①)."""
+    return sum(1 for e in _l_events(c, _journal(c)) if _scope(e, s62, True) == "out" and not e["false_positive"])
+
+
+def window_counts(market, root, loaded, *, decisions=None, exclude_run_ids=()) -> dict:
+    """h1.py status·실행 끝 요약이 보여 주는 판정 창 숫자 — **보고서 --final 과 같은 함수·같은 범위**로 센다
+    (설계 §10.2e 'status 와 보고서', 단계 3). loaded = h1.load_market 결과(meta·head·states).
+    - 범위: 창이 다 찼으면 S ~ S+62(최종 판정 ②와 같음, 그 뒤는 연장), 덜 찼으면 지금까지 전부(어느 봉의 일인지 모르는
+      줄도 넣음 = 최종 보고서의 '덜 찬 창'과 같음). 일지 줄은 h1._in_window + 창을 만든 start 보다 먼저 시작한 실행 빼기.
+    - L 오류 = errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), 사전 등록 ④ false_positive 판정은 빼고 따로.
+    - decisions(DecisionLog)를 주면 팀장 판정 수(이 창 하루 기록이 가리키는 기록, ⑧ 과 같은 분모)도.
+    - exclude_run_ids: 아직 끝 줄이 없는 '지금 이 명령'의 run_id(자기 자신을 '끝 기록 없는 실행'으로 세지 않게).
+    돌려줌: {"complete", "s62", "cut", "l_errors", "l_false_positive", "l_codes", "l_runs_only", "ext_l_errors",
+            "data_stops", "data_kinds", "gate_refused", "backlog_fail", "batch_max", "lock_timeouts", "no_end",
+            "unknown", "outside", "broken", "late"(늦은 봉 날짜 목록), "leader_n", "leader_fallback"}"""
+    mk = h1._mkey(market)
+    c = _context(mk, h1._root(root), loaded, decisions, exclude_run_ids)
+    wb = int(c.rule("window_bars", h1.WINDOW_BARS))
+    complete = len(c.dates) >= wb
+    s62 = c.dates[wb - 1] if complete else None
+    cut = s62 if complete else (c.dates[-1] if c.dates else c.S)
+    jc, _ = _journal_counts(c, s62 if complete else _FAR, True)
+    keep = ("l_errors", "l_false_positive", "l_codes", "l_runs_only", "data_stops", "data_kinds", "gate_refused",
+            "backlog_fail", "batch_max", "lock_timeouts", "no_end", "unknown", "outside", "broken")
+    out = {"complete": complete, "s62": s62, "cut": cut, **{k: jc[k] for k in keep},
+           "ext_l_errors": _ext_l_errors(c, s62) if complete else 0, "late": _late_dates(c, cut),
+           "leader_n": None, "leader_fallback": None}
+    if decisions is not None and c.dates:
+        lead = _leader(c, c.S, cut)
+        out["leader_n"], out["leader_fallback"] = lead["n"], lead["fallback"]
     return out
 
 

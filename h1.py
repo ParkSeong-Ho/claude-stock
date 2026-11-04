@@ -2890,19 +2890,38 @@ def _in_window(rec, S, created_at=None) -> bool:
     return created_at is None or _at_or_after(rec.get("at"), created_at)
 
 
+def window_counts(market, root=None, *, loaded=None, decisions=None, exclude_run_ids=()) -> dict:
+    """status·실행 끝 요약의 판정 창 숫자(L 오류·거짓 양성·자료 멈춤·관문 거절·늦은 봉·한 번에 따라잡은 봉·팀장 수).
+    **보고서와 같은 함수**(h1_report.window_counts → _journal_counts, 보고서 --final 과 같은 범위)를 그대로 부른다
+    (설계 §10.2e 'status 와 보고서', 단계 3). 그래서 errors.jsonl ∪ runs.jsonl 종료 코드 2 를 run_id 로 합쳐 세고,
+    사전 등록 ④ false_positive 판정은 빼고 따로 돌려준다. loaded 를 안 주면 HEAD 로 엄격하게 읽는다(되살리기 없음).
+    h1_report 는 여기서만 늦게 import 한다(모듈을 읽을 때는 h1 → h1_report 의존이 없음)."""
+    import h1_report                              # 늦은 import: h1_report 가 h1 을 import 한다
+    mk = _mkey(market)
+    root = _root(root)
+    if loaded is None:
+        loaded = load_market(mk, root, repair=False)
+    return h1_report.window_counts(mk, root, loaded, decisions=decisions, exclude_run_ids=exclude_run_ids)
+
+
 def _window_counts(root, mk, S, created_at=None) -> tuple:
-    """(이 판정 창의 L 오류 수, 자료·환경 멈춤(종료 코드 4·7) 수) — errors.jsonl·runs.jsonl 에서(C-3 규칙)."""
-    errs = sum(1 for r in _read_log(root, "errors.jsonl") if r.get("market") == mk and _in_window(r, S, created_at))
-    stops = sum(1 for r in _read_log(root, "runs.jsonl") if r.get("event") == "end" and r.get("market") == mk
-                and _in_window(r, S, created_at) and r.get("exit_code") in (EXIT_DATA, EXIT_D7))
-    return errs, stops
+    """(이 판정 창의 L 오류 수, 자료·환경 멈춤(종료 코드 4·7) 수) — window_counts(보고서와 같은 규칙)의 두 값.
+    S·created_at 은 지금 장부(meta)의 것이어야 한다(다르면 ValueError — 다른 창은 셀 수 없음)."""
+    mk = _mkey(mk)
+    loaded = load_market(mk, root, repair=False)
+    if S != loaded.meta["start_date"] or (created_at is not None and created_at != loaded.meta.get("created_at")):
+        raise ValueError(f"_window_counts: S·created_at 이 지금 장부의 창과 다름 ({S}, {created_at})")
+    n = window_counts(mk, root, loaded=loaded)
+    return n["l_errors"], n["data_stops"]
 
 
-def _print_summary(mk, root, states, decisions, created_at=None):
+def _print_summary(mk, root, states, decisions, meta, head=None, log=None):
+    """실행 끝 요약(설계 §3.3 요약 예). 숫자는 status·보고서와 같은 window_counts. 이 명령 자기 시작 줄은 뺀다."""
     try:
-        S = states["A0"][TRAINERS[0]]["start_date"]
-        errs, stops = _window_counts(root, mk, S, created_at)
-        for line in summary_lines(mk, states, errors=errs, data_stops=stops, decisions=decisions):
+        loaded = Loaded(market=mk, head=head, meta=meta, states=states)
+        n = window_counts(mk, root, loaded=loaded, decisions=decisions,
+                          exclude_run_ids=() if log is None else (log.run_id,))
+        for line in summary_lines(mk, states, errors=n["l_errors"], data_stops=n["data_stops"], counts=n):
             _say(line)
     except Exception as e:                       # 요약은 보조 출력 — 실패해도 결과는 그대로
         _say(f"  (요약 출력 실패: {type(e).__name__}: {e})")
@@ -3082,7 +3101,7 @@ def _start_locked(mk, root, source, leader_mode, gate) -> int:
         _fsync_dir(root)
         log.bars.append(S)
         log.commits.append(log.run_id)
-        _print_summary(mk, root, res.states, decisions, at)
+        _print_summary(mk, root, res.states, decisions, meta, head, log)
         log.end(EXIT_OK, f"시작 S={S}")
         return EXIT_OK
     except KeyboardInterrupt:
@@ -3283,7 +3302,7 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
     if not todo:
         code = EXIT_D7 if d7 is not None else EXIT_OK
         _say(f"  새 확정 봉 없음 — 이미 처리됨({last}). 스캔·팀장 호출 없이 끝")
-        _print_summary(mk, root, states, decisions, meta.get("created_at"))
+        _print_summary(mk, root, states, decisions, meta, head, log)
         log.end(code, "이미 처리됨" if code == EXIT_OK else d7.detail)
         return code
     if len(todo) > MAX_LATE_BATCH:
@@ -3320,7 +3339,7 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
         log.commits.append(commit_id)
         cal_rec["processed"].append(t)
         _say(f"  봉 {t} 저장 완료(HEAD {commit_id})")
-    _print_summary(mk, root, states, decisions, meta.get("created_at"))
+    _print_summary(mk, root, states, decisions, meta, head, log)
     if d7 is not None:
         log.end(EXIT_D7, d7.detail)
         return EXIT_D7
@@ -3822,33 +3841,63 @@ def _status_lines(mk, root, log) -> list:
     log.start_date = S
     days = states["A0"][TRAINERS[0]]["days"]
     n = len(days)
-    created = meta.get("created_at")
-    errs, stops = _window_counts(root, mk, S, created)              # S 를 몰라 "unknown" 인 기록도 지금 창으로(C-3)
-    ends = [r for r in _read_log(root, "runs.jsonl") if r.get("event") == "end" and r.get("market") == mk
-            and _in_window(r, S, created)]
-    kinds = Counter(p.get("code") for r in ends if r.get("exit_code") in (EXIT_DATA, EXIT_D7)
-                    for p in r.get("problems") or [] if p.get("level") == "D")      # D1~D7·PRE·ENV 별
-    late = sum(1 for r in days if r["late"])
-    batch = max([len(r.get("bars") or []) for r in ends if r.get("command") == "run"] or [0])
-    gate_refused = sum(1 for r in ends if r.get("exit_code") == EXIT_GATE)
+    try:
+        decisions = DecisionLog(decisions_path(root), read_only=True)
+        dec_err = None
+    except H1LogicError as e:                    # 판정 기록 손상(L18·L24) — 다음 run 이 종료 코드 2 로 멈춤
+        decisions, dec_err = None, f"{e.code} {e}"
+    # 일지 숫자는 보고서와 같은 함수·같은 범위(window_counts → h1_report._journal_counts, 설계 §10.2e, 단계 3):
+    # L 오류 = errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), ④ false_positive 는 빼고 따로, 창 = _in_window
+    w = window_counts(mk, root, loaded=loaded, decisions=decisions, exclude_run_ids=(log.run_id,))
     out.append(f"[H1 {mk} 상태] 시작 S {S} · 마지막 처리 봉 {head['last_date']} · 판정 창 {min(n, WINDOW_BARS)}/{WINDOW_BARS}"
                + (f" (연장 {n - WINDOW_BARS}봉)" if n > WINDOW_BARS else f" (남은 {WINDOW_BARS - n}봉)"))
     out.append(f"  장부 파일: HEAD 와 같음 (HEAD {head['run_id']}, {head['written_at']})")
-    ktxt = ", ".join(f"{k} {v}" for k, v in sorted(kinds.items()))
-    out.append(f"  L 오류 {errs} · 자료 멈춤 {stops}" + (f" ({ktxt})" if ktxt else "")
-               + f" · 관문 거절 {gate_refused} · 늦은 봉 {late}/{MAX_LATE_TOTAL}"
-               + f" · 한 번에 따라잡은 최대 {batch}봉")
+    ktxt = ", ".join(f"{k} {v}" for k, v in w["data_kinds"].items())
+    extra = []
+    if w["l_false_positive"]:
+        extra.append(f"④ 거짓 양성으로 뺀 {w['l_false_positive']}건 따로")
+    if w["l_runs_only"]:
+        extra.append(f"그중 errors.jsonl 기록 없이 종료 코드 2 만 {w['l_runs_only']}건")
+    out.append(f"  L 오류 {w['l_errors']}" + (f" ({'; '.join(extra)})" if extra else "")
+               + f" · 자료 멈춤 {w['data_stops']}" + (f" ({ktxt})" if ktxt else "")
+               + f" · 관문 거절 {w['gate_refused']} · 늦은 봉 {len(w['late'])}/{MAX_LATE_TOTAL}"
+               + f" · 한 번에 따라잡은 최대 {w['batch_max']}봉")
+    more = []
+    if w["backlog_fail"]:
+        more.append(f"밀린 봉 초과(종료 코드 6) {w['backlog_fail']}번")
+    if w["no_end"]:
+        more.append(f"끝 기록 없는 실행 {w['no_end']}번(판정에는 안 씀)")
+    if w["ext_l_errors"]:
+        more.append(f"연장 구간(S+62 뒤) L 오류 {w['ext_l_errors']}건(판정에는 안 씀)")
+    if w["outside"]:
+        more.append(f"창 밖 기록 {w['outside']}줄")
+    if w["broken"]:
+        more.append("읽지 못한 일지 줄 " + ", ".join(f"{k} {v}" for k, v in w["broken"].items()))
+    if more:
+        out.append("  " + " · ".join(more))
+    out.append("  (숫자는 보고서 --final 과 같은 규칙: 창이 다 찼으면 S~S+62, 덜 찼으면 지금까지)")
     out.append(tail)
-    decisions = DecisionLog(decisions_path(root), read_only=True)
-    if decisions.truncated:
+    if dec_err:
+        out.append(f"  판정 기록을 읽지 못함: {dec_err} — 다음 run 은 종료 코드 2(장부 논리 오류)로 멈춤")
+    elif decisions.truncated:
         out.append(f"  판정 기록 마지막 줄이 반쯤 쓰여 있음({decisions.truncated['bytes']}바이트) — 다음 run 이 잘라 냄")
-    out += summary_lines(mk, states, errors=errs, data_stops=stops, decisions=decisions)
+    out += summary_lines(mk, states, errors=w["l_errors"], data_stops=w["data_stops"], counts=w)
     return out
 
 
-def summary_lines(market, states, *, errors=None, data_stops=None, decisions=None) -> list:
-    """두 장부 요약(설계 §3.3 요약 예 모양). errors·data_stops 는 errors.jsonl·runs.jsonl 에서 센 값(모르면 '?'),
-    decisions 를 주면 이 창의 팀장 LLM/폴백 수를 센다. 지수 단위는 소수 6자리."""
+def window_decision_keys(states, start=None, upto=None) -> set:
+    """이 창이 실제로 쓴 판정 기록 열쇠 = 두 장부 하루 기록(start ~ upto)의 팀장 칸(leader)에 적힌 열쇠.
+    보고서 ⑧ 폴백 비율의 분모와 요약의 '팀장 LLM / 폴백' 이 같이 쓴다(설계 §10.2e '폴백 비율 분모')."""
+    return {e.get("key") for arm in ARMS for tn in TRAINERS for r in states[arm][tn]["days"]
+            if (start is None or r["date"] >= start) and (upto is None or r["date"] <= upto)
+            for e in r.get("leader") or [] if e.get("key")}
+
+
+def summary_lines(market, states, *, errors=None, data_stops=None, decisions=None, counts=None) -> list:
+    """두 장부 요약(설계 §3.3 요약 예 모양). errors·data_stops 는 일지에서 센 값(모르면 '?').
+    counts(window_counts 결과)를 주면 거짓 양성 수·팀장 LLM/폴백 수도 거기서(보고서와 같은 규칙) 쓴다.
+    counts 없이 decisions 를 주면 팀장 수는 이 창 하루 기록(판정 창 S~S+62)이 가리키는 판정 기록(window_decision_keys,
+    보고서 ⑧ 과 같은 분모)으로 센다. 지수 단위는 소수 6자리."""
     mk = _mkey(market)
     m = main.mkt(mk)
     idle = idle_code(mk)
@@ -3879,12 +3928,18 @@ def summary_lines(market, states, *, errors=None, data_stops=None, decisions=Non
         bh = f"{(bh_units * days[-1]['idle_close'] / start_total - 1) * 100:+.2f}%"
     else:
         bh = "아직 없음(S+1 시가에 시작)"
-    late = sum(1 for r in days if r["late"])
+    cut = days[min(n, WINDOW_BARS) - 1]["date"]                 # 판정 창 끝(S+62, 덜 찼으면 마지막 봉)
+    late = len(counts["late"]) if counts is not None else sum(1 for r in days if r["late"] and r["date"] <= cut)
     n_llm = n_fb = None
-    if decisions is not None:
-        recs = [r for r in decisions.records() if r.get("market") == mk and S <= str(r.get("date")) <= last]
-        n_llm = sum(1 for r in recs if r.get("status") == "ok")
-        n_fb = len(recs) - n_llm
+    if counts is not None and counts.get("leader_n") is not None:
+        n_fb = counts["leader_fallback"]
+        n_llm = counts["leader_n"] - n_fb
+    elif decisions is not None:
+        keys = window_decision_keys(states, S, cut)
+        recs = [r for r in decisions.records() if r.get("key") in keys]
+        n_fb = sum(1 for r in recs if r.get("status") != "ok")
+        n_llm = len(recs) - n_fb
+    fp = counts.get("l_false_positive") if counts is not None else None
     firsts = []
     for arm in ARMS:
         for tn in TRAINERS:
@@ -3899,7 +3954,8 @@ def summary_lines(market, states, *, errors=None, data_stops=None, decisions=Non
         f"  A1 쉬는 돈={idle:<5} {main.fmt(m, start_total, False)} → {main.fmt(m, v1, False)} ({pct(v1)})"
         f" · {idle} {fmt_units(units)}단위",
         f"  A1−A0 {main.fmt(m, v1 - v0)} · {idle} 들고 있기(S+1 시가 시작, 소수 단위) {bh}",
-        f"  점검 L {q(errors)} · 자료 멈춤 {q(data_stops)} · 늦은 봉 {late} · 팀장 LLM {q(n_llm)} / 폴백 {q(n_fb)} · "
+        f"  점검 L {q(errors)}" + (f"(④ 거짓 양성 {fp}건 뺌)" if fp else "")
+        + f" · 자료 멈춤 {q(data_stops)} · 늦은 봉 {late} · 팀장 LLM {q(n_llm)} / 폴백 {q(n_fb)} · "
         f"그림자 서킷 {', '.join(firsts) if firsts else '없음'}",
         "  ※ 3개월은 판단하기에 너무 짧다 — 숫자는 기록용(사전 등록). A0 는 운영 장부가 아니다",
     ]
