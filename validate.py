@@ -21,13 +21,13 @@ from pioneer_brain import PioneerBrain
 from risk_guard import CircuitBreaker
 
 # 2018년부터 역사가 있는 분산된 종목 (국면 리포트용)
-STOCKS = {
-    "삼성전자": "005930", "SK하이닉스": "000660", "카카오": "035720", "네이버": "035420",
+STOCKS = {   # v1 미국 전용(D4)
+    "알파벳": "GOOGL", "JP모건": "JPM", "엑슨모빌": "XOM", "존슨앤존슨": "JNJ",
     "애플": "AAPL", "MS": "MSFT", "엔비디아": "NVDA", "테슬라": "TSLA",
     "메타": "META", "아마존": "AMZN",
 }
-AUDIT_STOCKS = {"삼성전자": "005930", "SK하이닉스": "000660",
-                "애플": "AAPL", "MS": "MSFT", "엔비디아": "NVDA"}  # 튜닝 감사(느려서 5개)
+AUDIT_STOCKS = {"애플": "AAPL", "MS": "MSFT", "엔비디아": "NVDA",
+                "알파벳": "GOOGL", "아마존": "AMZN"}  # 튜닝 감사(느려서 5개, main.py 종목과 같음)
 
 REGIMES = {
     "2018 조정":       ("2018-01-01", "2019-06-30"),

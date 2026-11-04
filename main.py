@@ -11,22 +11,29 @@
     pip install finance-datareader ta backtesting
 
 이 파일이 하는 일:
-  1) 실제 주가를 인터넷에서 가져온다 (예: 삼성전자, 애플)
+  1) 실제 주가를 인터넷에서 가져온다 (v1은 미국 종목만: 애플, 엔비디아 …, 지갑은 달러)
+     ※ 아직 안 끝난(장중) 봉·종가가 빈 봉은 버리고 '확정 봉'만 쓴다
   2) 세 트레이너(마라토너/스프린터/파이오니어)가 각자 규칙으로 가상매매
+     ※ 오늘 종가로 판단 → 다음 거래일 시가로 체결 (현실처럼, 미래 데이터 안 봄)
   3) 결과를 정직하게 보여주고, 오류가 나면 안전하게 멈추고 기록한다
 
 오류가 나면: 프로그램이 멈추고 error_log.txt 에 자세히 적힙니다.
 그 파일을 Claude Code로 열어 "이 오류 고쳐줘"라고 하면 됩니다.
 """
 
+import os
 import sys
 import csv
+import json
+import math
 import traceback
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 # --- 우리가 만든 부품들 ---
-from paper_wallet import PaperWallet
+import metrics
+from paper_wallet import PaperWallet, shares_within_cap
 from sprinter_brain import SprinterBrain
 from marathoner_brain import MarathonerBrain
 from pioneer_brain import PioneerBrain
@@ -35,15 +42,17 @@ from risk_guard import CircuitBreaker
 
 # ================= 설정 (여기 숫자만 바꾸면 됩니다) =================
 CONFIG = {
+    # v1은 미국 종목 전용 (D4). 지갑도 달러.
     "종목목록": {
-        "삼성전자": "005930",     # 국내 종목코드
-        "SK하이닉스": "000660",
-        "애플": "AAPL",           # 미국 종목은 티커
+        "애플": "AAPL",
         "마이크로소프트": "MSFT",
         "엔비디아": "NVDA",
+        "알파벳": "GOOGL",
+        "아마존": "AMZN",
     },
+    "벤치마크": "SPY",          # "시장 전체를 샀으면?" 비교용 (S&P500 ETF, D7)
     "시작일": "2023-01-01",     # 이 날부터의 데이터로 연습
-    "총_가상자금": 1_000_000,    # 가짜 돈 100만원
+    "총_가상자금": 10_000,      # 가짜 돈 $10,000 (달러)
     "배분비율": {"마라토너": 0.60, "스프린터": 0.30, "파이오니어": 0.10},
     # 한 종목에 트레이너 예산의 몇 %까지 넣을지 (기획서 2-1). 위험할수록 작게.
     "종목상한": {"마라토너": 0.30, "스프린터": 0.20, "파이오니어": 0.15},
@@ -54,9 +63,48 @@ CONFIG = {
 
 RESULTS_DIR = Path(__file__).parent / "results"  # 성적표·거래로그 CSV가 저장되는 곳
 
+ET = ZoneInfo("America/New_York")   # 미국 동부시간 (뉴욕 증시 기준 시계)
+MARKET_SETTLED = time(16, 15)       # 16:00 장 마감 + 여유 15분. 이 전의 '오늘 봉'은 아직 확정 아님
+STATE_SCHEMA = "v1-usd-1"           # 상태 파일(state/*.json) 형식 버전. 다르면 예전 파일로 보고 새로 시작
 
-def load_prices(code: str, start: str):
-    """실제 주가 데이터를 가져온다. 실패하면 친절한 메시지와 함께 알린다."""
+
+def usd(v, sign=True):
+    """금액을 $ 로 표기. 예: +$1,234 / -$56 / $10,000"""
+    if v is None or (isinstance(v, float) and not math.isfinite(v)):
+        return "계산 불가"
+    if not sign:
+        return f"${v:,.0f}"
+    return f"{'+' if v >= 0 else '-'}${abs(v):,.0f}"
+
+
+# ---------------- 데이터: 확정 봉만 (D1) ----------------
+
+def confirmed_bars(df, now=None):
+    """'다 끝난(확정된) 봉'만 남긴다. 순수 함수 — 인터넷을 쓰지 않아서 테스트하기 쉽다.
+
+    초보자용 설명:
+    - 종가(Close)가 비어 있는(NaN) 행은 버린다. (yahoo가 장 마감 직후 거래량만 채운 행을 줌)
+    - 마지막 봉의 날짜가 미국 동부시간으로 '오늘'인데 지금이 16:15 전이면,
+      그 봉은 아직 장중(미완성)이라 버린다.
+    now: 기준 시각. 없으면 지금. 시간대가 없는 값은 이 컴퓨터의 현지 시각으로 본다.
+    """
+    if df is None or len(df) == 0:
+        return df
+    out = df[df["Close"].notna()]
+    if len(out) == 0:
+        return out
+    if now is None:
+        now_et = datetime.now(ET)
+    else:
+        now_et = now.astimezone(ET)   # 시간대 없는 now 는 파이썬이 현지 시각으로 해석
+    last_day = out.index[-1].date()
+    if last_day == now_et.date() and now_et.time() < MARKET_SETTLED:
+        out = out.iloc[:-1]
+    return out
+
+
+def load_prices(code: str, start: str, now=None):
+    """실제 주가 데이터를 가져와 확정 봉만 돌려준다(D1). 실패하면 친절한 메시지와 함께 알린다."""
     try:
         import FinanceDataReader as fdr
     except ImportError:
@@ -70,7 +118,159 @@ def load_prices(code: str, start: str):
     # 거래량 칼럼 이름 정리 (파이오니어가 사용)
     if "Volume" not in df.columns and "거래량" in df.columns:
         df = df.rename(columns={"거래량": "Volume"})
+    df = confirmed_bars(df, now)
+    if len(df) == 0:
+        raise ValueError(f"'{code}' 확정된 봉이 하나도 없어요.")
     return df
+
+
+# ---------------- 상태 파일 (live·team 공용) ----------------
+
+def save_json_atomic(path, obj):
+    """JSON을 임시파일에 다 쓴 뒤 한 번에 바꿔치기(os.replace). 저장 중에 꺼져도 파일이 반쯤 깨지지 않는다."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def retire_old_file(path):
+    """예전 형식 파일을 지우지 않고 이름만 바꿔 보관한다. 예: x.json → x.old-20261104-0130.json"""
+    path = Path(path)
+    if not path.exists():
+        return None
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = path.with_name(f"{path.stem}.old-{stamp}{path.suffix}")
+    os.replace(path, dst)
+    return dst
+
+
+def load_state_file(path, extra_old=()):
+    """상태 JSON을 읽는다. 스키마 버전이 지금과 다르면(예: 원화·수수료 0.015% 시절 파일)
+    호환하지 않고 보관용 이름으로 바꾼 뒤 None(=새로 시작)을 돌려준다. extra_old 의 파일도 같이 보관."""
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        st = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = None
+    if isinstance(st, dict) and st.get("schema") == STATE_SCHEMA:
+        return st
+    moved = retire_old_file(path)
+    for p in extra_old:
+        retire_old_file(p)
+    print(f"  (예전 형식 상태 파일 → {moved.name if moved else '?'} 로 보관하고 새로 시작해요)")
+    return None
+
+
+# ---------------- 하루치 매매 (백테스트·live 공용, D3·D5) ----------------
+
+def _bar_date(window):
+    return window.index[-1].date().isoformat()
+
+
+def open_price(bar):
+    """체결가 = 그날 시가(Open). 시가가 비어 있으면 종가로 대신한다."""
+    o = bar.get("Open") if hasattr(bar, "get") else None
+    try:
+        o = float(o)
+    except (TypeError, ValueError):
+        o = float("nan")
+    return o if math.isfinite(o) and o > 0 else float(bar["Close"])
+
+
+def fill_pending(st, code, bar, date, cash, cap):
+    """어제 낸 주문(st['pending'])을 오늘 시가로 체결한다. 사람이 읽을 문장을 돌려준다(없으면 None).
+    st: {"wallet", "position", "pending", ...} — 이 함수가 직접 고친다.
+    매수 주식 수는 '상한 안에서 비용까지 내고 살 수 있는 만큼'(D5). 0주면 보류로 기록."""
+    pending = st.get("pending")
+    if not pending:
+        return None
+    st["pending"] = None
+    wallet, position = st["wallet"], st.get("position")
+    px = open_price(bar)
+    if pending["action"] == "매수":
+        if position is not None:
+            return None
+        n = shares_within_cap(cash, cap, px, wallet.fee_rate, wallet.slippage)
+        if n <= 0:
+            why = f"상한 {usd(cash * cap, False)} 안에서 1주도 못 삼 (시가 ${px:,.2f})"
+            wallet.skip(code, why, date)
+            st["skips"] = st.get("skips", 0) + 1
+            return "매수 보류 — " + why
+        if not wallet.buy(code, px, n, date):
+            why = f"현금 부족 (필요 ${px * n:,.0f}, 보유 ${wallet.cash:,.0f})"
+            wallet.skip(code, why, date)
+            st["skips"] = st.get("skips", 0) + 1
+            return "매수 보류 — " + why
+        st["position"] = {"buy_price": px, "days_held": 0, "shares": n, "buy_date": date}
+        st["buys"] = st.get("buys", 0) + 1
+        return f"매수 체결 {n}주 @ ${px:,.2f} (시가)"
+    if pending["action"] == "매도" and position is not None:
+        if wallet.sell(code, px, position["shares"], date):
+            st["closed"] = st.get("closed", 0) + 1
+            if px > position["buy_price"]:
+                st["wins"] = st.get("wins", 0) + 1
+            st["position"] = None
+            return f"매도 체결 {position['shares']}주 @ ${px:,.2f} (시가, {pending.get('reason', '')})"
+    return None
+
+
+def trade_day(st, brain, window, code, cash, cap, breaker=None, indicators=None):
+    """봉 하나(window 의 마지막 봉)를 처리한다. 순서:
+      ① 어제 낸 주문을 오늘 시가로 체결 (D3)
+      ② 오늘 종가로 서킷 브레이커 검사 → 걸리면 '내일 시가 전량 매도' 주문 + 정지 (D6 동작 유지)
+      ③ 오늘 종가로 판단 → 매수/매도 신호는 '내일 시가' 주문으로 st['pending']에 저장
+    st 는 이 함수가 직접 고친다. 사람이 읽을 문장을 돌려준다."""
+    date = _bar_date(window)
+    bar = window.iloc[-1]
+    msgs = []
+    if st.get("position") is not None:
+        st["position"]["days_held"] += 1          # 어제부터 들고 있던 것만 하루 늘림
+    filled = fill_pending(st, code, bar, date, cash, cap)
+    if filled:
+        msgs.append(filled)
+
+    wallet = st["wallet"]
+    price = float(bar["Close"])
+    cols = [c for c in (indicators or ["MA5", "MA20", "MA60", "RSI"]) if c in window.columns]
+    if bar[cols].isnull().any():
+        msgs.append("지표가 아직 부족해서 관망.")
+        st["prev_value"] = wallet.value({code: price})
+        return " / ".join(msgs)
+
+    today_value = wallet.value({code: price})
+    hit = None
+    if not st.get("stopped") and breaker is not None:
+        hit = breaker.check(cash, st.get("prev_value"), today_value)
+    if hit is not None:
+        st["stopped"] = True
+        st["breaker_reason"] = hit
+        if st.get("position") is not None:       # 들고 있으면 내일 시가에 전량 강제 정리
+            st["pending"] = {"action": "매도", "signal_date": date, "reason": "서킷 브레이커"}
+        else:
+            st["pending"] = None
+        st["last_reason"] = "🛑 서킷 브레이커: " + hit
+        msgs.append(st["last_reason"])
+    elif st.get("stopped"):
+        msgs.append("이미 정지됨 (서킷 브레이커 발동 후 재개 대기).")
+    else:
+        action, reason = brain.decide(window, st.get("position"))
+        st["last_reason"] = reason
+        msgs.append(f"{action} — {reason}")
+        if action == "매수" and st.get("position") is None:
+            st["pending"] = {"action": "매수", "signal_date": date, "reason": reason}
+        elif action == "매도" and st.get("position") is not None:
+            st["pending"] = {"action": "매도", "signal_date": date, "reason": reason}
+        if st.get("pending"):
+            msgs.append(f"→ 다음 거래일 시가에 {st['pending']['action']} 주문")
+    st["prev_value"] = wallet.value({code: price})
+    return " / ".join(msgs)
 
 
 def _max_drawdown(curve):
@@ -85,80 +285,46 @@ def _max_drawdown(curve):
     return mdd
 
 
+def new_state(name, cash, date=None):
+    """트레이너 한 명의 빈 상태(가짜 지갑 + 포지션 없음)."""
+    wallet = PaperWallet(name=name)
+    wallet.deposit(cash, date)
+    return {"wallet": wallet, "position": None, "pending": None, "prev_value": None,
+            "stopped": False, "breaker_reason": None, "last_reason": "판단할 만큼 데이터가 쌓이지 않았어요.",
+            "buys": 0, "closed": 0, "wins": 0, "skips": 0}
+
+
 def run_one_trainer(name, brain, df, cash, cap, code, breaker=None):
     """트레이너 한 명이 이 종목을 가상매매. 정직한 성적표를 돌려준다.
-    cap: 이 종목에 넣을 수 있는 예산 비율 (기획서 종목상한). 매수 시점 가격으로 주식 수 결정.
-    breaker: 서킷 브레이커. 매일 decide 전에 검사해 한도 넘으면 전량정리+정지."""
-    wallet = PaperWallet(name=name)
-    wallet.deposit(cash)
+    cap: 이 종목에 넣을 수 있는 예산 비율 (기획서 종목상한).
+    체결 규칙(D3): 봉 t 종가로 신호 → 봉 t+1 시가로 체결. 마지막 봉의 신호는 미체결로 남는다.
+    breaker: 서킷 브레이커. 매일 decide 전에 검사해 한도 넘으면 다음 시가 전량정리+정지."""
     df = brain.add_indicators(df)
-
-    position = None
-    buys = closed = wins = 0
-    last_reason = "판단할 만큼 데이터가 쌓이지 않았어요."
+    st = new_state(name, cash, df.index[0].date().isoformat() if len(df) else None)
     equity_curve = []          # 하루하루 평가금액 (MDD·검증용)
-    stopped = False            # 서킷 브레이커 발동 후 남은 기간 매매 중단
-    breaker_reason = None
-    prev_value = None
     need = 60 if isinstance(brain, MarathonerBrain) else 20
 
     for day in range(need, len(df)):
         window = df.iloc[: day + 1]
-        row = window.iloc[-1]
-        if row[[c for c in ["MA5", "MA20", "MA60", "RSI"] if c in window.columns]].isnull().any():
-            continue
-        price = float(row["Close"])
-        if position is not None:
-            position["days_held"] += 1
+        trade_day(st, brain, window, code, cash, cap, breaker)
+        price = float(window["Close"].iloc[-1])
+        equity_curve.append((_bar_date(window), st["wallet"].value({code: price})))
 
-        # --- 서킷 브레이커: 오늘 지갑값으로 먼저 검사 (decide보다 우선) ---
-        today_value = wallet.value({code: price})
-        if not stopped and breaker is not None:
-            hit = breaker.check(cash, prev_value, today_value)
-            if hit is not None:
-                if position is not None:   # 들고 있으면 전량 강제 정리
-                    entry = position["buy_price"]
-                    if wallet.sell(code, price, position["shares"]):
-                        closed += 1
-                        if price > entry:
-                            wins += 1
-                    position = None
-                stopped = True
-                breaker_reason = hit
-                last_reason = "🛑 서킷 브레이커: " + hit
-
-        if not stopped:
-            action, reason = brain.decide(window, position)
-            last_reason = reason
-            if action == "매수" and position is None:
-                # 살 주식 수 = 종목상한 예산 안에서, 매수 당일 가격으로 (미래 데이터 참조 없음)
-                shares = max(1, int(cash * cap / price))
-                if wallet.buy(code, price, shares):
-                    position = {"buy_price": price, "days_held": 0, "shares": shares}
-                    buys += 1
-            elif action == "매도" and position is not None:
-                entry = position["buy_price"]
-                if wallet.sell(code, price, position["shares"]):
-                    closed += 1
-                    if price > entry:
-                        wins += 1
-                    position = None
-
-        value_now = wallet.value({code: price})
-        equity_curve.append((window.index[-1].date().isoformat(), value_now))
-        prev_value = value_now
-
-    last_price = float(df["Close"].iloc[-1])
+    wallet, position = st["wallet"], st["position"]
+    last_price = float(df["Close"].iloc[-1]) if len(df) else 0.0
     final = wallet.value({code: last_price})
     still = position is not None
     unreal = (last_price - position["buy_price"]) * position["shares"] if still else 0.0
+    closed, wins = st["closed"], st["wins"]
     return {
-        "name": name, "profit": final - cash, "buys": buys, "closed": closed, "wins": wins,
+        "name": name, "profit": final - cash, "buys": st["buys"], "closed": closed, "wins": wins,
         "win_rate": (wins / closed * 100) if closed else None,
         "still_holding": still, "unrealized": unreal,
         "mdd": _max_drawdown([v for _, v in equity_curve]),
-        "last_reason": last_reason,
-        "stopped": stopped, "breaker_reason": breaker_reason,
+        "last_reason": st["last_reason"],
+        "stopped": st["stopped"], "breaker_reason": st["breaker_reason"],
+        "pending": st["pending"],      # 마지막 봉 신호(아직 체결 안 됨) 또는 None
+        "skips": st["skips"],          # 매수 보류 횟수 (사유는 log 에)
         "log": wallet.log,
         "equity_curve": equity_curve,
     }
@@ -170,19 +336,47 @@ def save_logs(stock_name, r):
     base = f"{stock_name}_{r['name']}"
     with open(RESULTS_DIR / f"{base}_거래내역.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["시각", "종류", "종목", "수량", "금액"])
+        w.writerow(["시각", "종류", "종목", "수량", "금액", "통화", "사유"])
         for e in r["log"]:
-            w.writerow([e["시각"], e["종류"], e["종목"], e["수량"], e["금액"]])
+            w.writerow([e["시각"], e["종류"], e["종목"], e["수량"], e["금액"],
+                        e.get("통화", ""), e.get("사유", "")])
     with open(RESULTS_DIR / f"{base}_평가금액.csv", "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(["날짜", "평가금액"])
         for d, v in r["equity_curve"]:
-            w.writerow([d, round(v, 1)])
+            w.writerow([d, round(v, 2)])
+
+
+def load_benchmark(start):
+    """SPY(시장 전체) 시세를 한 번만 받는다. 실패하면 None (비교 줄에 '계산 불가'로 찍힘)."""
+    try:
+        return load_prices(CONFIG["벤치마크"], start)
+    except Exception as e:
+        print(f"  (벤치마크 {CONFIG['벤치마크']} 받기 실패: {type(e).__name__} — SPY 비교는 계산 불가로 표시)")
+        return None
+
+
+def compare(name, profit, prices, budget, spy, start=None, end=None):
+    """D7 비교 한 줄: 같은 투입액으로 그냥 들고 있기(buy&hold) + SPY 대비.
+    start 를 주면(live·team) '시작 봉 다음 봉 시가'에 산 것으로 본다 — 트레이너도 시작 봉 종가에서
+    처음 판단하고 다음 시가에야 체결할 수 있으니 같은 조건. SPY 는 시작 봉 종가 → 마지막 종가."""
+    if start is None:
+        seg = prices
+    else:
+        ds = [x.date().isoformat() for x in prices.index]
+        seg = prices[[start < x <= end for x in ds]]
+        if len(seg) == 0:
+            return f"{name} {usd(profit)} | 비교는 다음 확정 봉부터 (시작 봉 {start})"
+    bh = metrics.buy_and_hold(seg, budget)
+    s = start or (bh["start"] if bh else None)
+    e = end or (bh["end"] if bh else None)
+    spy_ret = metrics.benchmark_return(spy, s, e) if (spy is not None and s and e) else None
+    return metrics.compare_line(name, profit, bh, spy_ret, budget)
 
 
 def main():
     print("=" * 55)
-    print(" AI 트레이너 가상매매 (학습 모드) — 진짜 돈 0원")
+    print(" AI 트레이너 가상매매 (학습 모드) — 진짜 돈 $0")
     print("=" * 55)
 
     total = CONFIG["총_가상자금"]
@@ -195,29 +389,38 @@ def main():
         "스프린터": SprinterBrain(),
         "파이오니어": PioneerBrain(),
     }
+    spy = load_benchmark(CONFIG["시작일"])     # SPY 는 한 번만 받아서 모든 종목 비교에 재사용
 
     for 종목명, code in CONFIG["종목목록"].items():
         print(f"\n▼ [{종목명}] 데이터 불러오는 중...")
         df = load_prices(code, CONFIG["시작일"])
-        print(f"  {len(df)}일치 데이터 확보 ({df.index[0].date()} ~ {df.index[-1].date()})")
+        print(f"  {len(df)}일치 확정 봉 ({df.index[0].date()} ~ {df.index[-1].date()})  ※ 체결은 다음 거래일 시가")
 
         print(f"  {'트레이너':<8}{'순손익':>12}{'매수':>5}{'완료':>5}{'승률':>7}{'MDD':>7}{'보유중':>7}")
         for name, brain in brains.items():
-            cash = int(total * ratios[name])
+            cash = total * ratios[name]
             r = run_one_trainer(name, brain, df, cash, caps[name], code, breaker)
             wr = f"{r['win_rate']:.0f}%" if r["win_rate"] is not None else "-"
             mdd = f"{r['mdd']*100:.0f}%"   # 고점 대비 최대 낙폭 (얼마나 깊이 물렸나)
             hold = "예" if r["still_holding"] else "아니오"
-            print(f"  {r['name']:<8}{r['profit']:>+12,.0f}{r['buys']:>5}{r['closed']:>5}{wr:>7}{mdd:>7}{hold:>7}")
+            print(f"  {r['name']:<8}{usd(r['profit']):>12}{r['buys']:>5}{r['closed']:>5}{wr:>7}{mdd:>7}{hold:>7}")
             if r["still_holding"]:
-                print(f"      └ 아직 안 판 평가손익 {r['unrealized']:+,.0f}원 포함 (팔아야 확정)")
+                print(f"      └ 아직 안 판 평가손익 {usd(r['unrealized'])} 포함 (팔아야 확정)")
+            if r["pending"]:
+                p = r["pending"]
+                print(f"      └ 미체결 주문: {p['action']} ({p['signal_date']} 신호 → 다음 거래일 시가, 아직 없음)")
+            if r["skips"]:
+                last = next((e.get("사유") for e in reversed(r["log"]) if e["종류"] == "보류"), "")
+                print(f"      └ 매수 보류 {r['skips']}회 (최근 사유: {last})")
             if r["stopped"]:
                 print(f"      └ {r['breaker_reason']}")
             print(f"      └ 마지막 판단: {r['last_reason']}")
+            print(f"      └ 비교: {compare(name, r['profit'], df, cash * caps[name], spy)}")
             save_logs(종목명, r)
 
     print("\n" + "=" * 55)
     print("※ 이건 가상매매입니다. 진짜 돈은 들어가지 않았습니다.")
+    print("※ '비교'는 같은 투입액(예산×종목상한)으로 첫날 사서 들고 있기·SPY 와 견준 것. 이겼다는 말은 이 숫자로만.")
     print("※ 결과가 좋아도 미래 수익을 보장하지 않습니다. 여러 종목·기간으로 계속 검증하세요.")
     print(f"※ 거래내역·일별 평가금액이 '{RESULTS_DIR.name}' 폴더에 CSV로 저장됐어요.")
     print("=" * 55)

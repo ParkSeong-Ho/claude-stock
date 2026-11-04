@@ -7,7 +7,8 @@ screener.py - 부하(트레이너)가 넓은 종목군에서 자기 스타일 '�
 출력: results/screener_<트레이너>.csv + 콘솔 요약 (이후 analyst.py가 이 후보를 분석).
 실행: python screener.py [N]   (N = 스캔할 종목 수, 기본 50)
 
-⚠️ KR 광역은 이 라이브러리의 KRX 목록 조회가 깨져(404) 미지원 → 현재 S&P500만. (한계)
+v1은 미국 종목 전용(D4) → S&P500만 훑는다. main.load_prices 가 '확정 봉'만 주므로(D1)
+후보의 가격·날짜는 마지막 확정 봉 기준이다. 실제 체결은 team.py 가 다음 거래일 시가로 한다(D3).
 """
 
 import sys
@@ -52,7 +53,8 @@ def scan(n=50):
                 row = d.iloc[-1]
                 found[tname].append({
                     "code": code,
-                    "price": round(float(row["Close"]), 2),
+                    "price": round(float(row["Close"]), 2),     # 신호 봉의 종가 (참고용, 체결가 아님)
+                    "date": d.index[-1].date().isoformat(),      # 신호 봉 날짜 → 다음 봉 시가로 체결
                     "rsi": round(float(row["RSI"]), 1) if "RSI" in d.columns else None,
                     "reason": reason,
                 })
@@ -65,9 +67,9 @@ def save(found):
         f = main.RESULTS_DIR / f"screener_{tname}.csv"
         with open(f, "w", newline="", encoding="utf-8-sig") as fp:
             w = csv.writer(fp)
-            w.writerow(["code", "price", "rsi", "reason"])
+            w.writerow(["code", "date", "price", "rsi", "reason"])
             for c in cands:
-                w.writerow([c["code"], c["price"], c["rsi"], c["reason"]])
+                w.writerow([c["code"], c.get("date"), c["price"], c["rsi"], c["reason"]])
 
 
 if __name__ == "__main__":
