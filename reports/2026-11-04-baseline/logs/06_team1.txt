@@ -1,0 +1,69 @@
+============================================================
+ 팀장 일일 루프 (가상, 진짜 돈 0원)
+============================================================
+① 스크리너 40종목 스캔 중...
+Traceback (most recent call last):
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/urllib3/connectionpool.py", line 779, in urlopen
+    self._prepare_proxy(conn)
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/urllib3/connectionpool.py", line 1074, in _prepare_proxy
+    conn.connect()
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/urllib3/connection.py", line 844, in connect
+    self._tunnel()
+  File "/usr/lib/python3.11/http/client.py", line 991, in _tunnel
+    raise OSError(f"Tunnel connection failed: {code} {message.strip()}")
+OSError: Tunnel connection failed: 403 Forbidden
+
+The above exception was the direct cause of the following exception:
+
+urllib3.exceptions.ProxyError: ('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden'))
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/urllib3/connectionpool.py", line 847, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/urllib3/util/retry.py", line 555, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='en.wikipedia.org', port=443): Max retries exceeded with url: /wiki/List_of_S%26P_500_companies (Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden')))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/user/claude-stock/team.py", line 154, in <module>
+    run(int(sys.argv[1]) if len(sys.argv) > 1 else 40)
+  File "/home/user/claude-stock/team.py", line 134, in run
+    found, used = screener.scan(n)
+                  ^^^^^^^^^^^^^^^^
+  File "/home/user/claude-stock/screener.py", line 40, in scan
+    for code in universe(n):
+                ^^^^^^^^^^^
+  File "/home/user/claude-stock/screener.py", line 30, in universe
+    syms = [s for s in fdr.StockListing("S&P500")["Symbol"].tolist() if isinstance(s, str)]
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/FinanceDataReader/data.py", line 184, in StockListing
+    return WikipediaStockListing(market).read()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/FinanceDataReader/wikipedia/listing.py", line 35, in read
+    res = requests.get(url, headers = headers)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/api.py", line 87, in get
+    return request("get", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/api.py", line 71, in request
+    return session.request(method=method, url=url, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/user/.venv-cs/lib/python3.11/site-packages/requests/adapters.py", line 723, in send
+    raise ProxyError(e, request=request)
+requests.exceptions.ProxyError: HTTPSConnectionPool(host='en.wikipedia.org', port=443): Max retries exceeded with url: /wiki/List_of_S%26P_500_companies (Caused by ProxyError('Unable to connect to proxy', OSError('Tunnel connection failed: 403 Forbidden')))
+exit=1 time=0s

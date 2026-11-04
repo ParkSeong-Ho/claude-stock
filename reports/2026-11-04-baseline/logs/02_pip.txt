@@ -1,0 +1,183 @@
+Collecting finance-datareader
+  Downloading finance_datareader-0.9.202-py3-none-any.whl.metadata (15 kB)
+Collecting ta
+  Downloading ta-0.11.0.tar.gz (25 kB)
+  Preparing metadata (setup.py): started
+  Preparing metadata (setup.py): finished with status 'done'
+Collecting backtesting
+  Downloading backtesting-0.6.6-py3-none-any.whl.metadata (8.1 kB)
+Requirement already satisfied: pandas in /usr/local/lib/python3.13/site-packages (3.0.5)
+Collecting pytest
+  Downloading pytest-9.2.0-py3-none-any.whl.metadata (7.9 kB)
+Requirement already satisfied: beautifulsoup4 in /usr/local/lib/python3.13/site-packages (from finance-datareader) (4.15.0)
+Requirement already satisfied: lxml in /usr/local/lib/python3.13/site-packages (from finance-datareader) (6.1.3)
+Collecting plotly (from finance-datareader)
+  Downloading plotly-7.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting requests-file (from finance-datareader)
+  Downloading requests_file-3.0.1-py2.py3-none-any.whl.metadata (1.7 kB)
+Requirement already satisfied: requests>=2.3.0 in /root/.local/lib/python3.13/site-packages (from finance-datareader) (2.34.2)
+Collecting tabulate>=0.9.0 (from finance-datareader)
+  Downloading tabulate-0.10.0-py3-none-any.whl.metadata (40 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 40.8/40.8 kB 14.9 MB/s eta 0:00:00
+Collecting tqdm (from finance-datareader)
+  Downloading tqdm-4.70.1-py3-none-any.whl.metadata (57 kB)
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 57.4/57.4 kB 22.0 MB/s eta 0:00:00
+Requirement already satisfied: numpy in /usr/local/lib/python3.13/site-packages (from ta) (2.5.3)
+Collecting bokeh!=3.0.*,!=3.2.*,>=3.0.0 (from backtesting)
+  Downloading bokeh-3.10.1-py3-none-any.whl.metadata (11 kB)
+Requirement already satisfied: python-dateutil>=2.8.2 in /root/.local/lib/python3.13/site-packages (from pandas) (2.9.0.post0)
+Collecting iniconfig>=2 (from pytest)
+  Downloading iniconfig-2.3.1-py3-none-any.whl.metadata (2.8 kB)
+Requirement already satisfied: packaging>=24 in /usr/local/lib/python3.13/site-packages (from pytest) (26.3)
+Collecting pluggy<2,>=1.6 (from pytest)
+  Downloading pluggy-1.7.0-py3-none-any.whl.metadata (5.0 kB)
+Collecting pygments>=2.15 (from pytest)
+  Downloading pygments-2.21.0-py3-none-any.whl.metadata (2.5 kB)
+Requirement already satisfied: jinja2>=2.9 in /root/.local/lib/python3.13/site-packages (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting) (3.1.6)
+Collecting narwhals>=1.13 (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting)
+  Downloading narwhals-2.28.0-py3-none-any.whl.metadata (15 kB)
+Requirement already satisfied: pillow>=7.1.0 in /usr/local/lib/python3.13/site-packages (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting) (12.3.0)
+Requirement already satisfied: pyyaml>=3.10 in /root/.local/lib/python3.13/site-packages (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting) (6.0.3)
+Collecting tornado>=6.2 (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting)
+  Downloading tornado-6.6-cp311-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl.metadata (2.6 kB)
+Collecting xyzservices>=2021.09.1 (from bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting)
+  Downloading xyzservices-2026.9.1-py3-none-any.whl.metadata (4.1 kB)
+Requirement already satisfied: six>=1.5 in /root/.local/lib/python3.13/site-packages (from python-dateutil>=2.8.2->pandas) (1.17.0)
+Requirement already satisfied: charset_normalizer<4,>=2 in /root/.local/lib/python3.13/site-packages (from requests>=2.3.0->finance-datareader) (3.5.1)
+Requirement already satisfied: idna<4,>=2.5 in /root/.local/lib/python3.13/site-packages (from requests>=2.3.0->finance-datareader) (3.20)
+Requirement already satisfied: urllib3<3,>=1.26 in /root/.local/lib/python3.13/site-packages (from requests>=2.3.0->finance-datareader) (2.8.0)
+Requirement already satisfied: certifi>=2023.5.7 in /root/.local/lib/python3.13/site-packages (from requests>=2.3.0->finance-datareader) (2026.10.18)
+Requirement already satisfied: soupsieve>=1.6.1 in /usr/local/lib/python3.13/site-packages (from beautifulsoup4->finance-datareader) (2.9.2)
+Requirement already satisfied: typing-extensions>=4.0.0 in /usr/local/lib/python3.13/site-packages (from beautifulsoup4->finance-datareader) (4.16.0)
+Requirement already satisfied: MarkupSafe>=2.0 in /root/.local/lib/python3.13/site-packages (from jinja2>=2.9->bokeh!=3.0.*,!=3.2.*,>=3.0.0->backtesting) (3.0.3)
+Downloading finance_datareader-0.9.202-py3-none-any.whl (53 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 53.9/53.9 kB 16.7 MB/s eta 0:00:00
+Downloading backtesting-0.6.6-py3-none-any.whl (190 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 190.8/190.8 kB 34.6 MB/s eta 0:00:00
+Downloading pytest-9.2.0-py3-none-any.whl (411 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 411.8/411.8 kB 28.2 MB/s eta 0:00:00
+Downloading bokeh-3.10.1-py3-none-any.whl (6.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.7/6.7 MB 26.6 MB/s eta 0:00:00
+Downloading iniconfig-2.3.1-py3-none-any.whl (7.6 kB)
+Downloading pluggy-1.7.0-py3-none-any.whl (27 kB)
+Downloading pygments-2.21.0-py3-none-any.whl (1.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.3/1.3 MB 28.7 MB/s eta 0:00:00
+Downloading tabulate-0.10.0-py3-none-any.whl (39 kB)
+Downloading plotly-7.1.0-py3-none-any.whl (9.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.7/9.7 MB 28.1 MB/s eta 0:00:00
+Downloading requests_file-3.0.1-py2.py3-none-any.whl (4.5 kB)
+Downloading tqdm-4.70.1-py3-none-any.whl (80 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 80.2/80.2 kB 26.3 MB/s eta 0:00:00
+Downloading narwhals-2.28.0-py3-none-any.whl (490 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 490.6/490.6 kB 26.6 MB/s eta 0:00:00
+Downloading tornado-6.6-cp311-abi3-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl (529 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 529.5/529.5 kB 28.7 MB/s eta 0:00:00
+Downloading xyzservices-2026.9.1-py3-none-any.whl (98 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 98.8/98.8 kB 26.5 MB/s eta 0:00:00
+Building wheels for collected packages: ta
+  Building wheel for ta (setup.py): started
+  Building wheel for ta (setup.py): finished with status 'error'
+  error: subprocess-exited-with-error
+  
+  × python setup.py bdist_wheel did not run successfully.
+  │ exit code: 1
+  ╰─> [88 lines of output]
+      /usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py:66: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+      !!
+      
+              ********************************************************************************
+              Please avoid running ``setup.py`` directly.
+              Instead, use pypa/build, pypa/installer or other
+              standards-based tools.
+      
+              See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+              ********************************************************************************
+      
+      !!
+        self.initialize_options()
+      Traceback (most recent call last):
+        File "<string>", line 2, in <module>
+          exec(compile('''
+          ~~~~^^^^^^^^^^^^
+          # This is <pip-setuptools-caller> -- a caller that pip uses to run setup.py
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          ...<31 lines>...
+          exec(compile(setup_py_code, filename, "exec"))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          ''' % ('/tmp/pip-install-n000f5sx/ta_71b4b07312c444929840a76afe917516/setup.py',), "<pip-setuptools-caller>", "exec"))
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "<pip-setuptools-caller>", line 34, in <module>
+        File "/tmp/pip-install-n000f5sx/ta_71b4b07312c444929840a76afe917516/setup.py", line 4, in <module>
+          setup(
+          ~~~~~^
+              name="ta",
+              ^^^^^^^^^^
+          ...<27 lines>...
+              },
+              ^^
+          )
+          ^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/core.py", line 185, in setup
+          return run_commands(dist)
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/core.py", line 201, in run_commands
+          dist.run_commands()
+          ~~~~~~~~~~~~~~~~~^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/dist.py", line 969, in run_commands
+          self.run_command(cmd)
+          ~~~~~~~~~~~~~~~~^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/dist.py", line 1233, in run_command
+          super().run_command(command)
+          ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/dist.py", line 988, in run_command
+          cmd_obj.run()
+          ~~~~~~~~~~~^^
+        File "/usr/lib/python3/dist-packages/wheel/bdist_wheel.py", line 403, in run
+          self.run_command("install")
+          ~~~~~~~~~~~~~~~~^^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py", line 318, in run_command
+          self.distribution.run_command(command)
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/dist.py", line 1233, in run_command
+          super().run_command(command)
+          ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/dist.py", line 988, in run_command
+          cmd_obj.run()
+          ~~~~~~~~~~~^^
+        File "/usr/lib/python3/dist-packages/setuptools/command/install.py", line 78, in run
+          return orig.install.run(self)
+                 ~~~~~~~~~~~~~~~~^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/command/install.py", line 708, in run
+          self.run_command(cmd_name)
+          ~~~~~~~~~~~~~~~~^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py", line 318, in run_command
+          self.distribution.run_command(command)
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/dist.py", line 1233, in run_command
+          super().run_command(command)
+          ~~~~~~~~~~~~~~~~~~~^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/dist.py", line 987, in run_command
+          cmd_obj.ensure_finalized()
+          ~~~~~~~~~~~~~~~~~~~~~~~~^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py", line 111, in ensure_finalized
+          self.finalize_options()
+          ~~~~~~~~~~~~~~~~~~~~~^^
+        File "/usr/lib/python3/dist-packages/setuptools/command/install_lib.py", line 17, in finalize_options
+          self.set_undefined_options('install',('install_layout','install_layout'))
+          ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py", line 296, in set_undefined_options
+          setattr(self, dst_option, getattr(src_cmd_obj, src_option))
+                                    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+        File "/usr/lib/python3/dist-packages/setuptools/_distutils/cmd.py", line 107, in __getattr__
+          raise AttributeError(attr)
+      AttributeError: install_layout. Did you mean: 'install_platlib'?
+      [end of output]
+  
+  note: This error originates from a subprocess, and is likely not a problem with pip.
+  ERROR: Failed building wheel for ta
+  Running setup.py clean for ta
+Failed to build ta
+ERROR: Could not build wheels for ta, which is required to install pyproject.toml-based projects
+
+real	0m4.707s
+user	0m1.670s
+sys	0m0.682s

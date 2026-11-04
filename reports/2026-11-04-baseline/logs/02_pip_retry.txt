@@ -1,0 +1,18 @@
+Requirement already satisfied: setuptools in /usr/lib/python3/dist-packages (68.1.2)
+Collecting setuptools
+  Downloading setuptools-84.2.1-py3-none-any.whl.metadata (6.6 kB)
+Requirement already satisfied: wheel in /usr/lib/python3/dist-packages (0.42.0)
+Collecting wheel
+  Downloading wheel-0.48.0-py3-none-any.whl.metadata (2.3 kB)
+Requirement already satisfied: packaging>=24.0 in /usr/local/lib/python3.13/site-packages (from wheel) (26.3)
+Downloading setuptools-84.2.1-py3-none-any.whl (876 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 876.3/876.3 kB 136.4 MB/s eta 0:00:00
+Downloading wheel-0.48.0-py3-none-any.whl (33 kB)
+Installing collected packages: wheel, setuptools
+  Attempting uninstall: wheel
+    Found existing installation: wheel 0.42.0
+ERROR: Cannot uninstall wheel 0.42.0, RECORD file not found. Hint: The package was installed by debian.
+
+real	0m1.232s
+user	0m0.790s
+sys	0m0.074s

@@ -1,0 +1,6 @@
+analyze() 결과: {'AAPL': {'code': 'AAPL', 'verdict': 'hold', 'conviction': 0.4, 'note': "장기 해자(생태계·서비스 매출)는 견고하나 '합성 후보(점검용)' 신호라 실제 악재·실적 확인 불가; 확신 부족으로 보류"}} 3.7s
+returncode 0 3.4s
+stdout: {"analysis":[{"code":"AAPL","verdict":"hold","conviction":0.4,"note":"합성 점검용 후보라 실시간 악재·실적 확인 불가; 장기 해자(생태계·서비스)는 견고하나 근거 데이터 부족으로 보류"}]}
+
+stderr: 
+파싱: {'analysis': [{'code': 'AAPL', 'verdict': 'hold', 'conviction': 0.4, 'note': '합성 점검용 후보라 실시간 악재·실적 확인 불가; 장기 해자(생태계·서비스)는 견고하나 근거 데이터 부족으로 보류'}]}

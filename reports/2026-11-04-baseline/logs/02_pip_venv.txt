@@ -1,0 +1,7 @@
+
+[notice] A new release of pip is available: 24.0 -> 26.3
+[notice] To update, run: pip install --upgrade pip
+
+real	0m14.464s
+user	0m10.528s
+sys	0m2.888s

@@ -1,0 +1,12 @@
+=== python team.py check
+[PASS] team 매수 후보 확신도 필터 점검 통과
+exit=0 time=.257481506s
+=== python analyst.py
+[PASS] analyst JSON파싱·veto·폴백 점검 통과
+exit=0 time=.027996359s
+=== python paper_wallet.py
+[PASS] 왕복 비용 310원(0.31%) — 비용 반영 확인
+exit=0 time=.025887523s
+=== python risk_guard.py
+[PASS] CircuitBreaker 자체 점검 통과
+exit=0 time=.012280672s
