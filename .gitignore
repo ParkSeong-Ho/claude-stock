@@ -3,7 +3,13 @@ __pycache__/
 *.pyc
 .venv/
 
+# 비밀값 (KIS 앱 키·계좌번호) — 절대 커밋 금지. 예시 파일만 올린다
+.env
+.env.*
+!.env.example
+
 # 런타임 생성물 (매매 상태·결과·로그 — 코드 아님)
+# state/kis_token.json (KIS 접속 토큰) 도 state/ 아래라 무시됨
 state/
 results/
 *.log
