@@ -326,8 +326,9 @@ def c_lookahead():
     """3. 미리보기 없음: t 이후 데이터를 잘라도 t 까지 결과가 같다"""
     plans = [
         ("us", "2020 급락·회복", [dict(arm="A0", cb="current"), dict(arm="A1", cb="staged"), dict(arm="A1T"),
-                                  dict(arm="A2")], [30, 100, 200]),
-        ("kr", "2018 조정", [dict(arm="A0", cb="staged"), dict(arm="A1T")], ["2018-05-02", "2018-10-10", 230]),
+                                  dict(arm="A2")], [30, "2020-03-31", 100, 200]),       # 2020-03-31 = 월말
+        ("kr", "2018 조정", [dict(arm="A0", cb="staged"), dict(arm="A1T")],
+         ["2018-05-02", "2018-10-10", "2018-10-31", 230]),                                # 05-02 = 005930 정지 중
     ]
     for key, per, arms, cuts in plans:
         md = S.get_market(key)
@@ -346,7 +347,7 @@ def c_lookahead():
     key, per = "us", "2015-17 상승"
     md = S.get_market(key)
     full = S.run(S.Config(market=key, period=per, arm="A1", realloc=True, with_refs=False))
-    ch = [e["date"] for e in full["events"] if e["kind"] == "H4" and e["w_new"] != e["w_old"]]
+    ch = [e["date"] for e in full["events"] if e["kind"] == "H4" and e["changed"]]
     check("H4 2015-17 에 실제 재배분이 있다(뒤 점검이 의미 있게)", len(ch) >= 1, f"재배분 {len(ch)}번, 처음 {ch[:1]}")
     for tdate in (ch[0], md.dstr[int(md.cal.searchsorted(pd.Timestamp(ch[0]))) + 60]) if ch else ():
         idx, frames, rates, rule, zv = S.load_frames(key, tdate)
@@ -724,15 +725,29 @@ def c_h4():
             exp = np.array(exp) / sum(exp)
         if not np.allclose([e["w_new"][nm] for nm in names], exp, atol=1e-12):
             ok_w = False
-        if e["w_new"] != e["w_old"]:
+        if e["changed"]:
             nchg += 1
             if abs(sum(e["moved"].values())) > 1e-6 * e["V"]:
                 ok_move = False
+            if not close(sum(e["post"].values()), e["V"], 1e-12, 1e-6):
+                ok_move = False
+            if not e["short"]:          # 지수가 넉넉했으면 옮긴 뒤 평가액 = 새 몫 × 합계
+                if any(not close(e["post"][nm], e["w_new"][nm] * e["V"], 1e-9, 1e-6) for nm in names):
+                    ok_move = False
+            else:                       # 모자랐으면 주는 쪽은 지수 전부, 받는 쪽은 모자란 비율대로
+                gap = {nm: e["w_new"][nm] * e["V"] - e["pre"][nm] for nm in names}
+                recv = [nm for nm in names if gap[nm] > 0]
+                tot_gap = sum(gap[nm] for nm in recv)
+                got = sum(e["moved"].get(nm, 0) for nm in recv)
+                if any(not close(e["moved"].get(nm, 0), got * gap[nm] / tot_gap, 1e-9, 1e-6) for nm in recv):
+                    ok_move = False
     check("H4 실데이터(2015-17): 분기 첫날마다 몫 = 지난 월 초과수익으로 다시 계산한 값", ok_w and nchg >= 1,
           f"몫 바뀐 분기 {nchg}번")
-    check("H4: 트레이너 사이에 옮긴 금액 합 = 0 (지수 단위만 이동, 비용 없음)", ok_move)
+    nshort = sum(1 for e in r["events"] if e["kind"] == "H4" and e["changed"] and e["short"])
+    check("H4: 옮긴 금액 합 = 0, 옮긴 뒤 = 새 몫 × 합계(지수 모자라면 가능한 만큼, 받는 쪽은 비율대로)", ok_move,
+          f"지수 모자란 분기 {nshort}번")
     # 월 수익률 재계산(재배분이 없는 달): r = 월말 평가 / 전 월말 평가 - 1, 첫 달은 시작 금액 기준
-    chg_months = {e["date"][:7] for e in r["events"] if e["kind"] == "H4" and e["w_new"] != e["w_old"]}
+    chg_months = {e["date"][:7] for e in r["events"] if e["kind"] == "H4" and e["changed"]}
     d = r["daily"]
     ok_m = True
     for nm in names:
@@ -744,7 +759,7 @@ def c_h4():
                 ok_m = False
             prev_v, prev_i = v, ic
     check("H4: 월 수익률(트레이너·지수)을 일별 평가로 다시 계산해도 같음", ok_m)
-    first = min(e["date"] for e in r["events"] if e["kind"] == "H4" and e["w_new"] != e["w_old"])
+    first = min(e["date"] for e in r["events"] if e["kind"] == "H4" and e["changed"])
     a2 = S.run(S.Config(market="us", period="2015-17 상승", arm="A1", with_refs=False))
     check("H4: 첫 재배분 전까지는 A1 과 체결이 같음",
           [f for f in r["fills"] if f["date"] < first] == [f for f in a2["fills"] if f["date"] < first])
@@ -814,6 +829,10 @@ def c_smoke():
         if key == "kr":
             zero_fills = sum(1 for f in r["fills"] if f["kind"] == "stock" and f["date"] in md.zero_volume.get(f["code"], ()))
             check("스모크 kr: 2018 정지 종목(005930·035420·207940)이 있어도 Volume=0 날 체결 0", zero_fills == 0)
+            r0 = S.run(S.Config(market="kr", period="2018 조정", arm="A0", with_refs=False))
+            a6 = S.a6_split_volume_buys(md, r0)
+            check("스모크 kr: A6 보고(분할 정지 뒤 20봉 파이오니어 거래량 신호 매수 수) 계산됨",
+                  set(a6) == set(S.A6_SPLIT_SUSPENSIONS), str({k: (v["after"], v["pioneer_buys"]) for k, v in a6.items()}))
     return timing
 
 

@@ -137,11 +137,8 @@ def rate_for_days(cal: pd.DatetimeIndex, series: pd.Series, rule: str) -> np.nda
     rule="prev_day"  (A1, 미국 DTB3): 전 거래일(t-1) 날짜 이하의 마지막 값 (그날 값이 없으면 직전 값)
     rule="prev_month"(A2, 국내 월별): t 가 m월이면 m-1월 값, 없으면 그 이전 마지막 값(이월)"""
     if rule == "prev_day":
-        keys = np.empty(len(cal), dtype="datetime64[ns]")
-        keys[0] = np.datetime64("NaT")
-        keys[1:] = cal.values[:-1]
-        out = _asof(series, keys[1:])
-        return np.concatenate(([np.nan], out))
+        out = _asof(series, cal[:-1])                    # t 번째 거래일 ← (t-1) 번째 거래일 날짜 이하 마지막 값
+        return np.concatenate(([np.nan], out))           # 달력 첫날은 전 거래일이 없음 (국면은 60번째 봉부터라 안 씀)
     if rule == "prev_month":
         first_of_prev = (cal.to_period("M") - 1).to_timestamp()        # m-1월 1일
         return _asof(series, first_of_prev.values)
@@ -592,7 +589,8 @@ class TeamSim:
             return
         tr = {"sleeve": s.name, "trainer": s.brain, "code": stock.code, "entry_date": md.dstr[t], "entry_cal": t,
               "entry_own": j, "shares": n, "entry_price": px, "notional": px * n, "entry_spent": need,
-              "signal_date": o["signal_date"], "cap_mult": o["cap_mult"], "exit_date": None, "exit_cal": None,
+              "signal_date": o["signal_date"], "signal_reason": o.get("reason", ""), "cap_mult": o["cap_mult"],
+              "exit_date": None, "exit_cal": None,
               "exit_own": None, "exit_price": None, "exit_net": None, "exit_reason": None}
         self.trades.append(tr)
         s.positions[stock.code] = {"code": stock.code, "buy_price": px, "days_held": 0, "shares": n,
@@ -618,7 +616,7 @@ class TeamSim:
         n = len(tr[0].excess)
         changed = any(abs(w_new[k] - self.h4_w[k]) > 1e-12 for k in w_new)
         ev = {"date": md.dstr[t], "kind": "H4", "n_months": n, "t": tstats, "w_old": dict(self.h4_w),
-              "w_new": w_new, "moved": {}}
+              "w_new": w_new, "moved": {}, "changed": changed}
         if not changed:
             self.events.append(ev)
             return
@@ -651,6 +649,9 @@ class TeamSim:
         self.h4_w = w_new
         ev["moved"] = moved
         ev["V"] = V
+        ev["pre"] = vals
+        ev["post"] = {s.name: s.flow[1] for s in tr}
+        ev["short"] = G < sum(x for x in excess.values() if x > 0) - 1e-9 * V   # 옮길 지수가 모자랐나
         self.events.append(ev)
 
     # ------------------------------------------------ 종가: 이자 → 평가 → ②③④ 판단
@@ -1105,6 +1106,26 @@ def run(cfg: Config, md: MarketData | None = None) -> dict:
     return res
 
 
+# A6: 분할 정지 3건 뒤 20봉 안에 '거래량 급증' 조건으로 생긴 파이오니어 매수 건수 (데이터는 고치지 않고 보고만)
+A6_SPLIT_SUSPENSIONS = {"005930": "2018-05-03", "035420": "2018-10-11", "035720": "2021-04-14"}   # 정지 마지막 날
+
+
+def a6_split_volume_buys(md: MarketData, res: dict, bars: int = 20) -> dict:
+    """정지가 끝난 뒤 그 종목의 거래된 봉 20개 안에 체결된 파이오니어 매수 중, 신호 사유가 '거래량 급증'(조건 A)인 건수."""
+    out = {}
+    for code, last_zero in A6_SPLIT_SUSPENSIONS.items():
+        st = md.by_code.get(code)
+        if st is None:
+            continue
+        j0 = int(np.searchsorted(np.array(st.dates), last_zero, side="right"))     # 정지 뒤 첫 거래된 봉
+        window = set(st.dates[j0:j0 + bars])
+        tr = [t for t in res["trades"] if t["code"] == code and t["trainer"] == "파이오니어"
+              and t["entry_date"] in window]
+        out[code] = {"after": st.dates[j0] if j0 < len(st.dates) else None,
+                     "pioneer_buys": len(tr), "volume_signal_buys": sum("거래량" in t["signal_reason"] for t in tr)}
+    return out
+
+
 def label(cfg: Config) -> str:
     s = cfg.arm
     if cfg.cb != "none":
@@ -1121,3 +1142,11 @@ def sanity_line(res: dict) -> str:
             f"매수 {m['buys']:4d} 매도 {m['sells']:4d} 지수다리 {m['index_legs']:4d} 보류 {m['skips']:4d} "
             f"최소현금 {m['min_cash']:.4f} 이자 {m['interest']:,.0f} 비용 {m['costs_total']:,.0f} "
             f"NaN {int(np.isnan(res['equity']).sum())} 시가대체 {m['open_fallbacks']}")
+
+
+if __name__ == "__main__":
+    # 한 조건만 돌려 '돌았나' 한 줄 보기: python -I sim_team.py us A1 "2018 조정"
+    _a = sys.argv[1:]
+    _r = run(Config(market=_a[0] if _a else "us", arm=_a[1] if len(_a) > 1 else "A0",
+                    period=_a[2] if len(_a) > 2 else "2018 조정"))
+    print(sanity_line(_r))
