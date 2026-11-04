@@ -6,7 +6,11 @@ h1_report.py - H1 포워드 월간·최종 보고서 (설계 docs/h1-forward-des
 - **저장된 파일만** 읽는다: 장부 6개(HEAD.json 으로 엄격하게)·meta.json·HEAD.json·calendar.jsonl·판정 기록·
   runs/errors/restarts/changes.jsonl·금리 저장본. 시세는 다시 받지 않는다(하루 기록에 지수 시가·종가와 보유 종목 종가가 있음).
 - 수익률·MDD·A1−A0 같은 숫자는 **기록만** 한다. 판정에 쓰지 않는다(사전 등록 ③⑨).
-- `--final` 은 판정 창(S~S+62)을 다 처리한 뒤 운영 기준 ①~③ 의 통과/실패만 판정한다.
+- `--final` 은 판정 창(S~S+62)을 다 처리한 뒤 운영 기준 ①~③ 의 통과/실패만 판정한다. S+62 전이면 판정하지 않고
+  남은 봉 수만 적는다(마감까지 끝날 수 없음이 확실하거나 재시작 상한을 넘으면 그때도 "H1 포워드 실패").
+  S+62 뒤에 처리한 봉은 '연장 기록'으로만 적는다.
+- 월간 보고서는 지금 판정 창의 S 부터 그달 마지막 처리 봉까지를 본다(운영 기준 칸·일지도 그때까지 — 지난달 보고서를
+  나중에 다시 만들어도 그 뒤 일이 섞이지 않음). 일지 줄이 어느 창의 것인지는 h1._in_window 그대로 센다.
 - 장부·일지는 한 글자도 고치지 않는다. 쓰는 것은 보고서 파일(state/h1/reports/)과 금리 저장본(state/h1/rates/)뿐이다.
   같은 입력이면 같은 보고서(바이트까지)가 나온다 — 그래서 "만든 시각"은 넣지 않고, 기준은 HEAD(마지막 저장)로 적는다.
 
@@ -15,23 +19,32 @@ h1_report.py - H1 포워드 월간·최종 보고서 (설계 docs/h1-forward-des
       → state/h1/reports/<market>-<YYYY-MM>.md  (--final 이면 <market>-final-<S>.md, 같은 이름이면 덮어씀)
       인터넷이 되면 먼저 FRED 금리를 받아 저장본을 새로 한다(--offline 이면 받지 않음).
   python h1_report.py --fetch-rates [--market us|kr]      FRED 금리만 받아 state/h1/rates/ 에 저장
-  종료 코드: 0 정상 / 2 예상 밖(장부 파일 손상 L24 포함) / 4 금리 받기 실패(--fetch-rates) / 5 잠금 30분 초과 /
-            8 장부 없음 / 9 명령 인자 오류(없는 달 등)
+  종료 코드: 0 정상 / 2 예상 밖 오류(코드 버그, 장부 파일 손상 L24 포함) / 4 환경 문제(OSError·MemoryError: 디스크·권한,
+            또는 --fetch-rates 에서 금리를 못 받음 = 인터넷 문제) / 5 잠금 30분 초과 / 8 장부 없음 /
+            9 명령 인자 오류(없는 달, --final 과 --month 같이 씀 등) / 130 사람이 멈춤(Ctrl-C)
 
-함수(설계 §3.8)
+함수(설계 §3.8). root=None 은 h1.H1_DIR(state/h1)을 뜻한다 — h1.py 와 같은 약속(부를 때의 값이라 시험에서 바꿔 끼울 수 있음).
   build(market, month=None, final=False, root=None, online=True) -> str     보고서 마크다운
-  write(market, month=None, final=False, root=None, online=True) -> Path    파일로 저장
+  write(market, month=None, final=False, root=None, online=True) -> Path    파일로 저장(잠금 아래, 같은 이름은 덮어씀)
   collect(...) -> dict                                                       보고서 숫자 묶음(시험·재현용)
   fetch_rates(series_id, cache_dir, timeout=20) -> Path | None              FRED 받기(표준 라이브러리 urllib)
   load_rates(series_id, cache_dir) -> pd.Series | None                     FRED 원본·R2 형식 둘 다, "." 은 빈값
   rate_for_days(dates, series, rule) -> list[float]                         R2 sim_team.rate_for_days 와 같은 규칙·같은 값
   interest_overlay(dates, cash, rate_pct) -> list[float]                    I_t = I_{t−1}·(1+q_t) + C_t·q_t
+  a0_interest(market, states, series, upto=None) -> dict                    장부로 A0 현금 이자(날마다 금리·이자) — 재현 M7
   realized(fills, corp_actions=None) -> dict                                 평균원가법 실현손익(주식/지수 따로)
   index_buy_hold_same_start(opens, closes, total, fee_rate, slippage) -> dict
-      지수 B&H(같은 시작) — R2 index_buy_hold_fractional(md, i0+1, i1, total) 와 같은 식(재현 M6 이 쓴다)
+      지수 B&H(같은 시작) — R2 index_buy_hold_fractional(md, i0+1, i1, total) 와 같은 식
+  index_bh_from_states(market, states, upto=None) -> dict                   장부 하루 기록으로 지수 B&H 매일 값 — 재현 M6
   cli(argv=None) -> int
 
-import 관계: h1_report → h1·h1_check·main·markets·metrics. h1 은 h1_report 를 import 하지 않는다.
+재현(단계 5)에서 R2 와 맞출 때 쓰는 것
+  M6: index_bh_from_states(…)["values"][1:] 를 R2 index_buy_hold_fractional(md, i0+1, i1, total)["equity"] 와
+      (마지막 날만 R2 가 매도 비용을 뺀 값이라 units × 그날 종가로) 비교. 단위는 정확히 같음(같은 식·같은 계산 순서).
+  M7: a0_interest(…) 의 rates 를 R2 sim_team.rate_for_days(같은 달력, 같은 금리 파일)[i0:i1+1] 과, interest 를 같은 식으로
+      따로 계산한 값과 비교.
+
+import 관계: h1_report → h1·h1_check·markets·metrics. h1 은 h1_report 를 import 하지 않는다.
 """
 from __future__ import annotations
 
@@ -44,6 +57,7 @@ import json
 import math
 import re
 import sys
+import traceback
 import urllib.request
 from collections import Counter
 from datetime import date as _date
@@ -54,7 +68,6 @@ import pandas as pd
 
 import h1
 import h1_check
-import main
 import markets
 import metrics
 
@@ -67,11 +80,13 @@ R2_RATE_NAMES = {"DTB3": "us_tbill.csv", "IR3TIB01KRM156N": "kr_shortrate.csv"} 
 DAYS_PER_YEAR = 252                                       # B4: 거래일마다 연% / 100 / 252
 
 EXIT_OK = 0
-EXIT_ERROR = 2          # 예상 밖 오류, 장부 파일 손상(L24)
-EXIT_FETCH = 4          # --fetch-rates 에서 금리를 못 받음
+EXIT_ERROR = 2          # 예상 밖 오류(코드 버그), 장부 파일 손상(L24)
+EXIT_ENV = 4            # 환경 문제(OSError·MemoryError: 디스크 가득·권한·입출력) — h1.py 의 ENV 와 같은 번호
+EXIT_FETCH = EXIT_ENV   # --fetch-rates 에서 금리를 못 받음(인터넷 문제 = 환경 문제)
 EXIT_LOCK = 5
 EXIT_NO_LEDGER = 8
 EXIT_USAGE = 9
+EXIT_INTERRUPT = 130
 
 FIXED_RECORD_ONLY = ("수익률은 기록만 하고 판정하지 않는다(사전 등록 ③). 3개월은 판단하기에 너무 짧다 — "
                      "수익률·MDD·A1−A0·지수 대비·그림자 서킷·팀장 성적은 판정에도, 재시작 사유에도 쓰지 않는다.")
@@ -87,6 +102,10 @@ SKIP_KINDS = ("0주", "현금부족", "팀장hold", "확신도낮음")
 EFFECTS = ("veto", "hold", "low_conv", "ordered", "over_slots")
 EFFECT_WORD = {"veto": "veto(빠짐)", "hold": "hold(보류)", "low_conv": "확신도 낮음(보류)", "ordered": "주문",
                "over_slots": "빈자리 부족"}
+CHANGE_WORD = {"replay-pass": "재현 통과 기록 추가(코드·환경 변경)", "amend-rules(done)": "세율 줄 추가",
+               "amend-rules(abandoned)": "세율 줄 추가 취소(커밋 전에 꺼짐)",
+               "corp-action:split": "기업 행위 분할", "corp-action:delist": "기업 행위 상장폐지",
+               "corp-action:correction": "기업 행위 정정 확정"}
 _FAR = "9999-12-31"
 
 
@@ -160,17 +179,21 @@ def _sidecar(csv_path: Path) -> Path:
 
 
 def rates_info(series_id, cache_dir) -> dict:
-    """금리 저장본 상태: {"ok", "series"(pd.Series|None), "path", "format", "first", "last", "rows", "fetched_at", "why"}.
-    fetched_at 은 저장본 옆 <ID>.json 에 적힌 받은 시각(없으면 None — 예: R2 형식 복사본)."""
+    """금리 저장본 상태: {"ok", "series"(pd.Series|None), "path", "format", "first", "last", "rows", "fetched_at", "why",
+    "skipped"}. 저장본은 <ID>.csv → R2 이름(us_tbill.csv·kr_shortrate.csv) 순서로 찾고, 깨진 파일은 건너뛰고 다음 것을 쓴다
+    (건너뛴 까닭은 "skipped" 에). fetched_at 은 저장본 옆 <ID>.json 에 적힌 받은 시각(없으면 None — 예: R2 형식 복사본)."""
+    skipped = []
     for p in _rate_paths(series_id, cache_dir):
         if not p.is_file():
             continue
         try:
             items, fmt = _parse_rates(p.read_bytes().decode("utf-8-sig"), series_id)
         except (OSError, UnicodeDecodeError, ValueError) as e:
-            return {"ok": False, "series": None, "path": str(p), "why": f"저장본이 깨졌어요({type(e).__name__}: {e})"}
+            skipped.append(f"{p.name}: 깨짐({type(e).__name__}: {e})")
+            continue
         if not items:
-            return {"ok": False, "series": None, "path": str(p), "why": "저장본에 값이 하나도 없음"}
+            skipped.append(f"{p.name}: 값이 하나도 없음")
+            continue
         meta = {}
         sp = _sidecar(p)
         if sp.is_file():
@@ -182,8 +205,9 @@ def rates_info(series_id, cache_dir) -> dict:
         return {"ok": True, "series": s, "path": str(p), "file": p.name, "format": fmt, "first": items[0][0],
                 "last": items[-1][0], "rows": len(items),
                 "fetched_at": meta.get("fetched_at") if isinstance(meta, dict) else None,
-                "source": meta.get("url") if isinstance(meta, dict) else None, "why": None}
-    return {"ok": False, "series": None, "path": None, "why": "금리 저장본이 없음"}
+                "source": meta.get("url") if isinstance(meta, dict) else None, "why": None, "skipped": skipped}
+    why = "금리 저장본이 없음" if not skipped else "쓸 수 있는 금리 저장본이 없음 — " + "; ".join(skipped)
+    return {"ok": False, "series": None, "path": None, "why": why, "skipped": skipped}
 
 
 def load_rates(series_id, cache_dir):
@@ -311,6 +335,61 @@ def interest_overlay(dates, cash, rate_pct) -> list:
     return out
 
 
+def _team_rows(states, arm, upto=None, start=None) -> list:
+    """장부(arm) 세 트레이너 합의 매일 값 [{date, value, cash, stock_value, idle_value, idle_units}].
+    날짜는 첫 트레이너의 하루 기록 순서(start ≤ 날짜 ≤ upto). 세 트레이너 모두 기록이 있는 날만(빠지면 L16 이 잡는다)."""
+    per = [{r["date"]: r for r in states[arm][tn]["days"]} for tn in h1.TRAINERS]
+    out = []
+    for r0 in states[arm][h1.TRAINERS[0]]["days"]:
+        d = r0["date"]
+        if (upto is not None and d > upto) or (start is not None and d < start):
+            continue
+        rows = [p.get(d) for p in per]
+        if any(r is None for r in rows):
+            continue
+        out.append({"date": d, **{k: sum(r[k] for r in rows)
+                                  for k in ("value", "cash", "stock_value", "idle_value", "idle_units")}})
+    return out
+
+
+def a0_interest(market, states, series, upto=None) -> dict:
+    """A0 현금 + 단기금리 이자(계산만, 설계 §3.8-9) — 저장된 장부 states = {arm: {trainer: st}} 와 금리 Series 로.
+    재현 M7 은 이 함수의 rates 를 R2 sim_team.rate_for_days(같은 달력·같은 금리 파일)와, interest 를 같은 식으로
+    따로 계산한 값과 비교한다.
+    - 달력 = A0 세 트레이너의 하루 기록 날짜(S ~ upto).
+    - 미국(prev_day): 그날 금리 = 전 거래일 날짜 이하 마지막 DTB3. S 날의 전 거래일은 하루 기록 prev_cal_date(저장 달력의
+      S 전 거래일)라서 [prev_cal_date(S)] + 달력 으로 rate_for_days 를 부르고 첫 값을 버린다(= R2 전체 달력의 그 구간).
+    - 국내(prev_month): 그 달의 전달 1일 이하 마지막 값(없는 달은 이월).
+    - C_t = A0 세 트레이너 그날 종가 현금 합(S 날 = 시작 금액 전부), I_t = I_{t−1}·(1+q_t) + C_t·q_t.
+    돌려줌: {"rule", "dates", "keys"(금리를 찾은 기준 날짜), "rate_dates"(실제로 쓴 금리 날짜, 없으면 None),
+             "rates"(연 %, 없으면 NaN → 이자 0), "cash", "interest"(I_t), "prev_mismatch"(prev_cal_date ≠ 달력 앞 날짜인 봉)}"""
+    mk = h1._mkey(market)
+    rule = RULE[mk]
+    team0 = _team_rows(states, "A0", upto)
+    dates = [r["date"] for r in team0]
+    by = {r["date"]: r for r in states["A0"][h1.TRAINERS[0]]["days"]}
+    if not dates:
+        return {"rule": rule, "dates": [], "keys": [], "rate_dates": [], "rates": [], "cash": [], "interest": [],
+                "prev_mismatch": []}
+    bad_prev = []
+    if rule == "prev_day":
+        prev0 = by[dates[0]].get("prev_cal_date")
+        if prev0 is None:                               # (일어나지 않아야 함) S 전 거래일을 모름 → S 날 금리 없음
+            match = rate_match(dates, series, rule)
+            rates = rate_for_days(dates, series, rule)
+        else:
+            cal = [prev0] + dates
+            match = rate_match(cal, series, rule)[1:]
+            rates = rate_for_days(cal, series, rule)[1:]
+        bad_prev = [d for d, (k, _, _) in zip(dates, match) if k != by[d].get("prev_cal_date")]
+    else:
+        match = rate_match(dates, series, rule)
+        rates = rate_for_days(dates, series, rule)
+    cash = [r["cash"] for r in team0]
+    return {"rule": rule, "dates": dates, "keys": [k for k, _, _ in match], "rate_dates": [g for _, g, _ in match],
+            "rates": rates, "cash": cash, "interest": interest_overlay(dates, cash, rates), "prev_mismatch": bad_prev}
+
+
 # ============================ 실현손익 · 지수 B&H ============================
 
 def realized(fills, corp_actions=None) -> dict:
@@ -383,6 +462,20 @@ def index_buy_hold_same_start(opens, closes, total, fee_rate, slippage) -> dict:
         values = [float(total)] + [units * c for c in closes[1:]]
     return {"values": values, "units": units, "return": values[-1] / total - 1,
             "mdd": metrics.max_drawdown(values)}
+
+
+def index_bh_from_states(market, states, upto=None) -> dict:
+    """저장된 장부의 하루 기록(지수 시가·종가 idle_open·idle_close)으로 지수 B&H(같은 시작) 매일 값 — 시세를 다시 받지 않는다.
+    총액 = A1 세 트레이너 시작 금액 합, 비용 = A1 지갑의 수수료·슬리피지(= markets 값). 재현 M6 이 쓴다.
+    돌려줌: index_buy_hold_same_start 결과 + "dates"(S ~ upto)."""
+    h1._mkey(market)                                     # 모르는 시장이면 ValueError
+    rows = [r for r in states["A0"][h1.TRAINERS[0]]["days"] if upto is None or r["date"] <= upto]
+    w = h1._plain_wallet(states["A1"][h1.TRAINERS[0]]["wallet"])
+    total = sum(states["A1"][tn]["start_cash"] for tn in h1.TRAINERS)
+    out = index_buy_hold_same_start([r["idle_open"] for r in rows], [r["idle_close"] for r in rows], total,
+                                    w["fee_rate"], w["slippage"])
+    out["dates"] = [r["date"] for r in rows]
+    return out
 
 
 # ============================ 읽기 ============================
@@ -469,17 +562,7 @@ def _weekdays_between(a: str, b: str) -> int:
 
 def _team(c, arm, upto, start=None):
     """장부(arm) 세 트레이너 합의 매일 값 [{date, value, cash, stock_value, idle_value, idle_units}] (start ≤ 날짜 ≤ upto)."""
-    per = [{r["date"]: r for r in c.states[arm][tn]["days"]} for tn in h1.TRAINERS]
-    out = []
-    for d in c.dates:
-        if d > upto or (start is not None and d < start):
-            continue
-        rows = [p.get(d) for p in per]
-        if any(r is None for r in rows):
-            continue
-        out.append({"date": d, **{k: sum(r[k] for r in rows)
-                                  for k in ("value", "cash", "stock_value", "idle_value", "idle_units")}})
-    return out
+    return _team_rows(c.states, arm, upto, start)
 
 
 def _rows(c, arm, tn, upto, start=None):
@@ -496,11 +579,12 @@ def _mdd(values):
 
 # ============================ 운영 기준 (§3.8-2) ============================
 
-def _window_end_at(c, s62):
-    """판정 창 마지막 봉 S+62 를 저장한 실행의 끝 시각(그 뒤 일지 줄은 '연장'). 못 찾으면 None(일지 전체를 봄)."""
-    for r in c.runs:
-        if r.get("event") == "end" and r.get("market") == c.mk and s62 in (r.get("bars") or []) \
-                and r.get("exit_code") in (h1.EXIT_OK, h1.EXIT_D7):
+def _saved_at(c, bar):
+    """봉 bar 를 저장한 실행(run·start)의 끝 시각. 그 뒤의 일지 줄은 그 봉 '뒤'의 일이다(최종: S+62 뒤 = 연장,
+    월간: 그달 마지막 봉 뒤 = 다음 달). 못 찾으면 None(봉 없는 일지 줄은 시각으로 거르지 않음)."""
+    for r in c.runs:                    # bars 에는 커밋한 봉만 적힌다(그 뒤 다른 봉에서 멈췄어도) → 종료 코드는 보지 않음
+        if r.get("event") == "end" and r.get("market") == c.mk and bar in (r.get("bars") or []) \
+                and h1._in_window(r, c.S, c.created_at):
             return r.get("at")
     return None
 
@@ -543,10 +627,19 @@ def _ops(c, bar_upto, jr_upto, end_at, allowed, allowed_why):
     out["batch_max"] = max((len(r.get("bars") or []) for r in procs), default=0)
     out["backlog_fail"] = sum(1 for r in rel if r.get("exit_code") == h1.EXIT_BACKLOG)
     out["gate_refused"] = sum(1 for r in rel if r.get("exit_code") == h1.EXIT_GATE)
-    stops = [r for r in rel if r.get("exit_code") in (h1.EXIT_DATA, h1.EXIT_D7)]
+    # 봉을 몇 개 저장한 뒤 멈춘 실행의 멈춤은 '마지막으로 저장한 봉 다음 봉'의 일이다 → 그 봉이 범위(jr_upto) 밖이면 안 셈
+    stops = [r for r in rel if r.get("exit_code") in (h1.EXIT_DATA, h1.EXIT_D7)
+             and (not r.get("bars") or max(r["bars"]) < jr_upto)]
     out["data_stops"] = len(stops)
-    out["data_kinds"] = dict(sorted(Counter(p.get("code") for r in stops for p in r.get("problems") or []
-                                            if p.get("level") == "D").items()))
+
+    def kinds_of(r):
+        ks = sorted({str(p.get("code")) for p in r.get("problems") or [] if p.get("level") == "D"})
+        return ks or ["(종류 없음)"]
+    out["data_kinds"] = dict(sorted(Counter(k for r in stops for k in kinds_of(r)).items()))
+    out["data_by_exit"] = {code: {"n": sum(1 for r in stops if r.get("exit_code") == code),
+                                  "kinds": dict(sorted(Counter(k for r in stops if r.get("exit_code") == code
+                                                               for k in kinds_of(r)).items()))}
+                           for code in (h1.EXIT_DATA, h1.EXIT_D7)}
     out["lock_timeouts"] = sum(1 for r in c.runs if r.get("event") == "lock_timeout" and inwin(r) and in_time(r))
     errs = [r for r in c.errors if inwin(r) and ((r.get("date") <= jr_upto) if r.get("date") else in_time(r))]
     out["l_errors"] = len(errs)
@@ -591,7 +684,20 @@ def _ops(c, bar_upto, jr_upto, end_at, allowed, allowed_why):
     ch = [r for r in c.changes if (r.get("market") in (mk, None)) and (c.created_at is None
                                                                           or not _le_time(r.get("at"), c.created_at))
           and in_time(r)]
-    out["changes"] = dict(sorted(Counter(str(r.get("kind")) for r in ch).items()))
+    # 변경 일지: 같은 일의 의도 줄(pending)·끝 줄(done/abandoned)은 한 번으로(run_id), 종류별로 센다
+    seen_ch, kinds = set(), Counter()
+    for r in ch:
+        kind = str(r.get("kind"))
+        if kind == "amend-rules":
+            kind = f"amend-rules({r.get('status')})"
+            if r.get("status") == "pending":
+                continue                                   # 끝 줄(done·abandoned)만 센다(C-7 이 빠진 끝 줄을 채움)
+        key = (kind, r.get("run_id")) if r.get("run_id") else (kind, json.dumps(r, sort_keys=True, ensure_ascii=False))
+        if key in seen_ch:
+            continue
+        seen_ch.add(key)
+        kinds[kind] += 1
+    out["changes"] = dict(sorted(kinds.items()))
     out["amend"] = [(r.get("at"), r.get("source")) for r in ch if r.get("kind") == "amend-rules"
                     and r.get("status") == "done"]
     cas = c.states["A0"][h1.TRAINERS[0]]["corp_actions"]
@@ -632,11 +738,8 @@ def _values(c, cut, mstart):
     out["diff"] = a1["value"] - a0["value"]
     out["diff_pp"] = (a1["ret"] - a0["ret"]) * 100
     out["diff_period_pp"] = ((a1["ret_period"] - a0["ret_period"]) * 100) if mstart is not None else None
-    rows = [r for r in c.canon if r["date"] <= cut]
-    w = h1._plain_wallet(c.states["A1"][h1.TRAINERS[0]]["wallet"])
-    bh = index_buy_hold_same_start([r["idle_open"] for r in rows], [r["idle_close"] for r in rows], a1["start"],
-                                   w["fee_rate"], w["slippage"])
-    before = [v for r, v in zip(rows, bh["values"]) if mstart is not None and r["date"] < mstart]
+    bh = index_bh_from_states(c.mk, c.states, cut)
+    before = [v for d, v in zip(bh.pop("dates"), bh["values"]) if mstart is not None and d < mstart]
     bh["ret_period"] = _ret(bh["values"][-1], before[-1] if before else bh["values"][0]) \
         if mstart is not None and bh["values"] else None
     bh["value"] = bh["values"][-1] if bh["values"] else None
@@ -733,9 +836,19 @@ def _realized_all(c, cut, period_start, year_start):
     return out
 
 
+def _window_keys(c, start, cut) -> set:
+    """이 창이 실제로 쓴 판정 기록 열쇠 = 두 장부 하루 기록(start ~ cut)의 팀장 칸(leader)에 적힌 열쇠."""
+    return {e.get("key") for arm in h1.ARMS for tn in h1.TRAINERS for r in _rows(c, arm, tn, cut, start)
+            for e in r.get("leader") or [] if e.get("key")}
+
+
 def _leader(c, start, cut):
-    """팀장 판정 기록(S ~ cut, 이 시장): 판정 × 출처, 상태별, 폴백 비율, 장부별 효과, CLI 버전·모델이 바뀐 날."""
-    recs = [r for r in c.decisions.records() if r.get("market") == c.mk and start <= str(r.get("date")) <= cut]
+    """팀장 판정 기록(이 창이 start ~ cut 에 쓴 것): 판정 × 출처, 상태별, 폴백 비율(⑧), 장부별 효과, CLI 버전·모델이 바뀐 날.
+    '창의 판정 기록' = 하루 기록의 팀장 칸이 가리키는 기록(파일 순서 = 물은 순서). 같은 날짜 범위에 있어도 이 창이 쓰지 않은
+    기록(재시작 전 창의 것, 저장되지 못한 봉의 것)은 세지 않고 수만 따로 적는다. 늦은 봉 폴백(late_no_llm)도 센다."""
+    keys = _window_keys(c, start, cut)
+    in_range = [r for r in c.decisions.records() if r.get("market") == c.mk and start <= str(r.get("date")) <= cut]
+    recs = [r for r in c.decisions.records() if r.get("key") in keys]
     n = len(recs)
     fb = sum(1 for r in recs if r.get("status") != "ok")
     flag = float(c.rule("fallback_flag", h1.FALLBACK_FLAG))
@@ -744,7 +857,9 @@ def _leader(c, start, cut):
            "by_verdict": dict(sorted(Counter(((r.get("verdict") or "없음"), r.get("source") or "?")
                                              for r in recs).items())),
            "by_status": dict(sorted(Counter(r.get("status") or "?" for r in recs).items())),
-           "truncated": c.decisions.truncated}
+           "truncated": c.decisions.truncated,
+           "unused": sum(1 for r in in_range if r.get("key") not in keys),
+           "missing": len(keys - {r.get("key") for r in recs})}
     eff = {}
     for arm in h1.ARMS:
         cnt = Counter(e.get("effect") for tn in h1.TRAINERS for r in _rows(c, arm, tn, cut, start)
@@ -777,46 +892,35 @@ def _interest(c, cut, period_start, rates):
            "source": info.get("source")}
     if not info.get("ok"):
         return out
-    series = info["series"]
-    rows0 = [r for r in c.canon if r["date"] <= cut]
-    dates = [r["date"] for r in rows0]
-    if rule == "prev_day":
-        cal = [rows0[0]["prev_cal_date"]] + dates
-        rates_pct = rate_for_days(cal, series, rule)[1:]
-        match = rate_match(cal, series, rule)[1:]
-        bad_prev = [r["date"] for r, (k, _, _) in zip(rows0, match) if k != r.get("prev_cal_date")]
-    else:
-        rates_pct = rate_for_days(dates, series, rule)
-        match = rate_match(dates, series, rule)
-        bad_prev = []
+    res = a0_interest(c.mk, c.states, info["series"], cut)
     team0 = _team(c, "A0", cut)
     team1 = _team(c, "A1", cut)
-    cash = [r["cash"] for r in team0]
-    acc = interest_overlay(dates, cash, rates_pct)
     last_rate = info["last"]
+    offline = rates["mode"] != "online"
     table = []
-    for r, (key, got, v), i in zip(rows0, match, acc):
+    for d, key, got, v, i in zip(res["dates"], res["keys"], res["rate_dates"], res["rates"], res["interest"]):
         if not math.isfinite(v):
             note = "금리 없음(자료보다 앞) → 0 으로 계산"
         elif key > last_rate:
-            note = f"자료 끝 → {got} 값 이월" + (f" (오프라인: {got} 값 이월)" if rates["mode"] != "online" else "")
+            note = f"자료 끝 → {got} 값 이월" + (f" (오프라인: {got} 값 이월)" if offline else "")
         elif got != key:
             note = f"그날 값 없음 → {got} 값"
         else:
             note = ""
-        table.append({"date": r["date"], "key": key, "rate_date": got, "rate": v, "interest": i, "note": note})
+        table.append({"date": d, "key": key, "rate_date": got, "rate": v, "interest": i, "note": note})
     before = [x["interest"] for x in table if x["date"] < period_start]
     v0, v1 = team0[-1]["value"], team1[-1]["value"]
     start_total = sum(c.states["A0"][tn]["start_cash"] for tn in h1.TRAINERS)
-    i_cut = acc[-1]
+    i_cut = res["interest"][-1]
+    carried = [x for x in table if x["key"] and math.isfinite(x["rate"]) and x["key"] > last_rate]
     out.update({"table": [x for x in table if x["date"] >= period_start], "interest": i_cut,
                 "interest_period": i_cut - (before[-1] if before else 0.0),
                 "a0": v0, "a0_plus": v0 + i_cut, "ret_plus": (v0 + i_cut) / start_total - 1,
                 "a1_minus_plus": v1 - (v0 + i_cut),
-                "missing_days": sum(1 for v in rates_pct if not math.isfinite(v)),
-                "carried_days": sum(1 for x in table if x["key"] and math.isfinite(x["rate"])
-                                    and x["key"] > last_rate),
-                "prev_mismatch": bad_prev})
+                "missing_days": sum(1 for v in res["rates"] if not math.isfinite(v)),
+                "carried_days": len(carried), "carried_from": carried[0]["rate_date"] if carried else None,
+                "skipped": info.get("skipped") or [],
+                "prev_mismatch": res["prev_mismatch"]})
     return out
 
 
@@ -885,17 +989,22 @@ def _collect_locked(mk, root, month, final, online) -> dict:
             "window_bars": wb, "complete": complete, "s62": s62}
     if final:
         cut = s62 if complete else last
-        end_at = _window_end_at(c, s62) if complete else None
-        jr_upto = s62 if complete else _FAR
         period_start = S
         year_start = S
     else:
         cut = max(d for d in c.dates if d <= f"{month}-31")
-        end_at, jr_upto = None, _FAR
         period_start = max(S, f"{month}-01")
         year_start = max(S, f"{month[:4]}-01-01")
+    # 운영 기준·일지는 S ~ cut 까지만 본다(최종: S+62 까지, 월간: 그달 마지막 처리 봉까지 — 지난달 보고서를 다시 만들어도
+    # 그 뒤 일이 섞이지 않게). 아직 진행 중인 창(최종 판정 전·이번 달)은 마지막 저장 뒤의 멈춤·거절(봉 없는 줄)까지 넣는다.
+    if final and complete:
+        end_at, jr_upto = _saved_at(c, s62), s62
+    elif cut == last:
+        end_at, jr_upto = None, _FAR
+    else:
+        end_at, jr_upto = _saved_at(c, cut), cut
     data.update({"cut": cut, "period_start": period_start, "end_at": end_at})
-    data["ops"] = _ops(c, cut if final else last, jr_upto, end_at, allowed, allowed_why)
+    data["ops"] = _ops(c, cut, jr_upto, end_at, allowed, allowed_why)
     data["values"] = _values(c, cut, None if final else f"{month}-01")
     data["ratios"] = {"period": _ratios(c, period_start, cut)}
     data["trades"] = {"period": _trades(c, period_start, cut)}
@@ -913,9 +1022,16 @@ def _collect_locked(mk, root, month, final, online) -> dict:
 
 
 def _verdict(d) -> dict:
-    """--final: 운영 기준 ①~③ 의 통과/실패(수익률은 쓰지 않음, 사전 등록 ③⑨)와 ⑤ 재시작 상한·마감."""
+    """--final: 사전 등록 ①~③ 의 통과/실패(수익률은 쓰지 않음, ③⑨)와 ⑤ 재시작 상한·마감.
+    ① 판정 창 63봉(S ~ S+62)을 다 처리했는가 — 아니면 판정하지 않는다(남은 봉 수만).
+    ②-1 L 오류 0(errors.jsonl + 저장 자료로 다시 점검), ②-2 빠진 날 0·늦은 봉 ≤ 10·한 번에 ≤ 5(종료 코드 6 없음),
+    ②-3 모든 하루 기록 지문이 replay_pass 에 있고 다른 지문으로 봉을 처리한 실행 없음.
+    결과: "pass" / "fail_window"(판정 창 실패 → 재시작 대상) / "fail_h1"(H1 포워드 실패(운영 기준 미충족):
+    재시작이 상한을 넘게 필요하거나, 마감까지 깨끗한 창이 끝나지 않음·끝날 수 없음) / "not_finished"."""
     ops, rc = d["ops"], d["recheck"]
-    over_deadline = (d["s62"] or d["last"]) > ops["deadline"]
+    deadline, wb = ops["deadline"], d["window_bars"]
+    c0 = {"ok": bool(d["complete"]),
+          "detail": f"처리 {min(ops['n_bars'], wb)}/{wb}봉" + ("" if d["complete"] else f", 남은 봉 {ops['bars_left']}개")}
     c1 = {"ok": ops["l_errors"] == 0 and rc["n_window"] == 0,
           "detail": f"errors.jsonl 의 L 오류 {ops['l_errors']}건, 저장 자료로 다시 점검한 L 오류 {rc['n_window']}건"}
     missing = ops["missing"]
@@ -932,36 +1048,56 @@ def _verdict(d) -> dict:
           "detail": f"다른 지문으로 처리한 봉 {len(ops['other_fp'])}개"
                     + (f" ({ops['allowed_why']})" if ops["allowed_why"] else "")}
     violated = not (c1["ok"] and c2["ok"] and c3["ok"])
-    no_more = ops["restarts_left"] <= 0
-    out = {"complete": d["complete"], "c1": c1, "c2": c2, "c3": c3, "over_deadline": over_deadline}
+    used, cap = ops["restarts_used"], ops["max_restarts"]
+    no_more = used >= cap                               # 이 창이 실패하면 필요한 재시작이 상한을 넘음
+    over_cap = used > cap                               # (일어나지 않아야 함: restart 가 거절) 이 창 자체가 상한 밖
+    last = d["last"]
+    # 마감까지 끝날 수 없음(확실한 것만): 거래일은 평일의 일부라서 'k 번째 평일'보다 일찍 올 수 없다.
+    this_min_end = d["s62"] if d["complete"] else _add_weekdays(last, ops["bars_left"])
+    next_min_end = _add_weekdays(last, wb - 1)          # 재시작하면 새 S ≥ 지금 마지막 봉 → 새 S+62 ≥ 이 날
+    out = {"complete": d["complete"], "c0": c0, "c1": c1, "c2": c2, "c3": c3,
+           "over_deadline": this_min_end > deadline, "this_min_end": this_min_end, "next_min_end": next_min_end,
+           "violated": violated}
+    if over_cap:
+        out.update(passed=False if d["complete"] else None, result="fail_h1",
+                   why=f"재시작 {used}번 — 상한 {cap}번을 넘은 창(사전 등록 ⑤)")
+        return out
     if not d["complete"]:
         out["passed"] = None
-        if d["last"] > ops["deadline"]:
+        if this_min_end > deadline:
             out["result"] = "fail_h1"
-            out["why"] = f"마감 {ops['deadline']} 까지 깨끗한 판정 창이 끝나지 않음"
+            out["why"] = (f"마감 {deadline} 까지 깨끗한 판정 창이 끝나지 않음 — 남은 {ops['bars_left']}봉을 휴장일 없이 매일 "
+                          f"처리해도 S+62 가 빨라야 {this_min_end}")
         elif violated and no_more:
             out["result"] = "fail_h1"
-            out["why"] = (f"이 창이 이미 운영 기준을 어겼고 남은 재시작이 없음(재시작 {ops['restarts_used']}/"
-                          f"{ops['max_restarts']} — 재시작이 {ops['max_restarts']}번을 넘게 필요함)")
+            out["why"] = (f"이 창이 이미 운영 기준을 어겼고 남은 재시작이 없음(재시작 {used}/{cap} — "
+                          f"재시작이 {cap}번을 넘게 필요함)")
+        elif violated and next_min_end > deadline:
+            out["result"] = "fail_h1"
+            out["why"] = (f"이 창이 이미 운영 기준을 어겼고, 재시작해도 새 창의 S+62 가 빨라야 {next_min_end} 라서 "
+                          f"마감 {deadline} 을 넘음")
         else:
             out["result"] = "not_finished"
             out["why"] = f"아직 판정 창이 끝나지 않음 — 남은 봉 {ops['bars_left']}개"
         return out
-    out["passed"] = not violated and not over_deadline
+    out["passed"] = not violated and not out["over_deadline"]
     if out["passed"]:
         out["result"] = "pass"
         out["why"] = "운영 기준 ①~③ 모두 통과 → 이 시장에서 H1 을 기본 장부로 할지 검토로 넘어감"
-    elif over_deadline:
+    elif out["over_deadline"]:
         out["result"] = "fail_h1"
-        out["why"] = f"판정 창 마지막 봉 {d['s62']} 이 마감 {ops['deadline']} 뒤"
+        out["why"] = f"판정 창 마지막 봉 S+62 {d['s62']} 이 마감 {deadline} 뒤"
     elif no_more:
         out["result"] = "fail_h1"
-        out["why"] = (f"운영 기준 미충족이고 남은 재시작이 없음(재시작 {ops['restarts_used']}/{ops['max_restarts']} — "
-                      f"재시작이 {ops['max_restarts']}번을 넘게 필요함)")
+        out["why"] = (f"운영 기준 미충족이고 남은 재시작이 없음(재시작 {used}/{cap} — "
+                      f"재시작이 {cap}번을 넘게 필요함)")
+    elif next_min_end > deadline:
+        out["result"] = "fail_h1"
+        out["why"] = (f"운영 기준 미충족이고, 재시작해도 새 창의 S+62 가 빨라야 {next_min_end} 라서 마감 {deadline} 을 넘음")
     else:
         out["result"] = "fail_window"
         out["why"] = (f"판정 창 실패 → 재시작 대상(사전 등록 ⑤, 남은 재시작 {ops['restarts_left']}번, "
-                      f"마감 {ops['deadline']})")
+                      f"마감 {deadline}, 새 창의 S+62 는 빨라야 {next_min_end})")
     return out
 
 
@@ -1075,12 +1211,17 @@ def _render_verdict(d):
               "판정하지 않는다(S+62 를 처리한 뒤 다시 --final).", ""]
         if v["result"] == "fail_h1":
             L += [f"- **H1 포워드 실패(운영 기준 미충족)** — {v['why']} (사전 등록 ⑤)", ""]
+        elif v["violated"]:
+            L += ["- 참고: 이 창은 이미 운영 기준을 어긴 기록이 있다(아래 2절) → 사전 등록 ⑤ 의 재시작 사유인지 확인. "
+                  f"재시작하면 새 창의 S+62 는 빨라야 {v['next_min_end']} (마감 {ops['deadline']}).", ""]
         return L
     L += _table(["기준", "결과", "근거"], [
+        ["① 판정 창 63봉(S ~ S+62)을 다 처리함", _ok_word(v["c0"]["ok"]), v["c0"]["detail"]],
         ["②-1 장부 논리 오류 0건", _ok_word(v["c1"]["ok"]), v["c1"]["detail"]],
         ["②-2 빠진 날 0 · 늦은 봉 · 한 번에 따라잡은 봉", _ok_word(v["c2"]["ok"]),
          v["c2"]["detail"] + " — " + ", ".join(f"{k} {'O' if ok else 'X'}" for k, ok in v["c2"]["parts"].items())],
         ["②-3 재현을 통과한 코드·환경만", _ok_word(v["c3"]["ok"]), v["c3"]["detail"]],
+        ["③ 수익률은 기록만", "판정에 안 씀", "수익률·MDD·A1−A0·지수 대비·그림자 서킷·팀장 숫자는 아래 기록 절에만"],
     ])
     L.append("")
     if v["result"] == "pass":
@@ -1098,7 +1239,10 @@ def _render_verdict(d):
 def _render_ops(d):
     ops = d["ops"]
     final = d["kind"] == "final"
-    head = "## 2. 운영 기준" + (" (판정 창 안)" if final and d["complete"] else " (판정 아님 — 이 창의 지금까지 상태)")
+    if final and d["complete"]:
+        head = f"## 2. 운영 기준 (판정 창 안: S {d['S']} ~ S+62 {d['s62']})"
+    else:
+        head = f"## 2. 운영 기준 (판정 아님 — 이 창의 S {d['S']} ~ {ops['last']} 상태)"
     L = [head, ""]
     prog = f"{min(ops['n_bars'], ops['window_bars'])}/{ops['window_bars']}봉"
     if ops["n_bars"] > ops["window_bars"]:
@@ -1113,7 +1257,11 @@ def _render_ops(d):
             miss += f" · 달력에 없는 하루 기록 {len(ops['extra'])}개({', '.join(ops['extra'][:10])})"
     if ops["ledger_dates_differ"]:
         miss += f" · 날짜 목록이 다른 장부 {', '.join(ops['ledger_dates_differ'])}"
-    kinds = ", ".join(f"{k} {v}" for k, v in ops["data_kinds"].items()) or "없음"
+    be = ops["data_by_exit"]
+    k4 = ", ".join(f"{k} {v}" for k, v in be[h1.EXIT_DATA]["kinds"].items()) or "없음"
+    k7 = ", ".join(f"{k} {v}" for k, v in be[h1.EXIT_D7]["kinds"].items()) or "없음"
+    stops_txt = (f"{ops['data_stops']}번 — 종료 코드 4(자료 D1~D6·사전 조건 PRE·환경 ENV) {be[h1.EXIT_DATA]['n']}번: {k4} / "
+                 f"종료 코드 7(기준 지수 늦음) {be[h1.EXIT_D7]['n']}번: {k7} (재시작 아님)")
     l_codes = ", ".join(f"{k} {v}" for k, v in ops["l_codes"].items())
     rows = [
         ["판정 창 진행", f"{prog} · 시작 S {ops['first']} · {end}"],
@@ -1128,8 +1276,8 @@ def _render_ops(d):
         ["다른 지문으로 처리한 봉(재현 통과 기록에 없는 코드·환경)",
          f"{len(ops['other_fp'])}개" + (f" ({', '.join(ops['other_fp'][:10])})" if ops["other_fp"] else "")
          + (f" — {ops['allowed_why']}" if ops["allowed_why"] else "") + " — 0 이어야 함(②-3)"],
-        ["관문 거절(종료 코드 3)", f"{ops['gate_refused']}번"],
-        ["자료 멈춤(종료 코드 4·7)", f"{ops['data_stops']}번 · 종류별 {kinds} (재시작 아님)"],
+        ["관문 거절(종료 코드 3: 재현 미통과 코드·환경 또는 규칙 다름)", f"{ops['gate_refused']}번"],
+        ["자료 멈춤(종료 코드 4·7)", stops_txt],
         ["잠금 30분 초과(종료 코드 5)", f"{ops['lock_timeouts']}번"],
         ["재시작", f"{ops['restarts_used']}번 / 상한 {ops['max_restarts']} (남은 {ops['restarts_left']}번)"],
         ["마감", f"{ops['deadline']} 까지 {ops['days_to_deadline']}일(마지막 처리 봉 기준) · "
@@ -1144,8 +1292,8 @@ def _render_ops(d):
     L.append(f"- 코드·환경 지문: {len(fps)}가지" + (" (바뀐 날 " + ", ".join(
         f"{f['date']} code {f['code_hash']}… / {f['env']}" for f in fps[1:]) + ")" if len(fps) > 1 else "")
         + (f" · 처음 {fps[0]['date']} code {fps[0]['code_hash']}… / {fps[0]['env']}" if fps else ""))
-    ch = ", ".join(f"{k} {v}" for k, v in ops["changes"].items()) or "없음"
-    L.append(f"- 변경 일지(changes.jsonl, 이 창이 만들어진 뒤): {ch}")
+    ch = ", ".join(f"{CHANGE_WORD.get(k, k)} {v}" for k, v in ops["changes"].items()) or "없음"
+    L.append(f"- 코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤): {ch}")
     if ops["amend"]:
         L.append("- 세율 줄 추가(amend-rules): " + "; ".join(f"{a} 출처 {s}" for a, s in ops["amend"]))
     corp = ops["corp"]
@@ -1245,7 +1393,8 @@ def _render_shadow(d):
     L = [f"## 6. 그림자 서킷 (S ~ {d['cut']}, 계산만 — 장부는 바뀌지 않음)", "",
          "켜져 있었다면 걸렸을지(누적 −10%·하루 −7%)를 매일 계산만 한 기록이다. 판정에 쓰지 않는다(사전 등록 ③).", ""]
     L += _table(["장부·트레이너", "첫 발동일", "사유(첫 발동)", "발동한 날 수"], rows)
-    L.append("")
+    L += ["", "- 사유 글은 risk_guard 서킷 문구 그대로다. H1 장부는 실제로 팔지도 멈추지도 않았다(stopped 는 늘 False).",
+          "- 첫 발동 뒤에도 매일 다시 계산한다(영구 정지를 흉내 내지 않음). '발동한 날 수'는 걸렸을 날의 수다.", ""]
     return L
 
 
@@ -1286,7 +1435,8 @@ def _render_leader(d):
         L += ["- 이 기간 판정 기록이 없음(후보가 없었음).", ""]
     else:
         ratio = ld["ratio"] * 100
-        L.append(f"- 판정 기록 {ld['n']}건 · LLM 정상 {ld['n'] - ld['fallback']} · 폴백(status ≠ ok) {ld['fallback']} "
+        L.append(f"- 이 창이 쓴 판정 기록 {ld['n']}건 · LLM 정상 {ld['n'] - ld['fallback']} · "
+                 f"폴백(status ≠ ok, 늦은 봉 포함) {ld['fallback']} "
                  f"→ 폴백 비율 {ratio:.1f}% ({ld['flag'] * 100:.0f}% 를 넘으면 '대표성 없음' 표시, 사전 등록 ⑧)")
         if ld["unrepresentative"]:
             L.append(f"- **팀장 판정 대표성 없음** — 폴백이 {ld['flag'] * 100:.0f}% 를 넘음(사전 등록 ⑧). 실패 사유는 아님.")
@@ -1303,6 +1453,11 @@ def _render_leader(d):
         L += ["", f"- CLI 버전·모델: 처음 {first}. 바뀐 날: {ch}"]
     else:
         L += ["", f"- CLI 버전·모델: {first} (바뀐 날 없음)" if ld["n"] else "- CLI 버전·모델: 기록 없음"]
+    if ld["unused"]:
+        L.append(f"- 같은 날짜 범위에 있지만 이 창의 하루 기록이 쓰지 않은 판정 기록 {ld['unused']}건은 세지 않았다"
+                 "(재시작 전 창의 것이거나 저장되지 못한 봉의 것).")
+    if ld["missing"]:
+        L.append(f"- ※ 하루 기록이 가리키는데 판정 기록에 없는 열쇠 {ld['missing']}개(L17 — 10절 다시 점검 참고).")
     if ld["truncated"]:
         L.append(f"- 판정 기록 마지막 줄이 반쯤 쓰여 있음({ld['truncated']['bytes']}바이트) — 다음 run 이 잘라 냄")
     L.append("")
@@ -1325,7 +1480,7 @@ def _render_interest(d):
           "'A0+이자' = A0 평가액 + I_t.",
           f"- 금리 규칙: {rule_txt}.",
           f"- 금리 파일: {it['series']} ({it['path']}, {it['format']} 형식, {it['first_rate']} ~ {it['last_rate']}) · "
-          f"받은 시각 {it['fetched_at'] or '기록 없음'} · {mode}",
+          f"받은 시각 {it['fetched_at'] or '기록 없음(옆 .json 없음 — 예: R2 data/rates 복사본)'} · {mode}",
           "- **근사**다: R2 A0 는 이자가 현금에 들어가 매수·서킷에 쓰이지만 여기서는 따로 쌓기만 한다. 금리는 보고서를 만들 때 가진 "
           "자료로 다시 계산한다(R2 와 같은 방식). 국내 월 금리는 발표가 1~2달 늦어 이월값이 섞이고, 나중에 다시 만들면 바뀔 수 있다.",
           ""]
@@ -1339,8 +1494,10 @@ def _render_interest(d):
     if it["missing_days"]:
         L += ["", f"- 금리 자료보다 앞선 날 {it['missing_days']}일은 0 으로 계산했다."]
     if it["carried_days"]:
-        L += ["", f"- 자료 끝을 넘어 마지막 값을 이월한 날 {it['carried_days']}일"
-              + (" (오프라인: 저장본 마지막 값 이월)" if it["mode"] != "online" else "")]
+        L += ["", f"- 금리 자료 끝({it['last_rate']})을 넘어 마지막 값을 이월한 날 {it['carried_days']}일"
+              + (f" (오프라인: {it['carried_from']} 값 이월)" if it["mode"] != "online" else "")]
+    if it["skipped"]:
+        L += ["", "- ※ 건너뛴 금리 저장본: " + "; ".join(it["skipped"])]
     if it["prev_mismatch"]:
         L += ["", f"- ※ 하루 기록 prev_cal_date 가 달력 앞 날짜와 다른 봉: {', '.join(it['prev_mismatch'])}"]
     L += ["", f"쓴 금리 날짜 ({d['period_start']} ~ {d['cut']}):", ""]
@@ -1416,8 +1573,8 @@ class _Parser(argparse.ArgumentParser):
 
 def _parser():
     p = _Parser(prog="h1_report.py", description="H1 포워드 월간·최종 보고서 (저장된 장부만 읽음, 수익률은 기록만). "
-                                                 "종료 코드: 0 정상 / 2 예상 밖·장부 손상 / 4 금리 받기 실패 / 5 잠금 / "
-                                                 "8 장부 없음 / 9 인자 오류")
+                                                 "종료 코드: 0 정상 / 2 예상 밖·장부 손상 / 4 환경 문제(디스크·권한, "
+                                                 "--fetch-rates 받기 실패) / 5 잠금 / 8 장부 없음 / 9 인자 오류")
     p.add_argument("--market", choices=("us", "kr"))
     p.add_argument("--month", default=None, help="YYYY-MM (없으면 마지막 처리 봉의 달)")
     p.add_argument("--final", action="store_true", help="판정 창(S~S+62) 최종 보고서 — 운영 기준 ①~③ 통과/실패")
@@ -1466,9 +1623,16 @@ def cli(argv=None) -> int:
         return e.code
     except KeyboardInterrupt:
         h1._say("h1_report.py: 사람이 멈춤(Ctrl-C)")
-        return 130
+        return EXIT_INTERRUPT
+    except (OSError, MemoryError) as e:
+        h1._say(f"h1_report.py: 환경 문제(ENV) {type(e).__name__}: {e} → 디스크 공간·권한을 확인한 뒤 다시(장부는 그대로)")
+        return EXIT_ENV
     except Exception as e:                      # noqa: BLE001
         h1._say(f"h1_report.py: 예상 밖 오류 {type(e).__name__}: {e}")
+        try:
+            traceback.print_exc()
+        except OSError:
+            pass
         return EXIT_ERROR
 
 

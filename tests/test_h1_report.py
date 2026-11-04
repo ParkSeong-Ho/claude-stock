@@ -8,15 +8,16 @@ urllib.request.urlopen 을 부르면 BaseException 으로 시험이 깨진다(�
 - T-F8a  test_T_F8a_*     평가액·수익률(S 이후·그달)·MDD·A1−A0·지수 B&H(S+1)·비율·매매 수·비용·실현손익·팀장 수·폴백 20%·
                            운영 기준 칸(늦은 봉·빠진 날·관문 거절·자료 멈춤 종류별)을 장부 파일에서 따로 센 값과 비교
 - T-F8b  test_T_F8b_*     금리 규칙(미국 전 거래일·빈 날 이월·S 날, 국내 m−1월·빈 달 이월), 이자 식 손계산,
-                           R2 rate_for_days 와 같은 결과(R2 식을 옮긴 기준 + R2 브랜치에서 꺼낸 함수·자료)
+                           R2 rate_for_days 와 같은 결과(R2 식을 옮긴 기준 + R2 브랜치를 tmp 에 풀어 python -I 로 부른 결과)
 - T-F8c  test_T_F8c_*     urlopen 실패 → 저장본·"오프라인" 표시 / 저장본 없음 → 그 절만 "계산 불가", 파일은 만들어짐
 - T-SHADOW test_T_SHADOW_* 보고서의 (장부, 트레이너)별 첫 발동일·발동한 날 수 == 하루 기록 값으로 다시 계산한 것
 - T-START test_T_START_*  지수 B&H: S 날 = 총액, 단위 = 총액 ÷ (S+1 시가 × (1+slip)(1+fee))
-- --final test_final_*    창이 덜 참 → 판정 안 함, 깨끗한 창 → 통과, L·늦은 봉 11·한 번에 6봉·다른 지문 → 실패,
-                           재시작 상한·마감 → "H1 포워드 실패"
-- 그 밖    파일을 고치지 않음(sha256), 같은 입력 → 같은 바이트, 지수 단위 화면 6자리, cli 종료 코드
+- --final test_final_*    창이 덜 참 → 판정 안 함, 깨끗한 창 → 통과, 경계(늦은 봉 10·한 번에 5봉)는 통과,
+                           L·늦은 봉 11·한 번에 6봉·종료 코드 6·다른 지문·빠진 날 → 창 실패,
+                           재시작 상한·마감(지남·끝날 수 없음) → "H1 포워드 실패"
+- 월간     test_month_*     지난달 보고서는 S ~ 그달 마지막 처리 봉까지만(그 뒤 일지 줄이 섞이지 않음)
+- 그 밖    파일을 고치지 않음(sha256), 같은 입력 → 같은 바이트, 지수 단위 화면 6자리, cli 종료 코드(0·2·4·5·8·9)
 """
-import ast
 import fcntl
 import io
 import json
@@ -250,6 +251,9 @@ def test_T_F8a_값_수익률_MDD_A1A0_지수BH(built, tmp_path):
     assert bh["value"] == bh_vals[-1] and bh["return"] == bh_vals[-1] / total - 1
     assert bh["mdd"] == pytest.approx(hand_mdd(bh_vals), rel=1e-12)
     assert bh["ret_period"] == pytest.approx(bh_vals[-1] / bh_vals[19] - 1, rel=1e-12)
+    full = R.index_bh_from_states("us", st, cut)                     # 재현 M6 이 쓰는 도우미: 매일 값 그대로
+    assert full["dates"] == D[:26] and full["units"] == units and full["values"] == bh_vals
+    assert R.index_bh_from_states("us", st, hs.S_A)["values"] == [total]
     # 트레이너별
     for line in d["values"]["trainers"]:
         tn = line["trainer"]
@@ -411,9 +415,13 @@ class _FakeDec:
 class _FakeCtx:
     mk = "us"
 
-    def __init__(self, recs):
+    def __init__(self, recs, used_keys):
         self.decisions = _FakeDec(recs)
         self.states = {arm: {tn: {"days": []} for tn in h1.TRAINERS} for arm in h1.ARMS}
+        # 이 창이 쓴 기록 = 하루 기록 팀장 칸의 열쇠(A0 는 앞 절반, A1 은 나머지 — 두 장부 합집합)
+        half = len(used_keys) // 2
+        for arm, ks in (("A0", used_keys[:half]), ("A1", used_keys[half:])):
+            self.states[arm]["마라토너"]["days"] = [{"date": "2026-02-03", "leader": [{"key": k} for k in ks]}]
 
     def rule(self, key, default):
         return default
@@ -421,10 +429,15 @@ class _FakeCtx:
 
 @pytest.mark.parametrize("n_fb,n,flag", [(1, 5, False), (2, 10, False), (2, 9, True), (3, 10, True)])
 def test_T_F8a_폴백_20퍼센트_경계(n_fb, n, flag):
-    recs = [{"market": "us", "date": "2026-02-03", "status": "timeout" if i < n_fb else "ok",
+    recs = [{"key": f"us|2026-02-03|마라토너|C{i}", "market": "us", "date": "2026-02-03",
+             "status": "timeout" if i < n_fb else "ok",
              "source": "fallback" if i < n_fb else "llm", "verdict": None if i < n_fb else "buy"} for i in range(n)]
-    ld = R._leader(_FakeCtx(recs), "2026-02-02", "2026-02-28")
+    # 같은 날짜 범위지만 이 창의 하루 기록이 쓰지 않은 폴백 기록(재시작 전 창 등) → 세지 않음
+    extra = [{"key": f"us|2026-02-03|스프린터|X{i}", "market": "us", "date": "2026-02-03", "status": "timeout",
+              "source": "fallback", "verdict": None} for i in range(5)]
+    ld = R._leader(_FakeCtx(recs + extra, [r["key"] for r in recs]), "2026-02-02", "2026-02-28")
     assert ld["n"] == n and ld["fallback"] == n_fb and ld["unrepresentative"] is flag   # 20% 를 '넘을 때'만
+    assert ld["unused"] == 5 and ld["missing"] == 0
 
 
 def test_T_F8a_운영_기준_칸(built, tmp_path):
@@ -462,8 +475,17 @@ def test_T_F8a_운영_기준_칸(built, tmp_path):
     assert ops["l_errors"] == 1 and ops["l_codes"] == {"L24": 1}
     text = R.render(d)
     assert "빠진 날(calendar.jsonl vs 하루 기록) | 1개 (2026-02-14)" in text
-    assert "자료 멈춤(종료 코드 4·7) | 6번 · 종류별 D2 1, D3 1, D6 1, D7 1, ENV 1, PRE 1" in text
-    assert "관문 거절(종료 코드 3) | 1번" in text and "늦은 봉(다음 장 시작 뒤 처리) | 1개 / 상한 10" in text
+    assert ops["data_by_exit"] == {4: {"n": 5, "kinds": {"D2": 1, "D3": 1, "D6": 1, "ENV": 1, "PRE": 1}},
+                                   7: {"n": 1, "kinds": {"D7": 1}}}
+    assert ("자료 멈춤(종료 코드 4·7) | 6번 — 종료 코드 4(자료 D1~D6·사전 조건 PRE·환경 ENV) 5번: D2 1, D3 1, D6 1, "
+            "ENV 1, PRE 1 / 종료 코드 7(기준 지수 늦음) 1번: D7 1 (재시작 아님)") in text
+    assert "관문 거절(종료 코드 3: 재현 미통과 코드·환경 또는 규칙 다름) | 1번" in text
+    assert "늦은 봉(다음 장 시작 뒤 처리) | 1개 / 상한 10" in text
+    assert "| 한 번에 따라잡은 최대 봉 수 | 2봉 / 상한 5 |" in text
+    assert "| 재시작 | 0번 / 상한 2 (남은 2번) |" in text
+    assert f"| 판정 창 진행 | 26/63봉 · 시작 S {S} · S+62 예정" in text
+    assert "기업 행위(장부 corp_actions 기준): 분할 1건 · 상장폐지 1건 · 정정 확정 0건" in text
+    assert "코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤): 기업 행위 상장폐지 1, 기업 행위 분할 1" in text
 
 
 def test_T_F8a_장부_다시_점검_결과와_못_보는_점검(built, tmp_path):
@@ -514,6 +536,14 @@ def test_T_START_지수_BH_는_S_날_총액_S1_시가에서_시작(tmp_path):
     row = load(h.root, "us").states["A0"]["마라토너"]["days"][1]
     units = 100_000 / (row["idle_open"] * (1 + US.slippage) * (1 + US.fee_rate))
     assert d["values"]["bh"]["units"] == units and d["values"]["bh"]["value"] == units * row["idle_close"]
+    # MDD 는 S 종가(= 시작 금액)부터 잰다: S+1 에 지수를 사며 낸 비용만큼 내려간 것도 낙폭이다(R2 처럼 첫 값부터)
+    st = load(h.root, "us").states
+    for arm in h1.ARMS:
+        _, vals = team_values(st, arm)
+        assert vals[0] == 100_000.0 and d["values"]["arms"][arm]["mdd"] == metrics.max_drawdown(vals)
+    a1 = d["values"]["arms"]["A1"]
+    assert a1["value"] < 100_000.0                       # 이 장면: S+1 에 지수를 사며 낸 비용 + 그날 움직임으로 시작 금액 아래
+    assert a1["mdd"] < 0 and a1["mdd"] == pytest.approx(a1["value"] / 100_000.0 - 1, rel=1e-12)
     res = R.index_buy_hold_same_start([500.0, 400.0, 420.0], [510.0, 410.0, 380.0], 1000.0, 0.001, 0.0005)
     u = 1000.0 / (400.0 * 1.0005 * 1.001)
     assert res["values"] == [1000.0, u * 410.0, u * 380.0] and res["units"] == u
@@ -564,6 +594,10 @@ def test_T_F8b_미국_전_거래일_규칙과_이자_손계산(built, tmp_path):
     for got, want in zip(it["table"], mar):
         assert got["rate"] == want[3] and got["interest"] == pytest.approx(want[4], rel=1e-12)
     assert it["interest"] == pytest.approx(table[-1][4], rel=1e-12)
+    res = R.a0_interest("us", st, R.load_rates("DTB3", root / "rates"))     # 재현 M7 이 쓰는 도우미
+    assert res["dates"] == [x[0] for x in table] and res["keys"] == [x[1] for x in table]
+    assert res["rate_dates"] == [x[2] for x in table] and res["rates"] == [x[3] for x in table]
+    assert res["interest"] == pytest.approx([x[4] for x in table], rel=1e-12) and res["prev_mismatch"] == []
     feb_last = [x for x in table if x[0] < "2026-03-01"][-1][4]
     assert it["interest_period"] == pytest.approx(table[-1][4] - feb_last, rel=1e-9)
     v0 = d["values"]["arms"]["A0"]["value"]
@@ -664,59 +698,96 @@ def test_T_F8b_R2_rate_for_days_와_같은_결과_옮긴_식(rule):
 R2_REF = "origin/research-r2-2026-11-04"
 R2_DIR = "reports/research-r2-2026-11-04"
 
+# R2 sim_team 을 따로 프로세스(python -I)에서 불러 값을 JSON 으로 내보내는 하네스. 시험이 tmp 에 써서 쓴다(저장소에 두지 않음).
+# 첫 인자 = 풀어 둔 R2 의 reports/research-r2-2026-11-04, 둘째 인자 = 결과 JSON 경로. float 는 hex 로(비트까지 비교).
+R2_PROBE = """
+import json, sys
+from pathlib import Path
+from types import SimpleNamespace
+R2DIR = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(R2DIR))
+import pandas as pd
+import sim_team, main, markets
+TOP = R2DIR.parents[1]
+for m in (sim_team, main, markets):                      # 지금 저장소 모듈을 잘못 읽으면 '자기와 비교'가 됨(설계 §7 R22)
+    assert Path(m.__file__).resolve().is_relative_to(TOP), m.__file__
+out = {}
+for key in ("us", "kr"):
+    idx, _frames, rates, rule, _zv = sim_team.load_frames(key)
+    cal = idx.index
+    r = sim_team.rate_for_days(cal, rates, rule)
+    mk = markets.MARKETS[key]
+    md = SimpleNamespace(idx_open=idx["Open"].to_numpy(float), idx_close=idx["Close"].to_numpy(float),
+                         idx_fee=mk.fee_rate, idx_slip=mk.slippage)       # MarketData 의 지수 칸과 같은 값
+    i0 = int(cal.searchsorted(pd.Timestamp("2026-06-01")))               # 재현 W1 창(설계 §5.2)
+    i1 = int(cal.searchsorted(pd.Timestamp("2026-11-03"), side="right")) - 1
+    bh = sim_team.index_buy_hold_fractional(md, i0 + 1, i1, sim_team.TOTALS[key])
+    out[key] = {"rule": rule, "dates": [d.date().isoformat() for d in cal], "rates": [float(x).hex() for x in r],
+                "series": [[d.date().isoformat(), float(v).hex()] for d, v in rates.items()],
+                "i0": i0, "i1": i1, "total": sim_team.TOTALS[key], "fee": mk.fee_rate, "slip": mk.slippage,
+                "opens": [float(x).hex() for x in md.idx_open], "closes": [float(x).hex() for x in md.idx_close],
+                "bh_units": float(bh["units"]).hex(), "bh_equity": [float(x).hex() for x in bh["equity"]]}
+Path(sys.argv[2]).write_text(json.dumps(out), encoding="utf-8")
+"""
 
-def _git_show(path):
+
+def _r2_tree(dst):
+    """R2 브랜치를 dst(빈 새 폴더)에 푼다(git archive → tarfile, 위험한 경로는 filter='data' 가 막음). 못 하면 None."""
+    import tarfile
     try:
-        p = subprocess.run(["git", "-C", str(ROOT), "show", f"{R2_REF}:{path}"], capture_output=True, timeout=60)
+        p = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", R2_REF], capture_output=True, timeout=120)
     except (OSError, subprocess.SubprocessError):
         return None
-    return p.stdout if p.returncode == 0 else None
+    if p.returncode != 0 or not p.stdout:
+        return None
+    dst.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(p.stdout)) as tf:
+        tf.extractall(dst, filter="data")
+    return dst / R2_DIR
 
 
-def test_T_F8b_R2_브랜치_함수_자료와_같은_결과(tmp_path):
-    """R2 브랜치에서 sim_team.py 의 함수(_asof·rate_for_days·_rate_series·_read·index_buy_hold_fractional)와 자료
-    (SPY·KS200·금리 파일)를 꺼내 전체 달력에서 비교한다(재현 M6·M7 과 같은 비교). R2 브랜치가 없으면 건너뜀."""
-    src = _git_show(f"{R2_DIR}/sim_team.py")
-    if src is None:
+def test_T_F8b_R2_sim_team_을_python_I_로_부른_결과와_같음(tmp_path):
+    """R2 브랜치를 tmp 에 풀고 sim_team 을 따로 프로세스(python -I)에서 불러, 전체 달력의 rate_for_days 와
+    재현 W1 창의 index_buy_hold_fractional(md, i0+1, i1, total) 을 받아 보고서 함수와 비트까지 비교한다(재현 M6·M7 과 같은 비교).
+    금리는 R2 data/rates 파일을 보고서의 load_rates 로 읽은 것(R2 이름 그대로의 복사본 = 재현이 만드는 첫 저장본 모양)을 쓴다.
+    R2 브랜치가 없으면 건너뜀(git fetch origin research-r2-2026-11-04 필요)."""
+    r2 = _r2_tree(tmp_path / "r2")
+    if r2 is None:
         pytest.skip("R2 브랜치를 읽을 수 없음(git fetch origin research-r2-2026-11-04 필요)")
-    tree = ast.parse(src.decode("utf-8"))
-    want = {"_asof", "rate_for_days", "_rate_series", "_read", "index_buy_hold_fractional"}
-    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in want]
-    assert {n.name for n in nodes} == want
-    ns = {"np": np, "pd": pd, "Path": Path, "math": math, "metrics": metrics, "MarketData": object}   # 표기용 이름
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), "r2_sim_team", "exec"), ns)
-    for key, idxf, ratef, sid in (("us", "us/SPY.csv.gz", "us_tbill.csv", "DTB3"),
-                                  ("kr", "kr/KS200.csv.gz", "kr_shortrate.csv", "IR3TIB01KRM156N")):
-        d = tmp_path / key
-        d.mkdir()
-        (d / Path(idxf).name).write_bytes(_git_show(f"{R2_DIR}/data/{idxf}"))
-        (d / ratef).write_bytes(_git_show(f"{R2_DIR}/data/rates/{ratef}"))
-        idx = ns["_read"](d / Path(idxf).name)
-        r2_rates = ns["_rate_series"](d / ratef)
-        mine_series = R.load_rates(sid, d)                                  # R2 이름 그대로(복사본)도 읽음
-        assert list(mine_series.to_numpy(float)) == list(r2_rates.to_numpy(float))
-        cal = idx.index
-        want = list(ns["rate_for_days"](cal, r2_rates, R.RULE[key]))
-        got = R.rate_for_days([x.date().isoformat() for x in cal], mine_series, R.RULE[key])
+    probe = tmp_path / "probe" / "r2_probe.py"
+    probe.parent.mkdir()
+    probe.write_text(R2_PROBE, encoding="utf-8")
+    out_json = tmp_path / "probe" / "out.json"
+    p = subprocess.run([sys.executable, "-I", str(probe), str(r2), str(out_json)], cwd=str(tmp_path / "probe"),
+                       capture_output=True, text=True, timeout=300)
+    assert p.returncode == 0, p.stderr[-2000:]
+    out = json.loads(out_json.read_text(encoding="utf-8"))
+    fx = lambda xs: [float.fromhex(x) for x in xs]                      # noqa: E731
+    for key, sid in (("us", "DTB3"), ("kr", "IR3TIB01KRM156N")):
+        o = out[key]
+        assert o["rule"] == R.RULE[key]
+        info = R.rates_info(sid, r2 / "data" / "rates")
+        assert info["ok"] and info["format"] == "r2" and info["file"] == R.R2_RATE_NAMES[sid]
+        series = info["series"]
+        assert [[d.date().isoformat(), float(v)] for d, v in series.items()] == \
+            [[d, float.fromhex(v)] for d, v in o["series"]]                 # 같은 파일을 같은 값으로 읽음
+        got = R.rate_for_days(o["dates"], series, o["rule"])
+        want = fx(o["rates"])
         assert len(got) > 2900 and _same(got, want)
-        # 지수 B&H (W1 창 2026-06-01 ~ 2026-11-03): R2 index_buy_hold_fractional(md, i0+1, i1, total)
-
-        class MD:
-            pass
-        md = MD()
-        md.idx_open, md.idx_close = idx["Open"].to_numpy(float), idx["Close"].to_numpy(float)
-        mk = markets.MARKETS[key]
-        md.idx_fee, md.idx_slip = mk.fee_rate, mk.slippage
-        ds = [x.date().isoformat() for x in cal]
-        i0 = next(i for i, x in enumerate(ds) if x >= "2026-06-01")
-        i1 = max(i for i, x in enumerate(ds) if x <= "2026-11-03")
-        total = h1.TOTALS[key]
-        r2 = ns["index_buy_hold_fractional"](md, i0 + 1, i1, total)
-        mine = R.index_buy_hold_same_start(list(md.idx_open[i0:i1 + 1]), list(md.idx_close[i0:i1 + 1]), total,
-                                           mk.fee_rate, mk.slippage)
-        assert mine["units"] == r2["units"] and mine["values"][0] == total
-        assert mine["values"][1:-1] == [float(x) for x in r2["equity"][:-1]]
-        assert mine["values"][-1] == r2["units"] * md.idx_close[i1]           # R2 마지막 날은 매도 비용을 뺀 값(M6)
+        # 지수 B&H (W1): 단위 비트까지 같음, 매일 값 같음, 마지막 날은 R2 가 매도 비용을 뺀 값(M6) → 단위 × 종가로
+        i0, i1 = o["i0"], o["i1"]
+        opens, closes = fx(o["opens"]), fx(o["closes"])
+        mine = R.index_buy_hold_same_start(opens[i0:i1 + 1], closes[i0:i1 + 1], o["total"], o["fee"], o["slip"])
+        eq = fx(o["bh_equity"])
+        assert mine["units"] == float.fromhex(o["bh_units"]) and mine["values"][0] == o["total"]
+        assert len(mine["values"]) == len(eq) + 1 and mine["values"][1:-1] == eq[:-1]
+        assert mine["values"][-1] == mine["units"] * closes[i1] and eq[-1] < mine["values"][-1]
+        # 보고서 S 날 금리(prev_day: 저장 달력의 S 전 거래일 이하 마지막 값) == R2 전체 달력의 i0 번째 값
+        if o["rule"] == "prev_day":
+            cal = [o["dates"][i0 - 1]] + o["dates"][i0:i1 + 1]
+            assert _same(R.rate_for_days(cal, series, "prev_day")[1:], want[i0:i1 + 1])
+        else:
+            assert _same(R.rate_for_days(o["dates"][i0:i1 + 1], series, "prev_month"), want[i0:i1 + 1])
 
 
 def test_T_F8b_금리_파일_두_형식과_빈값():
@@ -793,6 +864,25 @@ def test_T_F8c_offline_이면_받지_않음_받으면_받은_시각(built, tmp_p
     assert R.fetch_rates("DTB3", root / "rates") is None
 
 
+def test_T_F8c_깨진_저장본은_건너뛰고_R2_이름_복사본을_씀(built, tmp_path):
+    d = tmp_path / "rates"
+    d.mkdir()
+    (d / "DTB3.csv").write_text("<html>깨짐</html>\n", encoding="utf-8")
+    (d / "us_tbill.csv").write_text('date,rate_pct,source\n2026-01-02,3.6,"s"\n', encoding="utf-8")
+    info = R.rates_info("DTB3", d)
+    assert info["ok"] and info["file"] == "us_tbill.csv" and info["skipped"][0].startswith("DTB3.csv: 깨짐")
+    (d / "us_tbill.csv").unlink()
+    info = R.rates_info("DTB3", d)
+    assert not info["ok"] and info["series"] is None and "쓸 수 있는 금리 저장본이 없음" in info["why"]
+    assert R.load_rates("DTB3", d) is None
+    root = copy_of(built["us"], tmp_path)
+    (root / "rates").mkdir()
+    (root / "rates" / "DTB3.csv").write_text("<html>깨짐</html>\n", encoding="utf-8")
+    text = R.build("us", root=root, online=False)
+    assert "금리 자료 없음 → 계산 불가 (쓸 수 있는 금리 저장본이 없음 — DTB3.csv: 깨짐" in text
+    assert "## 10. 장부 다시 점검" in text
+
+
 # ============================ --final ============================
 
 def _verdict(root, **kw):
@@ -822,6 +912,9 @@ def test_final_깨끗한_창은_통과(built, tmp_path):
     text = R.render(d)
     assert "**운영 기준 통과**" in text and "## 연장 기록 (S+62 뒤" in text
     assert "| ②-1 장부 논리 오류 0건 | 통과 |" in text and "| ②-3 재현을 통과한 코드·환경만 | 통과 |" in text
+    assert "| ① 판정 창 63봉(S ~ S+62)을 다 처리함 | 통과 | 처리 63/63봉 |" in text
+    assert "| ③ 수익률은 기록만 | 판정에 안 씀 |" in text
+    assert text.index("## 판정") < text.index("## 2. 운영 기준 (판정 창 안: S") < text.index("## 3. 값")
     # 값은 판정 창(S~S+62)까지만
     st = load(root, "us").states
     _, vals = team_values(st, "A1", h.D[62])
@@ -892,6 +985,30 @@ def test_final_연장_구간_일지는_판정에_안_씀(built, tmp_path):
     assert v["result"] == "pass" and d["extension"]["l_errors"] == 1
 
 
+def test_final_S62_저장_뒤_다음_봉에서_멈춘_실행은_연장_몫(built, tmp_path):
+    """한 실행이 S+62 를 저장한 뒤 다음 봉(S+63)에서 자료 문제로 멈추면 일지 끝 줄은 bars=[S+62]·종료 코드 4 하나다.
+    그 멈춤은 S+63 의 일이라 판정 창(최종)에서는 세지 않는다. 월간은 S+63 이 든 달(이 세계에서 2026-04-30)부터 센다."""
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    s62 = h.D[62]
+    lines = (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    out = []
+    for ln in lines:
+        r = json.loads(ln)
+        if r.get("event") == "end" and r.get("bars") == [s62]:
+            r.update(exit_code=4, problems=[{"level": "D", "code": "D3", "date": h.D[63]}])
+        out.append(json.dumps(r, ensure_ascii=False))
+    (root / "runs.jsonl").write_text("\n".join(out) + "\n", encoding="utf-8")
+    d, v = _verdict(root)
+    assert d["end_at"] is not None and v["result"] == "pass" and d["ops"]["data_stops"] == 0
+    assert s62 == "2026-04-29" and h.D[63] == "2026-04-30"
+    assert d["ops"]["n_bars"] == 63 and d["ops"]["batch_max"] == 1
+    # 3월(마지막 봉 저장 뒤 시각의 일)에는 안 들어가고, 4월·5월(S ~ 그달 누적)에는 들어감
+    assert R.collect("us", "2026-03", root=root, online=False)["ops"]["data_stops"] == 0
+    assert R.collect("us", "2026-04", root=root, online=False)["ops"]["data_kinds"] == {"D3": 1}
+    assert R.collect("us", "2026-05", root=root, online=False)["ops"]["data_kinds"] == {"D3": 1}
+
+
 def test_final_재시작_상한을_넘으면_H1_포워드_실패(built, tmp_path):
     h = built["fin"]
     root = copy_of(h, tmp_path)
@@ -935,11 +1052,115 @@ def test_final_마감을_넘으면_H1_포워드_실패(built, tmp_path):
     assert v["result"] == "fail_h1" and not v["complete"] and "깨끗한 판정 창이 끝나지 않음" in v["why"]
 
 
+@pytest.mark.parametrize("case", ["늦은봉10", "한번에5봉"])
+def test_final_경계값은_통과(built, tmp_path, case):
+    """늦은 봉 '10봉 이하'·한 번에 '5봉 이하' — 딱 상한이면 통과(11·6 은 위 시험에서 실패)."""
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    D, S = h.D, hs.S_A
+    if case == "늦은봉10":
+        def late(states):
+            for arm in h1.ARMS:
+                for tn in h1.TRAINERS:
+                    for r in states[arm][tn]["days"]:
+                        if D[1] <= r["date"] <= D[10]:
+                            r["late"] = True
+        recommit(root, "us", late)
+    else:
+        jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S,
+                                    "at": _end_at(root, D[30]), "exit_code": 0, "bars": D[20:25],
+                                    "code_hash": h1.code_hash()[0], "env": h1.env_info()})
+    d, v = _verdict(root)
+    assert v["result"] == "pass", v
+    assert (len(d["ops"]["late"]), d["ops"]["batch_max"]) == ((10, 1) if case == "늦은봉10" else (0, 5))
+
+
+def test_final_마감까지_끝날_수_없으면_H1_포워드_실패(built, tmp_path):
+    """마감 전이라도 '휴장일 없이 매일 처리해도 S+62 가 마감 뒤'면 확실한 실패(거래일은 평일보다 일찍 올 수 없음)."""
+    h = built["us"]
+    root = copy_of(h, tmp_path)
+    h1.record_replay_pass({"code_hash": h1.code_hash()[0], "env": h1.env_info()}, root)   # 이 창을 깨끗하게
+    _, v = _verdict(root)
+    assert v["result"] == "not_finished" and not v["violated"]
+    edge = R._add_weekdays(h.D[25], 37)                               # 남은 37봉 → S+62 는 빨라야 이 날
+    recommit(root, "us", fn_meta=lambda m: m["rules"].update(deadline=edge))
+    _, v = _verdict(root)
+    assert v["result"] == "not_finished" and v["this_min_end"] == edge
+    before = (pd.Timestamp(edge) - pd.Timedelta(days=1)).date().isoformat()
+    recommit(root, "us", fn_meta=lambda m: m["rules"].update(deadline=before))
+    d, v = _verdict(root)
+    assert v["result"] == "fail_h1" and f"빨라야 {edge}" in v["why"]
+    assert "**H1 포워드 실패(운영 기준 미충족)**" in R.render(d)
+    # 다 찬 창이 기준을 어겼고 재시작이 남아도, 새 창(62봉 뒤 S+62)이 마감 전에 끝날 수 없으면 실패
+    hf = built["fin"]
+    rf = copy_of(hf, tmp_path, "fin")
+    jline(rf / "errors.jsonl", {"market": "us", "start_date": hs.S_A, "at": _end_at(rf, hf.D[10]), "date": hf.D[11],
+                                "problems": [{"level": "L", "code": "L9"}]})
+    nxt = R._add_weekdays(hf.D[65], 62)
+    recommit(rf, "us", fn_meta=lambda m: m["rules"].update(deadline=nxt))
+    _, v = _verdict(rf)
+    assert v["result"] == "fail_window" and v["next_min_end"] == nxt
+    recommit(rf, "us", fn_meta=lambda m: m["rules"].update(deadline=(pd.Timestamp(nxt) - pd.Timedelta(days=1))
+                                                          .date().isoformat()))
+    _, v = _verdict(rf)
+    assert v["result"] == "fail_h1" and "재시작해도 새 창의 S+62 가 빨라야" in v["why"]
+
+
+def test_final_재시작_상한_밖의_창은_통과해도_실패(built, tmp_path):
+    root = copy_of(built["fin"], tmp_path)
+    for i in (1, 2, 3):
+        jline(root / "restarts.jsonl", {"status": "done", "restart_id": f"r{i}", "market": "us",
+                                        "at": f"2025-0{i}-01T00:00:00+09:00", "old_start": f"2025-0{i}-01",
+                                        "old_last": f"2025-0{i}-20", "reason": f"시험 {i}"})
+    _, v = _verdict(root)
+    assert v["c1"]["ok"] and v["c2"]["ok"] and v["c3"]["ok"]
+    assert v["result"] == "fail_h1" and "상한 2번을 넘은 창" in v["why"]
+
+
 def test_final_과_month_는_같이_못_씀(built, tmp_path):
     root = copy_of(built["us"], tmp_path)
     with pytest.raises(R.ReportError) as e:
         R.collect("us", "2026-03", final=True, root=root, online=False)
     assert e.value.code == 9
+
+
+# ============================ 월간: 지난달은 S ~ 그달 마지막 봉까지 ============================
+
+def test_month_지난달_보고서는_그달_마지막_봉까지만(built, tmp_path):
+    h = built["us"]
+    root = copy_of(h, tmp_path)
+    D, S = h.D, hs.S_A
+    feb = R.collect("us", "2026-02", root=root, online=False)
+    ops = feb["ops"]
+    assert feb["cut"] == D[19] and feb["period_start"] == S and ops["last"] == D[19]
+    assert ops["n_bars"] == 20 and ops["bars_left"] == 43 and ops["late"] == [D[11]] and ops["batch_max"] == 2
+    assert ops["gate_refused"] == 1 and ops["data_kinds"] == {"D2": 1, "D3": 1, "D6": 1}
+    assert ops["other_fp"] == D[:20]
+    for arm in h1.ARMS:                                                 # S 가 있는 달: 그달 수익률 = S 이후 수익률
+        a = feb["values"]["arms"][arm]
+        assert a["ret_period"] == pytest.approx(a["ret"], rel=1e-12, abs=1e-15)
+    before = R.build("us", "2026-02", root=root, online=False)
+    assert "## 2. 운영 기준 (판정 아님 — 이 창의 S 2026-02-02 ~ 2026-02-27 상태)" in before
+    # 3월(2월 마지막 봉을 저장한 뒤)에 생긴 일 → 2월 보고서는 바이트까지 그대로, 이번 달(3월) 보고서에는 들어감
+    at = "2026-03-05T07:10:00+09:00"
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S, "at": at,
+                                "exit_code": 4, "bars": [], "problems": [{"level": "D", "code": "ENV"}]})
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": "unknown", "at": at,
+                                "exit_code": 6, "bars": []})
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S, "at": at,
+                                "exit_code": 3, "bars": []})
+    jline(root / "errors.jsonl", {"market": "us", "start_date": S, "at": at, "date": D[23],
+                                  "problems": [{"level": "L", "code": "L7"}]})
+    assert R.build("us", "2026-02", root=root, online=False) == before
+    mar = R.collect("us", "2026-03", root=root, online=False)["ops"]
+    assert mar["n_bars"] == 26 and mar["data_kinds"]["ENV"] == 1 and mar["backlog_fail"] == 1
+    assert mar["l_errors"] == 1 and mar["gate_refused"] == 2
+    # 2월 마지막 봉을 저장하기 전의 봉 없는 멈춤은 2월 보고서에 들어감
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S,
+                                "at": "2026-02-25T07:10:00+09:00", "exit_code": 4, "bars": [],
+                                "problems": [{"level": "D", "code": "D1"}]})
+    assert R.collect("us", "2026-02", root=root, online=False)["ops"]["data_kinds"] == {"D1": 1, "D2": 1, "D3": 1,
+                                                                                         "D6": 1}
 
 
 # ============================ 파일을 고치지 않음 · 같은 출력 · 단위 6자리 ============================
@@ -955,6 +1176,17 @@ def test_보고서는_장부와_일지를_고치지_않음(built, tmp_path, monk
         R.write(mk, root=root, online=True)
         monkeypatch.setattr(urllib.request, "urlopen", _no_net)
         assert files_sha(root) == before, key
+
+
+def test_보고서는_반쯤_쓴_판정_기록_줄도_자르지_않음(built, tmp_path):
+    """판정 기록 마지막 줄이 반쯤 쓰였어도(run 이 쓰다 꺼짐) 보고서는 읽기 전용 — 자르지 않고 알리기만(다음 run 이 자름)."""
+    root = copy_of(built["us"], tmp_path)
+    with open(root / "analyst_cache.jsonl", "ab") as f:
+        f.write(b'{"key": "us|2026-03-10|')
+    before = files_sha(root)
+    text = R.write("us", root=root, online=False).read_text(encoding="utf-8")
+    assert files_sha(root) == before
+    assert "판정 기록 마지막 줄이 반쯤 쓰여 있음(" in text
 
 
 def test_같은_입력이면_같은_바이트(built, tmp_path):
@@ -1027,6 +1259,29 @@ def test_cli_종료_코드(built, tmp_path, monkeypatch, capsys):
     p = root / "us" / "A1" / "team_마라토너.json"
     p.write_text(p.read_text(encoding="utf-8").replace('"cash"', '"cash" ', 1), encoding="utf-8")
     assert R.cli(["--market", "us", "--offline"]) == 2
+
+
+def test_cli_환경_문제는_4_코드_버그는_2(built, tmp_path, monkeypatch, capsys):
+    import errno
+    root = copy_of(built["us"], tmp_path)
+    monkeypatch.setattr(h1, "H1_DIR", root)
+    before = files_sha(root)
+
+    def disk_full(path, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    with monkeypatch.context() as mp:
+        mp.setattr(h1, "_write_atomic", disk_full)
+        assert R.cli(["--market", "us", "--offline"]) == 4
+    assert "환경 문제(ENV) OSError" in capsys.readouterr().out
+    with monkeypatch.context() as mp:
+        mp.setattr(R, "_shadow", lambda *a: (_ for _ in ()).throw(MemoryError()))
+        assert R.cli(["--market", "us", "--offline"]) == 4
+    with monkeypatch.context() as mp:
+        mp.setattr(R, "_shadow", lambda *a: 1 / 0)
+        assert R.cli(["--market", "us", "--offline"]) == 2
+    assert "예상 밖 오류 ZeroDivisionError" in capsys.readouterr().out
+    assert not (root / "reports" / "us-2026-03.md").exists() and files_sha(root) == before
+    assert R.cli(["--market", "us", "--offline"]) == 0                     # 고친 뒤엔 정상
 
 
 def test_cli_잠금_30분_넘으면_5(built, tmp_path, monkeypatch):
