@@ -187,9 +187,9 @@ def us_verdicts(runs: dict) -> dict:
 
 
 def holdout_plan(us: dict) -> dict:
-    """7.5: 미국에서 통과(채택 후보)한 것만 국내로. 생존편향 확인(us_pit)은 H1 이 채택 후보일 때만(채택 전 확인)."""
+    """7.5: 미국에서 통과(채택 후보)한 것만 국내로. 생존편향 확인(us_pit H1)은 H1 통과 여부와 상관없이 항상(B10)."""
     passed = [h for h in ("H1", "H2", "H3", "H4") if us[h]["adopt"]]
-    return {"kr": passed, "us_pit_h1": "H1" in passed}
+    return {"kr": passed, "us_pit_h1": True}
 
 
 # ---------------------------------------------------------------- 7.5 확인 단계

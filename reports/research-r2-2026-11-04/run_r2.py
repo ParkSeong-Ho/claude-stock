@@ -8,8 +8,8 @@ R2 단계 2 실행 스크립트 — 사전 등록 §7 전부 + 7.5 확인 단계
      A1 은 무작위 시점 대조 1,000번(H1-4). §7.0 의 "$10,000 결과는 참고로만" → A0·A1·A1T·A2 를 $10,000 로도 돌린다.
   2. verdict.us_verdicts() 로 H1~H4 판정 (판정식은 verdict.py, 결과 보기 전에 커밋한 것).
   3. 7.5-1: 미국에서 통과(채택 후보)한 가설만 국내(KR_UNIVERSE, ₩1억)에서 같은 규칙으로 → verdict.kr_direction().
-  4. 7.5-2: H1 이 채택 후보이면 us_pit(2014말 시총 상위 20)로 H1 을 다시 → verdict.pit_h1().
-  돌린 것은 전부 표와 로그에 남긴다(통과 못 한 가설의 확인 단계는 돌리지 않는다 — 7.6 시험 횟수).
+  4. 7.5-2: us_pit(2014말 시총 상위 20)로 H1 을 다시 — H1 통과 여부와 상관없이 항상(STAGE0 B10) → verdict.pit_h1().
+  돌린 것은 전부 표와 로그에 남긴다(통과 못 한 가설의 국내 확인 단계는 돌리지 않는다 — 7.6 시험 횟수).
   매 실행마다 check_team.accounting(장부·체결가·비용·이자 규칙) 점검을 돌려 문제가 있으면 멈춘다.
 
 출력 (--out, 기본 reports/research-r2-2026-11-04/results/)
@@ -253,7 +253,7 @@ def main():
             kr_dir[h] = V.kr_direction(h, kin)
         if not dry:
             log("   국내 방향: " + ", ".join(f"{h} {'같음' if c['pass'] else '다름'}" for h, c in kr_dir.items()))
-    log(f"4) 7.5-2 us_pit H1: {'돌림' if plan['us_pit_h1'] else '안 돌림(H1 미통과)'}")
+    log(f"4) 7.5-2 us_pit H1: {'돌림(B10: 항상)' if plan['us_pit_h1'] else '안 돌림'}")
     if plan["us_pit_h1"]:
         pit_runs = run_matrix("us_pit", HOLDOUT_ARMS["H1"], periods, log)
         groups[("us_pit", "100k")] = pit_runs

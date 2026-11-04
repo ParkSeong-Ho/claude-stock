@@ -1228,8 +1228,8 @@ def c_verdict():
     # 7.5: 계획과 국내 방향
     us = {"H1": {"adopt": True}, "H2": {"adopt": False}, "H3": {"adopt": False}, "H4": {"adopt": True}}
     plan = V.holdout_plan(us)
-    check("verdict 7.5 계획: 미국 통과 가설만 국내(H1·H4), us_pit 은 H1 통과일 때만", plan == {"kr": ["H1", "H4"], "us_pit_h1": True}
-          and V.holdout_plan({**us, "H1": {"adopt": False}})["us_pit_h1"] is False)
+    check("verdict 7.5 계획: 미국 통과 가설만 국내(H1·H4), us_pit H1 은 항상(B10)", plan == {"kr": ["H1", "H4"], "us_pit_h1": True}
+          and V.holdout_plan({**us, "H1": {"adopt": False}}) == {"kr": ["H4"], "us_pit_h1": True})
     kr = {("A1", F): fake(0.5, -0.2), ("A0", F): fake(0.6, -0.2), ("A1+H4", F): fake(0.55, -0.2)}
     check("verdict 7.5-1 방향: 국내 A1 < A0 → H1 방향 다름(FAIL), H4 > H1 → 같음(PASS)",
           not V.kr_direction("H1", kr)["pass"] and V.kr_direction("H4", kr)["pass"])
