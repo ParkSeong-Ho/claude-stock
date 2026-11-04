@@ -578,7 +578,7 @@ def cli(argv=None) -> int     # python h1.py start|run|restart|corp-action|amend
 
 **`Leader.__call__`**
 - 후보마다 열쇠를 만든다. 기록에 없는 후보만 모은다.
-  - `mode="llm"` 이면 `analyst.analyze_logged(trainer, 없는 후보)` 를 한 번 부른다.
+  - `mode="llm"` 이면 `analyst.analyze_logged(trainer, 없는 후보, now=시계, cli_version=이번 실행 값)` 를 한 번 부른다. `cli_version` 은 실행마다 한 번 `analyst.claude_cli_version()` 으로 얻어 둔다.
   - 아니면 부르지 않는다(`status="late_no_llm"`·`"replay_no_llm"`).
 - 없는 후보 하나하나에 기록을 만들어 **곧바로 `append`(fsync)** 한다. LLM 이 답에서 빠뜨린 종목은 `status="missing_in_reply"` 폴백이다.
 - 돌려주는 값: 기록에서 `source="llm"` 이고 판정이 있는 종목만 `{code: {"code", "verdict"(정리된 값), "conviction"(숫자 또는 None), "note"}}`.
@@ -608,12 +608,16 @@ def sell(self, code, price, shares, date=None, tax_rate=None) -> bool
 
 # analyst.py   (_build_prompt·analyze·apply 는 그대로)
 def normalize_verdict(v) -> str | None      # " VETO" → "veto", "Hold" → "hold", 그 밖은 None
-def analyze_logged(trainer, candidates, timeout=TIMEOUT) -> tuple[dict | None, dict]
+def claude_cli_version() -> str | None      # "claude --version" 첫 줄, 실패하면 None (H1 실행마다 한 번)
+def analyze_logged(trainer, candidates, timeout=TIMEOUT, now=None, cli_version=None) -> tuple[dict | None, dict]
     # 같은 프롬프트(_build_prompt), 같은 호출(claude -p). 반환 meta =
-    # {"status": "ok"|"no_claude"|"timeout"|"os_error"|"nonzero_exit"|"bad_json"|"empty",
+    # now: 시간대 있는 datetime 을 돌려주는 함수(시험·재현용, 기본 지금 시각). cli_version: 받은 값을 meta 에 그대로(이 함수는 --version 을 부르지 않음)
+    # {"status": "ok"|"no_claude"|"timeout"|"os_error"|"nonzero_exit"|"decode_error"|"bad_json"|"empty",
     #  "asked_at": ISO 시각(시간대), "elapsed_s": float, "returncode": int|None,
     #  "model": os.environ.get("ANTHROPIC_MODEL") 또는 None(launchd 에서는 보통 None = "모름"),
-    #  "cli_version": "claude --version" 첫 줄 또는 None}
+    #  "cli_version": 넘겨받은 값}
+    # analyze() 와 결과가 다른 곳(2a 검토 A-6): 답의 "analysis" 가 목록이 아니면 analyze() 는 TypeError 로 멈추지만
+    # analyze_logged 는 bad_json 폴백, 출력 디코드 실패는 decode_error 폴백. 운영 analyze() 는 그대로 둔다(개선 후보로 따로).
 
 # screener.py
 def scan_frames(frames: dict[str, "pd.DataFrame"], order: list[str], asof: str | None = None,
@@ -709,7 +713,7 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
  "note": "실적 발표 전 변동성 주의",   // 500자까지
  "source": "llm",             // "llm" | "fallback"
  "status": "ok",              // ok | missing_in_reply | no_claude | timeout | os_error | nonzero_exit
-                              // | bad_json | empty | late_no_llm | replay_no_llm
+                              // | decode_error | bad_json | empty | late_no_llm | replay_no_llm
  "model": null, "cli_version": "2.x.y (Claude Code)",
  "asked_at": "2026-11-10T07:11:22+09:00", "elapsed_s": 41.2, "next_open": "2026-11-10T09:30:00-05:00",
  "call_id": "us|2026-11-09|마라토너|1", "batch": ["AAPL", "MSFT"],
@@ -1029,7 +1033,7 @@ W3 장면
 | T-F6b | 〃 | `STATE_DIR` 을 tmp 로, 그 안에 대기 주문 있는 H1 장부만 → `load_states` 빈 결과, `place(FakeBroker)` 주문 0건 |
 | T-F6c | 〃 | `order_runner.py` 소스에 `h1` 없음, `h1*.py` 가 `order_runner`·`broker` 를 import 하지 않음 |
 | T-ENTRY | 진입점(I8) | team.py 에 `--h1` 처리 코드가 없음, `team.run`·`run_trainer(h1=None)` 경로에서 `h1` 이 `sys.modules` 에 없음, `h1.py run` 은 장부 없으면 8 |
-| T-GOLD | `h1=None` 바이트 같음 | **골든**: 코드를 바꾸기 전 커밋(847ad13)으로 만든 결과(상태 JSON·화면 출력)를 `tests/golden/` 에 두고, 바꾼 코드 결과가 바이트까지 같음.<br>장면(여러 날): 미국·국내 각각 ① 후보·팀장 buy/hold/veto/낮은 확신도/문자열 확신도 ② 다음날 체결 ③ 매도 ④ 같은 봉 다시(멱등) ⑤ 후보 없는 날(저장 안 함) ⑥ 서킷 발동 ⑦ 국내 정지 대기·보유 판단 쉼·오래된 후보 제외 ⑧ KS200 22:30 전후. `scan()` 결과도 골든 |
+| T-GOLD | `h1=None` 바이트 같음 | **골든**: 코드를 바꾸기 전 커밋(847ad13)으로 만든 결과(상태 JSON·화면 출력)를 `tests/golden/` 에 두고, 바꾼 코드 결과가 바이트까지 같음.<br>장면(여러 날): 미국·국내 각각 ① 후보·팀장 buy/hold/veto/낮은 확신도/문자열 확신도 ② 다음날 체결 ③ 매도 ④ 같은 봉 다시(멱등) ⑤ 후보 없는 날(저장 안 함) ⑥ 서킷 발동 ⑦ 국내 정지 대기·보유 판단 쉼·오래된 후보 제외 ⑧ KS200 22:30 전후 ⑨ team ①② 의 드문 가지: 보유·대기 종목 시세 받기 실패, 시가 없는 행, 버려지는 주문(이미 보유 매수·보유 없는 매도), 대기 주문 있는 보유 종목, 벤치마크 받기 실패(2a 검토 A-2). `scan()` 결과도 골든.<br>골든 파일은 `.gitignore` 의 `state/` 예외(`!tests/golden/**/state/`)로 커밋하고, 시험이 파일 수를 단언한다(2a 검토 A-1). 골든은 `requirements-h1.txt` 의 라이브러리 버전 기준 |
 | T-F7 | 같은 스크리너·멱등 | 봉마다 `scan_frames` 1번, 두 장부가 같은 후보. 같은 봉 두 번 → 장부 6개·meta·HEAD·backup·판정 기록 sha256 그대로(`runs.jsonl`·`calendar.jsonl` 은 줄 추가) |
 | T-SCR | 스크리너 | `scan_frames` asof 로 자른 결과 == 미리 자른 시세 결과 |
 | T-FETCH | 시세 받기 | `h1.fetch` 의 확정 시세 == 같은 가짜 fdr 로 `main.load_prices`, 국내 정지 날짜 = 원본 Volume=0 날짜 |
@@ -1059,7 +1063,7 @@ W3 장면
 | T-UNIV | 종목군(Q7) | 미국 S 날 `screener.universe(40)` 목록·순서 저장, 다음날 S&P 목록이 바뀌어도 같은 목록, 재시작해도 첫 목록, 파일을 고치면 L22 |
 | T-ORDERS | 주문 기록(I9) | 매도 신호·후보·보류·이미 보유·보유 없음 주문이 `orders` 에 생기고 상태가 맞게 바뀜 |
 | T-PW | 지갑 | `sell(tax_rate=None)` 은 지금과 같음(기존 시험 그대로 통과), `tax_rate=0.0` 은 세금 0 |
-| T-AN | 팀장 래퍼 | `analyze_logged` 상태별(which·subprocess 바꿔 끼움), 프롬프트 문자열 == `_build_prompt`, `analyze` 결과 == `analyze_logged(...)[0]` |
+| T-AN | 팀장 래퍼 | `analyze_logged` 상태별(which·subprocess 바꿔 끼움), 프롬프트 문자열 == `_build_prompt`, `analyze` 결과 == `analyze_logged(...)[0]`(정상 답에서. "analysis" 가 목록이 아닌 답·디코드 실패는 위 차이), `asked_at`·`elapsed_s` 의 뜻, `analyze_logged` 안에서 `--version` 을 안 부름 |
 | T-RSI | 지표 길이 | 2024-06-01 부터 계산한 RSI 와 처음부터 계산한 RSI 의 2026-06 이후 차 < 1e-9 |
 
 ---
