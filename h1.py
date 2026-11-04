@@ -2879,14 +2879,15 @@ def _at_or_after(a, b) -> bool:
 
 
 def _in_window(rec, S, created_at=None) -> bool:
-    """일지 줄이 판정 창 S 의 것인가(2b-2 검토 C-3). start_date == S 이거나, S 를 몰라 "unknown"(또는 옛 None)으로
-    적힌 줄은 그 창이 만들어진 뒤(meta.created_at 이후, 모르면 늘)의 것이면 지금 창으로 센다(보수적으로)."""
+    """일지 줄이 판정 창 S 의 것인가(2b-2 검토 C-3, 2c 검토 R-1).
+    start_date 가 S 이거나 S 를 몰라 "unknown"(또는 옛 None)으로 적힌 줄 중, 그 창이 만들어진 뒤(meta.created_at 이후,
+    created_at 을 모르면 늘)의 줄만 지금 창으로 센다. start_date == S 여도 창이 만들어지기 전 줄(S 를 정한 뒤 실패한 start,
+    같은 S 로 다시 시작하기 전 옛 창의 줄)은 어느 창에도 넣지 않는다. 시각을 못 읽으면 보수적으로 지금 창에 넣는다.
+    status·요약(_window_counts)·보고서(h1_report)가 모두 이 함수를 쓴다."""
     sd = rec.get("start_date")
-    if sd == S:
-        return True
-    if sd in (None, "unknown"):
-        return created_at is None or _at_or_after(rec.get("at"), created_at)
-    return False
+    if sd != S and sd not in (None, "unknown"):
+        return False
+    return created_at is None or _at_or_after(rec.get("at"), created_at)
 
 
 def _window_counts(root, mk, S, created_at=None) -> tuple:
@@ -3155,6 +3156,63 @@ def _check_past_fingerprints(states, allowed):
                                    "h1.record_replay_pass 로만 추가). 장부 논리 오류 아님")
 
 
+def _has_l(rec) -> bool:
+    return any(isinstance(p, dict) and p.get("level") == "L" for p in rec.get("problems") or [])
+
+
+def _pending_l_records(root, mk, S, created_at, bars) -> dict:
+    """사전 등록 ④ 후보(2c 검토 R-4): 같은 창 errors.jsonl 의 L 기록 중 봉 날짜가 bars 에 있고 아직 거짓 양성 판정
+    (changes.jsonl kind "false_positive")이 없는 것 → {봉: [기록…]}."""
+    done = {(r.get("error_run_id"), r.get("bar")) for r in _read_log(root, "changes.jsonl")
+            if r.get("kind") == "false_positive" and r.get("market") == mk}
+    out = {}
+    for r in _read_log(root, "errors.jsonl"):
+        if r.get("market") == mk and r.get("date") in bars and _in_window(r, S, created_at) and _has_l(r) \
+                and (r.get("run_id"), r.get("date")) not in done:
+            out.setdefault(r["date"], []).append(r)
+    return out
+
+
+def _false_positive_check(root, mk, t, recs, res, ch, log) -> int:
+    """사전 등록 ④ 점검 함수 거짓 양성 판단(설계 §2.2 ④, 2c 검토 R-4). 봉 t 를 다시 처리해 ok 인 결과 res 를 커밋하기 전에 부른다.
+    recs = 같은 창 errors.jsonl 의 봉 t L 기록(그때 '저장하려던 장부 6개의 내용 지문' F, 그때 code_hash H_old).
+    (나) 이번 결과가 ok 이고 내용 지문 == F
+    (가) replay_pass.json 에 H_old 의 통과 줄과 지금 code_hash(ch)의 통과 줄이 모두 있고 둘의 ledger_fingerprints 가 같음
+         (= 점검만 바뀌고 장부 계산은 안 바뀜)
+    둘 다 맞으면 커밋 전에 changes.jsonl 에 {"kind": "false_positive", …} 한 줄(보고서 ②-1 이 그 L 오류를 빼고 셈).
+    하나라도 안 맞으면 기록하지 않고 알리기만 한다 — 그 L 오류는 그대로(재시작 대상). 처리·커밋은 어느 쪽이든 평소대로.
+    그동안 처리하지 못한 봉은 늦은 봉으로 이미 센다(하루 기록 late). 돌려줌: 기록한 줄 수."""
+    try:
+        entries = replay_pass_entries(root)
+    except (H1Refused, H1LogicError):
+        entries = []
+    news = [e.get("ledger_fingerprints") for e in entries if e.get("code_hash") == ch]
+    n = 0
+    for rec in recs:
+        F, h_old, rid = rec.get("fingerprint"), rec.get("code_hash"), rec.get("run_id")
+        cond_b = res.ok and F is not None and res.fingerprint == F
+        olds = [e.get("ledger_fingerprints") for e in entries if e.get("code_hash") == h_old]
+        cond_a = any(isinstance(o, dict) and o and o == nw for o in olds for nw in news)
+        if cond_a and cond_b:
+            _append_log(root, "changes.jsonl", {
+                "kind": "false_positive", "market": mk, "bar": t, "error_run_id": rid, "fingerprint": F,
+                "code_hash_old": h_old, "code_hash_new": ch, "replay_fingerprints_equal": True,
+                "at": _iso(log.now()), "run_id": log.run_id})
+            log.extra.setdefault("false_positive", []).append({"bar": t, "error_run_id": rid})
+            log.note(f"사전 등록 ④ 점검 함수 거짓 양성: 봉 {t} 의 L 기록(실행 {rid})은 (가)(나) 가 모두 맞아 재시작하지 "
+                     "않아요 → changes.jsonl 에 false_positive 로 적고 커밋")
+            n += 1
+            continue
+        why = []
+        if not cond_b:
+            why.append("(나) 그때 저장하려던 내용 지문이 없음(예외로 끝난 봉)" if F is None
+                       else "(나) 다시 처리한 장부 내용 지문이 그때 저장하려던 지문과 다름")
+        if not cond_a:
+            why.append("(가) replay_pass.json 에 옛 code_hash·지금 code_hash 의 통과 줄이 다 있고 재현 내용 지문이 같아야 함")
+        log.note(f"④ 조건 안 맞음 → 그 L 오류는 그대로(재시작 대상): 봉 {t} 실행 {rid} — {'; '.join(why)}")
+    return n
+
+
 def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int:
     allowed = allowed_fingerprints(root, gate, ch, env)                               # 3 관문
     loaded = load_market(mk, root, repair=True)                                       # 4 장부 읽기
@@ -3233,6 +3291,7 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
                                       f"(사전 등록 ②-2). python h1.py restart --market {mk} → start")
     _say(f"  처리할 봉 {len(todo)}개: {', '.join(todo)}")
 
+    fp_cands = _pending_l_records(root, mk, S, meta.get("created_at"), set(todo))     # ④ 거짓 양성 후보(2c R-4)
     cli_version = _cli_version_once(leader_mode)                                       # 10 봉마다
     frame_codes = list(dict.fromkeys(list(codes) + sorted(need)))
     frames = {c: (fetched[c].df if fetched.get(c) is not None else None) for c in frame_codes}
@@ -3249,6 +3308,8 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
         _print_bar(res)
         if not res.ok:
             raise _LFound(t, res.problems, res.fingerprint)
+        if fp_cands.get(t):                              # 이 봉에서 전에 난 L 기록 → 사전 등록 ④ 판단(커밋 전에 기록)
+            _false_positive_check(root, mk, t, fp_cands[t], res, ch, log)
         at = _iso(log.now())
         for _, _, st in _flat(res.states):
             st["h1"].update({"code_hash": ch, "env": dict(env), "updated_at": at})

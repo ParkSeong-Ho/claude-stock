@@ -29,6 +29,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -458,34 +459,44 @@ def test_T_F8a_운영_기준_칸(built, tmp_path):
     # 빠진 날: calendar.jsonl 정상 줄에 하루 기록에 없는 날이 있으면 센다
     cal = fs.read_lines(root / "us" / "calendar.jsonl")[-1]
     jline(root / "us" / "calendar.jsonl", {**cal, "dates": sorted(cal["dates"] + ["2026-02-14"]), "check": "ok"})
-    # 자료 멈춤 종류별: 4(PRE·ENV)·7(D7)
+    # 자료 멈춤 종류별: 4(PRE·ENV)·7(D7). 마지막 저장 봉(3월 9일) 뒤의 실행이라 '처리하려던 봉'은 다음 거래일.
+    # D7 은 문제에 날짜(3월 10일)가 있어 3월로 셈. PRE·ENV 는 날짜·달력 줄이 없어 아직 어느 달인지 모름(따로 셈).
     S = hs.S_A
-    for kind, code in (("PRE", 4), ("ENV", 4), ("D7", 7)):
+    for kind, code, date in (("PRE", 4, None), ("ENV", 4, None), ("D7", 7, "2026-03-10")):
         jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S,
                                     "at": "2026-03-10T07:10:00+09:00", "exit_code": code, "bars": [],
-                                    "problems": [{"level": "D", "code": kind}]})
+                                    "problems": [{"level": "D", "code": kind, "date": date}]})
     jline(root / "errors.jsonl", {"market": "us", "start_date": "unknown", "at": "2026-03-10T07:11:00+09:00",
                                   "date": None, "problems": [{"level": "L", "code": "L24"}]})
     jline(root / "errors.jsonl", {"market": "us", "start_date": "2025-01-01", "at": "2026-03-10T07:11:00+09:00",
                                   "date": None, "problems": [{"level": "L", "code": "L7"}]})   # 다른 창 → 안 셈
+    jline(root / "errors.jsonl", {"market": "us", "start_date": "unknown", "at": "2026-03-10T07:12:00+09:00",
+                                  "date": "2026-03-10", "problems": [{"level": "L", "code": "L9"}]})
     d = R.collect("us", root=root, online=False)
     ops = d["ops"]
     assert ops["missing"] == ["2026-02-14"]
-    assert ops["data_stops"] == 6 and ops["data_kinds"] == {"D2": 1, "D3": 1, "D6": 1, "D7": 1, "ENV": 1, "PRE": 1}
-    assert ops["l_errors"] == 1 and ops["l_codes"] == {"L24": 1}
+    assert ops["data_stops"] == 4 and ops["data_kinds"] == {"D2": 1, "D3": 1, "D6": 1, "D7": 1}
+    assert ops["l_errors"] == 1 and ops["l_codes"] == {"L9": 1}
+    assert ops["unknown"] == {"자료 멈춤(4·7)": 2, "장부 논리 오류(L)": 1}
     text = R.render(d)
     assert "빠진 날(calendar.jsonl vs 하루 기록) | 1개 (2026-02-14)" in text
-    assert ops["data_by_exit"] == {4: {"n": 5, "kinds": {"D2": 1, "D3": 1, "D6": 1, "ENV": 1, "PRE": 1}},
-                                   7: {"n": 1, "kinds": {"D7": 1}}}
-    assert ("자료 멈춤(종료 코드 4·7) | 6번 — 종료 코드 4(자료 D1~D6·사전 조건 PRE·환경 ENV) 5번: D2 1, D3 1, D6 1, "
-            "ENV 1, PRE 1 / 종료 코드 7(기준 지수 늦음) 1번: D7 1 (재시작 아님)") in text
+    assert ops["data_by_exit"] == {4: {"n": 3, "kinds": {"D2": 1, "D3": 1, "D6": 1}}, 7: {"n": 1, "kinds": {"D7": 1}}}
+    assert ("자료 멈춤(종료 코드 4·7) | 4번 — 종료 코드 4(자료 D1~D6·사전 조건 PRE·환경 ENV) 3번: D2 1, D3 1, D6 1 / "
+            "종료 코드 7(기준 지수 늦음) 1번: D7 1 (재시작 아님)") in text
+    assert ("| 어느 달인지 모름(처리하려던 봉을 아직 모름 — 이 달 숫자에 안 넣음) | 자료 멈춤(4·7) 2, "
+            "장부 논리 오류(L) 1 |") in text
     assert "관문 거절(종료 코드 3: 재현 미통과 코드·환경 또는 규칙 다름) | 1번" in text
     assert "늦은 봉(다음 장 시작 뒤 처리) | 1개 / 상한 10" in text
     assert "| 한 번에 따라잡은 최대 봉 수 | 2봉 / 상한 5 |" in text
     assert "| 재시작 | 0번 / 상한 2 (남은 2번) |" in text
     assert f"| 판정 창 진행 | 26/63봉 · 시작 S {S} · S+62 예정" in text
+    assert "| 끝 기록 없는 실행(kill·전원 꺼짐 — 판정에는 안 씀) | 0번 |" in text
     assert "기업 행위(장부 corp_actions 기준): 분할 1건 · 상장폐지 1건 · 정정 확정 0건" in text
-    assert "코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤): 기업 행위 상장폐지 1, 기업 행위 분할 1" in text
+    assert "코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤 ~ 2026-03-09 저장 때): 기업 행위 상장폐지 1, 기업 행위 분할 1" in text
+    # 덜 찬 창의 --final(지금까지 전부)은 어느 달인지 모르는 줄도 이 창의 것으로 넣는다
+    f = R.collect("us", final=True, root=root, online=False)["ops"]
+    assert f["data_stops"] == 6 and f["data_kinds"] == {"D2": 1, "D3": 1, "D6": 1, "D7": 1, "ENV": 1, "PRE": 1}
+    assert f["l_errors"] == 2 and f["l_codes"] == {"L24": 1, "L9": 1} and f["unknown"] == {}
 
 
 def test_T_F8a_장부_다시_점검_결과와_못_보는_점검(built, tmp_path):
@@ -639,7 +650,8 @@ def test_T_F8b_국내_전달_규칙과_빈_달_이월(built, tmp_path):
     assert [(x["date"], x["key"], x["rate_date"], x["rate"]) for x in it["table"]] == [x[:4] for x in mar]
     assert it["interest"] == pytest.approx(want[-1][4], rel=1e-12)
     feb = R.collect("kr", "2026-02", root=root, online=False)["interest"]
-    assert all(x["note"] == "그날 값 없음 → 2025-12-01 값" for x in feb["table"])
+    assert all(x["note"] == "전달(2026-01) 값 없음 → 2025-12 값 이월" for x in feb["table"])
+    assert all(x["note"] == "전달(2026-02) 값 사용(월 금리)" for x in it["table"])
     assert "받은 시각 기록 없음" in R.render(d)
 
 
@@ -1007,6 +1019,15 @@ def test_final_S62_저장_뒤_다음_봉에서_멈춘_실행은_연장_몫(built
     assert R.collect("us", "2026-03", root=root, online=False)["ops"]["data_stops"] == 0
     assert R.collect("us", "2026-04", root=root, online=False)["ops"]["data_kinds"] == {"D3": 1}
     assert R.collect("us", "2026-05", root=root, online=False)["ops"]["data_kinds"] == {"D3": 1}
+    # 문제에 날짜가 없어도(D2) 같다: 저장한 마지막 봉(S+62) 다음 봉의 일
+    rows = [json.loads(ln) for ln in (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
+    for r in rows:
+        if r.get("event") == "end" and r.get("bars") == [s62]:
+            r["problems"] = [{"level": "D", "code": "D2", "date": None}]
+    (root / "runs.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    d, v = _verdict(root)
+    assert v["result"] == "pass" and d["ops"]["data_stops"] == 0
+    assert R.collect("us", "2026-04", root=root, online=False)["ops"]["data_kinds"] == {"D2": 1}
 
 
 def test_final_재시작_상한을_넘으면_H1_포워드_실패(built, tmp_path):
@@ -1140,7 +1161,9 @@ def test_month_지난달_보고서는_그달_마지막_봉까지만(built, tmp_p
         a = feb["values"]["arms"][arm]
         assert a["ret_period"] == pytest.approx(a["ret"], rel=1e-12, abs=1e-15)
     before = R.build("us", "2026-02", root=root, online=False)
-    assert "## 2. 운영 기준 (판정 아님 — 이 창의 S 2026-02-02 ~ 2026-02-27 상태)" in before
+    assert "## 2. 운영 기준 (판정 아님 — 이 창의 S 2026-02-02 ~ 2026-02 끝까지)" in before
+    assert "- **이 달 숫자(2~9절)는 그달 마지막 처리 봉 2026-02-27 까지로 고정**이다" in before
+    assert "보고서를 만든 때의 장부 전체** 기준이다" in before
     # 3월(2월 마지막 봉을 저장한 뒤)에 생긴 일 → 2월 보고서는 바이트까지 그대로, 이번 달(3월) 보고서에는 들어감
     at = "2026-03-05T07:10:00+09:00"
     jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": S, "at": at,
@@ -1302,3 +1325,401 @@ def test_cli_잠금_30분_넘으면_5(built, tmp_path, monkeypatch):
         assert not (root / "reports").exists() and files_sha(root) == before
     finally:
         os.close(fd)
+
+
+# ============================ 2c 독립 검토 반영 (docs/h1-review-2c.md R-1 ~ R-9) ============================
+
+def _fin_h(tmp_path, name="h1", n_days=70):
+    """깨끗한 창 장면과 같은 세계·계획(재현 통과 기록은 시험마다 따로)."""
+    w = tr.us_world(end="2026-07-31")
+    return tr.H(tmp_path, w, hs.S_A, _plan_fin, hs.FakeAsk(hs.ASK_A), n_days=n_days, name=name)
+
+
+def _pass_now(root, ch=None, fps=None):
+    h1.record_replay_pass({"code_hash": ch or h1.code_hash()[0], "env": h1.env_info(),
+                           "ledger_fingerprints": fps if fps is not None else {"W1-us": "같음"}}, root)
+
+
+@pytest.mark.parametrize("same_clock", [False, True])
+def test_R1_실패한_start_뒤_같은_S_로_다시_시작한_창은_깨끗함(tmp_path, monkeypatch, same_clock):
+    """S 를 정한 뒤 코드 버그로 실패한 start 의 일지 줄(start_date == S)은 창이 만들어지기 전 것이라 어느 창에도 안 넣는다.
+    고친 뒤 다시 친 start 가 같은 S 를 받아도 그 창의 ②-1 은 깨끗하다. status 의 셈(_window_counts)도 같은 규칙.
+    same_clock: 두 start 가 같은 시각(시계가 거침)이어도 보고서는 실행 순서로 가른다."""
+    h = _fin_h(tmp_path, n_days=70)
+    _pass_now(h.root)
+    real = h1.run_bar
+    monkeypatch.setattr(h1, "run_bar", lambda *a, **k: (_ for _ in ()).throw(KeyError("코드 버그(시험)")))
+    assert h.start(gate=True) == 2
+    monkeypatch.setattr(h1, "run_bar", real)
+    err = fs.read_lines(h.root / "errors.jsonl")
+    assert len(err) == 1 and err[0]["command"] == "start" and err[0]["start_date"] == hs.S_A
+    clock = None if same_clock else fs.run_at("us", hs.S_A, hh=7, mm=40)       # 07:10 실패 → 07:40 다시(장 시작 전)
+    assert h.start(gate=True, clock=clock) == 0
+    for k in range(1, 4):
+        assert h.run(h.D[k], gate=True) == 0
+    d = R.collect("us", final=True, root=h.root, online=False)
+    ops = d["ops"]
+    assert ops["l_errors"] == 0 and ops["outside"] == 2 and d["verdict"]["c1"]["ok"]
+    assert "창 밖 기록 2줄" in R.render(d)
+    meta = h.meta()
+    if not same_clock:
+        assert h1._window_counts(h.root, "us", hs.S_A, meta["created_at"])[0] == 0     # status 도 같은 규칙(시각)
+        assert h1._in_window(err[0], hs.S_A, meta["created_at"]) is False
+    else:
+        assert err[0]["at"] == meta["created_at"]                       # 시각으로는 못 가름 → 보고서는 실행 순서로 뺌
+
+
+def test_R1_창이_만들어진_뒤의_줄만_지금_창(tmp_path):
+    c = "2026-02-03T07:10:00+09:00"
+    assert h1._in_window({"start_date": hs.S_A, "at": "2026-02-03T07:09:59+09:00"}, hs.S_A, c) is False
+    assert h1._in_window({"start_date": hs.S_A, "at": c}, hs.S_A, c) is True
+    assert h1._in_window({"start_date": "unknown", "at": "2026-02-04T07:10:00+09:00"}, hs.S_A, c) is True
+    assert h1._in_window({"start_date": "2026-01-05", "at": "2026-02-04T07:10:00+09:00"}, hs.S_A, c) is False
+    assert h1._in_window({"start_date": hs.S_A, "at": "엉망"}, hs.S_A, c) is True      # 못 읽으면 보수적으로 넣음
+    assert h1._in_window({"start_date": hs.S_A, "at": "2020-01-01T00:00:00+09:00"}, hs.S_A, None) is True
+
+
+def _short_with_l_run(tmp_path, how):
+    """S ~ D2 정상 → D3 처리 중 예상 밖 오류(종료 코드 2) → D3·D4 정상. how: 'ok'(errors.jsonl 온전) /
+    'nowrite'(errors.jsonl 쓰기 실패 — _log_errors 가 OSError 를 삼킴) / 'half'(errors.jsonl 마지막 줄 반쯤)."""
+    h = _fin_h(tmp_path, n_days=70)
+    assert h.start() == 0
+    for k in (1, 2):
+        assert h.run(h.D[k]) == 0
+    real_bar, real_append = h1.run_bar, h1._append_log
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(h1, "run_bar", lambda *a, **k: (_ for _ in ()).throw(KeyError("일시적 버그")))
+        if how == "nowrite":
+            def append(root, name, rec):
+                if name == "errors.jsonl":
+                    raise OSError(28, "No space left on device")
+                return real_append(root, name, rec)
+            mp.setattr(h1, "_append_log", append)
+        assert h.run(h.D[3]) == 2
+    assert h1.run_bar is real_bar
+    if how == "half":
+        b = (h.root / "errors.jsonl").read_bytes()
+        (h.root / "errors.jsonl").write_bytes(b[:-30])
+    for k in (3, 4):
+        assert h.run(h.D[k]) == 0
+    return h
+
+
+@pytest.mark.parametrize("how", ["ok", "nowrite", "half"])
+def test_R2_L_오류는_errors_jsonl_과_종료_코드_2_의_합집합(tmp_path, how):
+    h = _short_with_l_run(tmp_path, how)
+    ends2 = [r for r in h.ends() if r["exit_code"] == 2]
+    assert len(ends2) == 1
+    ops = R.collect("us", final=True, root=h.root, online=False)["ops"]
+    assert ops["l_errors"] == 1                                            # 한 실행 = 한 번(run_id 로 합침)
+    assert ops["l_runs_only"] == (0 if how == "ok" else 1)
+    assert ops["l_list"][0][1] == h.D[3]                                  # 그 실행이 처리하려던 봉
+    if how == "half":
+        assert ops["broken"] == {"errors.jsonl": 1}
+        assert "읽지 못한(깨진) 일지 줄: errors.jsonl 1줄" in R.build("us", final=True, root=h.root, online=False)
+
+
+def test_R2_끝_기록_없는_실행은_L_이_아니고_따로_셈(tmp_path):
+    h = _fin_h(tmp_path, n_days=70)
+    assert h.start() == 0
+    assert h.run(h.D[1]) == 0
+    jline(h.root / "runs.jsonl", {"event": "start", "run_id": "죽은실행", "command": "run", "market": "us",
+                                  "at": fs.run_at("us", h.D[2]).isoformat(), "start_date": hs.S_A})
+    assert h.run(h.D[2], hh=8, mm=0) == 0
+    d = R.collect("us", final=True, root=h.root, online=False)
+    assert d["ops"]["no_end"] == 1 and d["ops"]["l_errors"] == 0
+    assert "| 끝 기록 없는 실행(kill·전원 꺼짐 — 판정에는 안 씀) | 1번 |" in R.render(d)
+
+
+def test_R2_종료_코드_2_만_남은_창은_최종_판정에서_실패(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    jline(root / "runs.jsonl", {"event": "end", "run_id": "버그실행", "command": "run", "market": "us",
+                                "start_date": hs.S_A, "at": _end_at(root, h.D[30]), "exit_code": 2, "bars": [],
+                                "message": "예상 밖 오류(코드 버그) KeyError"})
+    d, v = _verdict(root)
+    assert not v["c1"]["ok"] and v["result"] == "fail_window" and d["ops"]["l_list"][0][1] == h.D[31]
+
+
+def _drop_end_line(root, bar):
+    rows = (root / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+    keep = [ln for ln in rows if not (json.loads(ln).get("event") == "end" and bar in (json.loads(ln).get("bars") or []))]
+    assert len(rows) - len(keep) == 1
+    (root / "runs.jsonl").write_text("\n".join(keep) + "\n", encoding="utf-8")
+
+
+def test_R3_S62_를_저장한_실행의_끝_줄이_없어도_경계를_정함(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    s62 = h.D[62]
+    later = _end_at(root, h.D[64])
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": hs.S_A, "at": later,
+                                "exit_code": 6, "bars": []})
+    jline(root / "errors.jsonl", {"market": "us", "start_date": hs.S_A, "at": later, "date": None,
+                                  "problems": [{"level": "L", "code": "L18"}]})
+    d, v = _verdict(root)
+    assert v["result"] == "pass" and d["extension"]["l_errors"] == 1
+    # S+62 를 저장한 바로 뒤(S+63 실행 전)의 종료 코드 6 — 끝 줄이 없어도 'S+62 뒤의 일'로 셈(하루 기록 run_at 으로 자리 잡음)
+    t = datetime.fromisoformat(_end_at(root, s62)) + timedelta(minutes=30)
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": hs.S_A,
+                                "at": t.isoformat(), "exit_code": 6, "bars": []})
+    _drop_end_line(root, s62)                                          # S+62 를 커밋한 뒤 kill — 시작 줄만 남음
+    d, v = _verdict(root)
+    row = load(root, "us").states["A0"]["마라토너"]["days"][62]
+    assert d["end_at"] == row["run_at"] and v["result"] == "pass"
+    assert d["ops"]["backlog_fail"] == 0 and d["ops"]["l_errors"] == 0 and d["ops"]["no_end"] == 1
+    # 월간: 3월 마지막 봉을 저장한 실행의 끝 줄이 없어도 4월의 멈춤이 3월에 섞이지 않음
+    r2 = copy_of(h, tmp_path, "m")
+    mar_last = max(x for x in h.D if x <= "2026-03-31")
+    i = h.D.index(mar_last)
+    jline(r2 / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": hs.S_A,
+                              "at": _end_at(r2, h.D[i + 3]), "exit_code": 4, "bars": [],
+                              "problems": [{"level": "D", "code": "D1"}]})
+    before = R.collect("us", "2026-03", root=r2, online=False)["ops"]
+    _drop_end_line(r2, mar_last)
+    after = R.collect("us", "2026-03", root=r2, online=False)["ops"]
+    assert before["data_kinds"] == after["data_kinds"] == {}
+    assert R.collect("us", "2026-04", root=r2, online=False)["ops"]["data_kinds"] == {"D1": 1}
+
+
+def _fp_scenario(tmp_path, *, same_fps=True, tamper=False):
+    """D3 에서 점검 함수가 거짓 L 을 냄(종료 코드 2) → 점검을 '고친'(code_hash 가 바뀐) 코드로 D3·D4 처리."""
+    h = _fin_h(tmp_path, n_days=70)
+    H_old = h1.code_hash()[0]
+    _pass_now(h.root, H_old)
+    assert h.start(gate=True) == 0
+    for k in (1, 2):
+        assert h.run(h.D[k], gate=True) == 0
+    real = h1_check_mod().check_day
+
+    def fake(mk, t, *a, **k):
+        p = real(mk, t, *a, **k)
+        if t == h.D[3]:
+            p = p + [h1_check_mod().Problem("L", "L7", mk, "A1", "마라토너", t, "시험용 거짓 양성")]
+        return p
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(h1_check_mod(), "check_day", fake)
+        assert h.run(h.D[3], gate=True) == 2
+    err = fs.read_lines(h.root / "errors.jsonl")[-1]
+    assert err["date"] == h.D[3] and err["fingerprint"] and err["code_hash"] == H_old
+    if tamper:                                                         # (나) 가 틀리게: 그때 지문이 다른 값이었다고
+        lines = (h.root / "errors.jsonl").read_text(encoding="utf-8").splitlines()
+        rec = json.loads(lines[-1])
+        rec["fingerprint"] = "0" * 64
+        lines[-1] = json.dumps(rec, ensure_ascii=False)
+        (h.root / "errors.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    H_new = "f" * 64
+    _pass_now(h.root, H_new, {"W1-us": "같음"} if same_fps else {"W1-us": "다름"})
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(h1, "code_hash", lambda *a, **k: (H_new, {}))
+        code = h.run(h.D[4], gate=True)                               # 밀린 D3(늦은 봉) + D4
+    return h, err, code, H_old, H_new
+
+
+def h1_check_mod():
+    import h1_check
+    return h1_check
+
+
+def test_R4_거짓_양성_조건이_맞으면_기록하고_보고서_L_오류에서_뺌(tmp_path):
+    h, err, code, H_old, H_new = _fp_scenario(tmp_path)
+    assert code == 0 and h.last() == h.D[4]
+    fp = [r for r in fs.read_lines(h.root / "changes.jsonl") if r.get("kind") == "false_positive"]
+    assert len(fp) == 1
+    assert {k: fp[0][k] for k in ("market", "bar", "error_run_id", "fingerprint", "code_hash_old", "code_hash_new",
+                                  "replay_fingerprints_equal")} == {
+        "market": "us", "bar": h.D[3], "error_run_id": err["run_id"], "fingerprint": err["fingerprint"],
+        "code_hash_old": H_old, "code_hash_new": H_new, "replay_fingerprints_equal": True}
+    assert h1.ledger_fingerprint(h.states()) != err["fingerprint"]          # 지금 장부는 D4 까지라 다름(그때 D3 지문과 비교함)
+    d = R.collect("us", final=True, root=h.root, online=False)
+    ops = d["ops"]
+    assert ops["l_errors"] == 0 and ops["l_false_positive"] == 1 and d["verdict"]["c1"]["ok"]
+    assert ops["late"] == [h.D[3]]                                       # 그동안 못 한 봉은 늦은 봉으로 이미 셈
+    text = R.render(d)
+    assert "거짓 양성으로 판정(사전 등록 ④) 1건은 뺌" in text
+    end = h.ends()[-1]
+    assert end["false_positive"] == [{"bar": h.D[3], "error_run_id": err["run_id"]}]
+    # 같은 기록으로 다시 판정하지 않음(다음 실행에서 또 쓰지 않음)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(h1, "code_hash", lambda *a, **k: (H_new, {}))
+        assert h.run(h.D[5], gate=True) == 0
+    assert len([r for r in fs.read_lines(h.root / "changes.jsonl") if r.get("kind") == "false_positive"]) == 1
+
+
+@pytest.mark.parametrize("which", ["가", "나"])
+def test_R4_조건이_하나라도_틀리면_기록하지_않고_L_오류는_그대로(tmp_path, capsys, which):
+    h, err, code, _, _ = _fp_scenario(tmp_path, same_fps=(which != "가"), tamper=(which == "나"))
+    assert code == 0 and h.last() == h.D[4]                              # 처리·커밋은 평소대로
+    assert not [r for r in fs.read_lines(h.root / "changes.jsonl") if r.get("kind") == "false_positive"]
+    out = capsys.readouterr().out
+    assert "④ 조건 안 맞음 → 그 L 오류는 그대로(재시작 대상)" in out and f"({which})" in out
+    ops = R.collect("us", final=True, root=h.root, online=False)["ops"]
+    assert ops["l_errors"] == 1 and ops["l_false_positive"] == 0
+
+
+def test_R5_월간은_처리하려던_봉의_달로_나눔_언제_만들어도_같음(tmp_path):
+    h = _fin_h(tmp_path, n_days=70)
+    assert h.start() == 0
+    k = 1
+    while h.D[k] < "2026-03-31":
+        assert h.run(h.D[k]) == 0
+        k += 1
+    # 3월 30일까지 저장 → 3월 31일 처리 중 D2(문제에 날짜 없음): 그 실행의 calendar.jsonl 줄로 '3월 31일의 일'임을 앎
+    held = sorted({c for _, _, st in h1._flat(h.states()) for c in st["positions"]})
+    h.src.missing = {held[0]}
+    assert h.run(h.D[k]) == 4 and h.ends()[-1]["problems"][-1].get("date") is None
+    h.src.missing = set()
+    mar = R.collect("us", root=h.root, online=False)["ops"]
+    assert mar["data_kinds"] == {"D2": 1} and mar["unknown"] == {}
+    assert h.run(h.D[k], hh=8, mm=0) == 0
+    k += 1
+    apr1 = h.D[k]
+    assert h.last() == "2026-03-31" and apr1 == "2026-04-01"
+    held = sorted({c for _, _, st in h1._flat(h.states()) for c in st["positions"]})
+    h.src.drop = {held[0]: {apr1}}
+    assert h.run(apr1) == 4                                            # 4월 첫 봉 D3 (calendar.jsonl 줄 있음)
+    h.src.drop = {}
+    assert h.run(apr1, gate=True, hh=7, mm=20) == 3                    # 관문 거절(달력 줄 없음, 마지막 저장 봉 = 3월 31일)
+
+    def secs(text):
+        return text[text.index("## 2."):text.index("## 10.")]
+    mar_before = R.collect("us", root=h.root, online=False)
+    assert mar_before["month"] == "2026-03" and mar_before["ops"]["data_kinds"] == {"D2": 1}
+    assert mar_before["ops"]["gate_refused"] == 0 and mar_before["ops"]["unknown"] == {}
+    t_before = R.build("us", "2026-03", root=h.root, online=False)
+    assert h.run(apr1, hh=8, mm=0) == 0
+    assert secs(R.build("us", "2026-03", root=h.root, online=False)) == secs(t_before)
+    apr = R.collect("us", "2026-04", root=h.root, online=False)["ops"]
+    assert apr["data_kinds"] == {"D2": 1, "D3": 1} and apr["gate_refused"] == 1          # 4월 보고서 = S ~ 4월 누적
+
+
+def test_R5_이번_달_마지막_저장_봉_뒤_어느_달인지_모르는_줄은_따로(built, tmp_path):
+    root = copy_of(built["us"], tmp_path)
+    D = built["us"].D
+    jline(root / "runs.jsonl", {"event": "end", "command": "run", "market": "us", "start_date": hs.S_A,
+                                "at": "2026-03-10T07:30:00+09:00", "exit_code": 3, "bars": []})
+    d = R.collect("us", root=root, online=False)
+    assert d["ops"]["gate_refused"] == 1 and d["ops"]["unknown"] == {"관문 거절(3)": 1}
+    assert d["ops"]["last"] == D[25]
+
+
+def test_R6_월간_10절은_그달_마지막_봉까지와_만든_때_전체를_나눔(built, tmp_path):
+    root = copy_of(built["us"], tmp_path)
+    d = R.collect("us", "2026-02", root=root, online=False)
+    assert d["recheck"]["cut"] == built["us"].D[19] and d["recheck"]["n_upto"] == 0
+    text = R.render(d)
+    assert "**그달 마지막 봉 2026-02-27 까지의 하루 기록**(날짜가 그 봉 이하)에서 찾은 L 오류 0건" in text
+    assert "만든 때의 장부 전체로 다시 돈 check_ledger" in text and "만든 때 기준)" in text
+    D = built["us"].D
+
+    def bad_value(states):                                             # 3월 봉 하나의 평가액을 틀리게(L7, 날짜 = 그 봉)
+        for r in states["A1"]["마라토너"]["days"]:
+            if r["date"] == D[22]:
+                r["value"] += 1.0
+    recommit(root, "us", bad_value)
+    feb = R.collect("us", "2026-02", root=root, online=False)["recheck"]
+    mar = R.collect("us", "2026-03", root=root, online=False)["recheck"]
+    assert feb["n"] >= 1 and feb["n_upto"] == 0 and mar["n_upto"] >= 1
+    assert "2~9절" in R.__doc__ and "만든 때의 장부 전체" in R.__doc__
+
+
+def test_R7_재시작_수는_세_출처_중_가장_큰_값(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    # 지금 창을 옮기려다 폴더 이동 전에 꺼진 restart(의도 줄만, 보관 폴더 없음) → 재시작으로 안 셈, 따로 보임
+    jline(root / "restarts.jsonl", {"status": "moving", "restart_id": "꺼진재시작", "market": "us",
+                                    "at": "2026-05-05T08:00:00+09:00", "old_start": hs.S_A, "old_last": h.D[65],
+                                    "reason": "시험", "archive": "archive/us-20260505-080000", "restart_no": 1})
+    d, v = _verdict(root)
+    assert d["ops"]["restarts_used"] == 0 and len(d["ops"]["restarts_pending"]) == 1 and v["result"] == "pass"
+    assert "끝나지 않은 restart 기록(폴더를 아직 옮기지 않음 — 재시작으로 세지 않음)" in R.render(d)
+    # 일지 줄은 없는데 보관 폴더가 2개 → 2번으로 셈, 출처가 달라 경고
+    for n in ("us-20251101-000000", "us-20251201-000000"):
+        (root / "archive" / n).mkdir(parents=True)
+    d, _ = _verdict(root)
+    assert d["ops"]["restarts_used"] == 2 and d["ops"]["restart_mismatch"]
+    assert d["ops"]["restart_sources"] == {"meta.restart_no": 0, "restarts.jsonl": 0, "archive 폴더": 2}
+    assert "재시작 수의 출처가 서로 다름" in R.render(d)
+    # 의도 줄의 보관 폴더가 실제로 있으면(옮긴 뒤 끝 줄 전에 꺼짐) 재시작으로 셈
+    (root / "archive" / "us-20260505-080000").mkdir()
+    d, _ = _verdict(root)
+    assert d["ops"]["restarts_used"] == 3 and d["ops"]["restart_sources"]["restarts.jsonl"] == 1
+    # meta.restart_no(HEAD 로 보호)가 더 크면 그것으로
+    root2 = copy_of(h, tmp_path, "m")
+    recommit(root2, "us", fn_meta=lambda m: m.update(restart_no=2))
+    d, _ = _verdict(root2)
+    assert d["ops"]["restarts_used"] == 2 and d["ops"]["restarts_left"] == 0
+
+
+# ---- R-8 살아남은 돌연변이 4개 ----
+
+def test_R8_다_찬_창의_S62_가_마감_당일이면_통과(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+    recommit(root, "us", fn_meta=lambda m: m["rules"].update(deadline=h.D[62]))
+    _, v = _verdict(root)
+    assert v["result"] == "pass" and not v["over_deadline"]
+
+
+def test_R8_분할_적용일에_산_주식은_분할_전_수량으로(tmp_path):
+    def f(date, side, qty, cash_delta):
+        return {"date": date, "code": "BBB", "kind": "stock", "side": side, "qty": qty, "cash_delta": cash_delta}
+    fills = [f("2026-02-06", "buy", 10, -1000.0),                       # applied_after 날의 체결 = 분할 전 10주
+             f("2026-02-09", "sell", 10, 600.0)]                          # 분할(×2) 뒤 20주 중 10주 → 원가 500
+    split = [{"kind": "split", "code": "BBB", "r": 2.0, "date": "2026-02-09", "applied_after": "2026-02-06"}]
+    r = R.realized(fills, split)
+    assert r["sells"][0]["cost"] == pytest.approx(500.0) and r["stock"]["total"] == pytest.approx(100.0)
+    assert r["open"]["BBB"]["qty"] == 10.0 and r["open"]["BBB"]["cost"] == pytest.approx(500.0)
+
+
+def test_R8_한_장부만_하루_기록이_빠지면_빠진_날_실패(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+
+    def drop(states):
+        states["A1"]["파이오니어"]["days"] = [r for r in states["A1"]["파이오니어"]["days"] if r["date"] != h.D[30]]
+    recommit(root, "us", drop)
+    d, v = _verdict(root)
+    assert d["ops"]["ledger_dates_differ"] == ["A1/파이오니어"] and d["ops"]["missing"] == []
+    assert not v["c2"]["ok"] and not v["c2"]["parts"]["빠진 날 0"] and v["result"] == "fail_window"
+
+
+def test_R8_연장_구간의_늦은_봉은_판정_창에_안_셈(built, tmp_path):
+    h = built["fin"]
+    root = copy_of(h, tmp_path)
+
+    def late(states):
+        for arm in h1.ARMS:
+            for tn in h1.TRAINERS:
+                for r in states[arm][tn]["days"]:
+                    if h.D[53] <= r["date"] <= h.D[63]:
+                        r["late"] = True
+    recommit(root, "us", late)
+    d, v = _verdict(root)
+    assert len(d["ops"]["late"]) == 10 and v["result"] == "pass" and d["extension"]["late"] == 1
+
+
+# ---- R-9 읽는 사람 ----
+
+def test_R9_그림자_서킷_사유는_쉬운_말_MDD_0_은_부호_없음_마라토너_문장(built, tmp_path):
+    root = copy_of(built["us"], tmp_path)
+    d = R.collect("us", root=root, online=False)
+    text = R.render(d)
+    sh = [s for s in d["shadow"] if s["first"]]
+    assert sh and all("서킷이 켜져 있었다면 멈췄을 날(실제로는 팔거나 멈추지 않음)" in s["desc"] for s in sh)
+    a1p = next(s for s in sh if s["arm"] == "A1" and s["trainer"] == "파이오니어")
+    assert a1p["desc"].startswith("하루 -13.7%(한도 -7%)") and "전부 팔고" in a1p["why"]
+    table6 = text[text.index("## 6."):text.index("## 7.")]
+    assert "전부 팔고" not in table6.split("|---|")[1].split("\n\n")[0]
+    assert "MDD(최대 낙폭) = 최고점에서 가장 많이 떨어진 비율" in text
+    assert R._mdd_pct(0.0) == "0.00%" and R._mdd_pct(-0.0424) == "-4.24%" and R._mdd_pct(None) == "계산 불가"
+    assert "늘 '현금 부족'" not in text
+    ms = {arm: sum(1 for s in load(root, "us").states[arm]["마라토너"]["skips"]
+                   if s["kind"] == "현금부족" and "2026-03-01" <= s["date"] <= d["cut"]) for arm in h1.ARMS}
+    assert f"이 기간 마라토너의 '현금 부족' 보류: A0 {ms['A0']}건 · A1 {ms['A1']}건." in text
+    h = tr.us_h(tmp_path / "s")
+    assert h.start() == 0
+    t0 = R.build("us", root=h.root, online=False)                        # S 날만: 낙폭 없음
+    rows = [ln for ln in t0.splitlines() if ln.startswith("| A0 쉬는 돈") or ln.startswith("| A1 쉬는 돈")]
+    assert rows and all(ln.rstrip(" |").endswith("0.00%") and "+0.00% |" != ln[-9:] for ln in rows)
+    assert all(not ln.rstrip(" |").endswith("+0.00%") for ln in rows)

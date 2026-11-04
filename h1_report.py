@@ -9,8 +9,15 @@ h1_report.py - H1 포워드 월간·최종 보고서 (설계 docs/h1-forward-des
 - `--final` 은 판정 창(S~S+62)을 다 처리한 뒤 운영 기준 ①~③ 의 통과/실패만 판정한다. S+62 전이면 판정하지 않고
   남은 봉 수만 적는다(마감까지 끝날 수 없음이 확실하거나 재시작 상한을 넘으면 그때도 "H1 포워드 실패").
   S+62 뒤에 처리한 봉은 '연장 기록'으로만 적는다.
-- 월간 보고서는 지금 판정 창의 S 부터 그달 마지막 처리 봉까지를 본다(운영 기준 칸·일지도 그때까지 — 지난달 보고서를
-  나중에 다시 만들어도 그 뒤 일이 섞이지 않음). 일지 줄이 어느 창의 것인지는 h1._in_window 그대로 센다.
+- 월간 보고서는 지금 판정 창의 S 부터 그달 마지막 처리 봉까지를 본다.
+  - **이 달 숫자(2~9절)는 그달 마지막 봉까지로 고정**: 값·비율·매매·그림자·실현손익·팀장·이자는 그 봉까지의 하루 기록·체결로,
+    실행 일지(멈춤·관문 거절·L 오류·종료 코드 6 등)는 '그 실행이 처리하려던 봉'이 그달 안인 것만 센다. 그래서 다음 달 봉을
+    더 처리한 뒤 지난달 보고서를 다시 만들어도 이 숫자는 같다. 처리하려던 봉을 아직 알 수 없는 줄(이번 달 마지막 저장 봉 뒤,
+    달력 기록 없이 멈춘 실행)은 '어느 달인지 모름'으로 따로 센다.
+  - **머리말의 HEAD 와 10절 다시 점검의 '만든 때' 부분은 보고서를 만든 때의 장부 전체 기준**이라, 봉이 더 쌓이면 바뀐다
+    (10절은 그달 마지막 봉까지 날짜의 L 오류를 따로 적는다).
+- 일지 줄이 어느 창의 것인지는 h1._in_window 그대로(그 창이 만들어진 뒤의 줄만) 세고, 같은 시각일 때는 그 창을 만든 start
+  보다 먼저 시작한 실행의 줄을 뺀다(2c 검토 R-1). L 오류는 errors.jsonl 과 runs.jsonl 의 종료 코드 2 를 run_id 로 합쳐 센다(R-2).
 - 장부·일지는 한 글자도 고치지 않는다. 쓰는 것은 보고서 파일(state/h1/reports/)과 금리 저장본(state/h1/rates/)뿐이다.
   같은 입력이면 같은 보고서(바이트까지)가 나온다 — 그래서 "만든 시각"은 넣지 않고, 기준은 HEAD(마지막 저장)로 적는다.
 
@@ -103,6 +110,7 @@ EFFECTS = ("veto", "hold", "low_conv", "ordered", "over_slots")
 EFFECT_WORD = {"veto": "veto(빠짐)", "hold": "hold(보류)", "low_conv": "확신도 낮음(보류)", "ordered": "주문",
                "over_slots": "빈자리 부족"}
 CHANGE_WORD = {"replay-pass": "재현 통과 기록 추가(코드·환경 변경)", "amend-rules(done)": "세율 줄 추가",
+               "false_positive": "점검 함수 거짓 양성 판정(사전 등록 ④)",
                "amend-rules(abandoned)": "세율 줄 추가 취소(커밋 전에 꺼짐)",
                "corp-action:split": "기업 행위 분할", "corp-action:delist": "기업 행위 상장폐지",
                "corp-action:correction": "기업 행위 정정 확정"}
@@ -483,7 +491,7 @@ def index_bh_from_states(market, states, upto=None) -> dict:
 class _Ctx:
     """한 시장의 저장 자료(읽기만)."""
 
-    def __init__(self, mk, root, loaded, decisions, cal_line, runs, errors, changes):
+    def __init__(self, mk, root, loaded, decisions, cal_line, logs, broken, cal_lines):
         self.mk, self.root = mk, root
         self.meta, self.head, self.states = loaded.meta, loaded.head, loaded.states
         self.S = self.meta["start_date"]
@@ -491,14 +499,67 @@ class _Ctx:
         self.rules = dict(self.meta.get("rules") or {})
         self.decisions = decisions
         self.cal_line = cal_line
-        self.runs, self.errors, self.changes = runs, errors, changes
+        self.runs, self.errors = logs["runs.jsonl"], logs["errors.jsonl"]
+        self.changes, self.restart_lines = logs["changes.jsonl"], logs["restarts.jsonl"]
+        self.broken = broken                           # 일지마다 읽지 못한(깨진) 줄 수
+        self.cal_by_run = {r.get("run_id"): r for r in cal_lines if r.get("run_id")}
         self.canon = self.states["A0"][h1.TRAINERS[0]]["days"]
         self.dates = [r["date"] for r in self.canon]
         self.m = markets.MARKETS[mk]
+        self._journal = None
+        self.pre_runs = self._pre_window_runs()
 
     def rule(self, key, default):
         v = self.rules.get(key)
         return default if v is None else v
+
+    def _pre_window_runs(self) -> set:
+        """이 창을 만든(마지막으로 성공한 같은 S 의) start 실행보다 runs.jsonl 에서 먼저 시작한 실행들의 run_id.
+        시각이 같아 created_at 으로 가를 수 없을 때(시계가 거칠거나 같은 분에 다시 친 start)를 위한 보충 — 이 실행들의 줄은
+        창 밖이다(2c 검토 R-1)."""
+        idx = {}
+        creator = None
+        for i, r in enumerate(self.runs):
+            rid = r.get("run_id")
+            if r.get("market") != self.mk or not rid:
+                continue
+            idx.setdefault(rid, i)
+            if r.get("event") == "end" and r.get("command") == "start" and r.get("exit_code") == h1.EXIT_OK \
+                    and r.get("start_date") == self.S:
+                creator = rid
+        if creator is None:
+            return set()
+        return {rid for rid, i in idx.items() if i < idx[creator]}
+
+    def inwin(self, r) -> bool:
+        """이 시장·이 판정 창의 일지 줄인가: h1._in_window(창이 만들어진 뒤의 줄만, 2c 검토 R-1) + 이 창을 만든 start 보다
+        먼저 시작한 실행의 줄은 뺀다(같은 시각일 때의 보충)."""
+        return r.get("market") == self.mk and h1._in_window(r, self.S, self.created_at) \
+            and r.get("run_id") not in self.pre_runs
+
+
+JOURNALS = ("runs.jsonl", "errors.jsonl", "changes.jsonl", "restarts.jsonl")
+
+
+def _read_counted(path) -> tuple:
+    """일지 JSONL 을 h1.read_jsonl 처럼 너그럽게 읽되, 건너뛴(깨진·dict 아닌) 줄 수도 센다 → (기록 목록, 깨진 줄 수)."""
+    p = Path(path)
+    if not p.exists():
+        return [], 0
+    out, bad = [], 0
+    for raw in p.read_bytes().split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            rec = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            bad += 1
+            continue
+        if isinstance(rec, dict):
+            out.append(rec)
+        else:
+            bad += 1
+    return out, bad
 
 
 def _load(mk, root) -> _Ctx:
@@ -515,9 +576,11 @@ def _load(mk, root) -> _Ctx:
         decisions = h1.DecisionLog(h1.decisions_path(root), read_only=True)
     except h1.H1LogicError as e:
         raise ReportError(EXIT_ERROR, f"판정 기록을 읽지 못함({e.code}): {e}")
-    return _Ctx(mk, root, loaded, decisions, h1._last_ok_calendar_line(root, mk),
-                h1._read_log(root, "runs.jsonl"), h1._read_log(root, "errors.jsonl"),
-                h1._read_log(root, "changes.jsonl"))
+    logs, broken = {}, {}
+    for name in JOURNALS:
+        logs[name], broken[name] = _read_counted(h1.h1_path(root, name))
+    cal_lines, broken["calendar.jsonl"] = _read_counted(h1.h1_path(root, mk, "calendar.jsonl"))
+    return _Ctx(mk, root, loaded, decisions, h1._last_ok_calendar_line(root, mk), logs, broken, cal_lines)
 
 
 def _replay_allowed(root):
@@ -580,26 +643,198 @@ def _mdd(values):
 # ============================ 운영 기준 (§3.8-2) ============================
 
 def _saved_at(c, bar):
-    """봉 bar 를 저장한 실행(run·start)의 끝 시각. 그 뒤의 일지 줄은 그 봉 '뒤'의 일이다(최종: S+62 뒤 = 연장,
-    월간: 그달 마지막 봉 뒤 = 다음 달). 못 찾으면 None(봉 없는 일지 줄은 시각으로 거르지 않음)."""
+    """봉 bar 를 저장한 때. 그 봉을 저장한 실행(run·start)의 runs.jsonl 끝 줄 시각, 끝 줄이 없으면(커밋 뒤 kill·전원 꺼짐)
+    HEAD 로 보호되는 그 봉 하루 기록의 run_at(그 봉을 처리한 실행 시각, 2c 검토 R-3). 둘 다 없으면 None."""
     for r in c.runs:                    # bars 에는 커밋한 봉만 적힌다(그 뒤 다른 봉에서 멈췄어도) → 종료 코드는 보지 않음
-        if r.get("event") == "end" and r.get("market") == c.mk and bar in (r.get("bars") or []) \
-                and h1._in_window(r, c.S, c.created_at):
+        if r.get("event") == "end" and bar in (r.get("bars") or []) and c.inwin(r):
             return r.get("at")
-    return None
+    return next((r.get("run_at") for r in c.canon if r["date"] == bar), None)
 
 
-def _ops(c, bar_upto, jr_upto, end_at, allowed, allowed_why):
-    """운영 기준 칸. bar_upto = 하루 기록을 볼 마지막 봉, jr_upto = 일지 줄의 봉 날짜 상한, end_at = 일지 시각 상한."""
+def _order_key(at, sub, i):
+    """일지 줄 순서 열쇠: 시각(시간대 있음) → 같은 시각이면 sub → 파일 순서. 시각을 못 읽으면 맨 뒤(파일 순서)."""
+    try:
+        t = datetime.fromisoformat(at)
+        if t.tzinfo is not None:
+            return (0, t.timestamp(), sub, i)
+    except (TypeError, ValueError):
+        pass
+    return (1, 0.0, sub, i)
+
+
+def _journal(c) -> dict:
+    """이 창의 실행 일지를 시간 순서로 걸으며 일마다 '그때 마지막으로 저장된 봉(base)'과 '처리하려던 봉(target)'을 정한다
+    (2c 검토 R-2·R-3·R-5). 봉이 없는 실행 줄(자료 멈춤·관문 거절·종료 코드 6·날짜 없는 L·잠금 초과·끝 줄 없는 실행)을
+    어느 봉의 일로 셀지 정하는 데 쓴다 — 시각이 아니라 '그 실행이 처리하려던 봉'으로 판정 창(S+62)·달을 나눈다.
+    - 저장된 봉: runs.jsonl 끝 줄의 bars. 끝 줄이 없는 봉은 하루 기록 run_at 의 때(그 시각 이전의 마지막 끝 줄 없는 시작 줄
+      바로 뒤)에 저장된 것으로 본다.
+    - target: base 보다 뒤인 날짜 중 (1) 그 실행 일지의 D·L 문제 날짜 (2) 그 실행의 calendar.jsonl 줄 날짜 목록
+      (3) 장부 하루 기록 날짜(다음에 저장된 봉 = 달력의 다음 거래일, L16) 에서 가장 이른 것. 셋 다 없으면 None(모름)."""
+    if c._journal is not None:
+        return c._journal
+    mk = c.mk
+    end_ids = {r.get("run_id") for r in c.runs if r.get("event") == "end" and r.get("run_id")}
+    evs = []
+    covered = set()
+    for i, r in enumerate(c.runs):
+        if not c.inwin(r):
+            continue
+        kind = {"end": "end", "lock_timeout": "lock"}.get(r.get("event"))
+        if r.get("event") == "start" and r.get("run_id") not in end_ids:
+            kind = "orphan"                                   # 시작 줄만 있고 끝 줄이 없음(kill·전원 꺼짐)
+        if kind is None:
+            continue
+        ev = {"kind": kind, "rec": r, "run_id": r.get("run_id"), "key": _order_key(r.get("at"), 0, i),
+              "bars": list(r.get("bars") or []) if kind == "end" else []}
+        if kind == "end":
+            covered |= set(ev["bars"])
+        evs.append(ev)
+    for i, r in enumerate(c.errors):
+        if c.inwin(r) and any(isinstance(p, dict) and p.get("level") == "L" for p in r.get("problems") or []):
+            evs.append({"kind": "error", "rec": r, "run_id": r.get("run_id"), "key": _order_key(r.get("at"), 0, i),
+                        "bars": []})
+    orphans = sorted((e for e in evs if e["kind"] == "orphan" and e["rec"].get("command") in ("run", "start")),
+                     key=lambda e: e["key"])
+    for row in c.canon:                                      # 끝 줄 없이 저장된 봉(커밋 뒤 꺼진 실행)
+        d = row["date"]
+        if d in covered:
+            continue
+        rk = _order_key(row.get("run_at"), 0, 0)
+        host = [o for o in orphans if o["key"][:2] <= rk[:2]] if rk[0] == 0 else []
+        key = (host[-1]["key"][:3] + (host[-1]["key"][3] + 0.5,)) if host else _order_key(row.get("run_at"), 1, 0)
+        evs.append({"kind": "save", "rec": {}, "run_id": None, "key": key, "bars": [d]})
+    evs.sort(key=lambda e: e["key"])
+    last = None
+    for ev in evs:
+        ev["before"] = last
+        if ev["kind"] in ("end", "save") and ev["bars"]:
+            last = max([x for x in (last,) if x] + ev["bars"])
+        ev["base"] = max(ev["bars"]) if ev["kind"] == "end" and ev["bars"] else ev["before"]
+    by_run = {}
+    for ev in evs:
+        if ev["kind"] in ("end", "orphan") and ev["run_id"]:
+            by_run.setdefault(ev["run_id"], ev)
+    for ev in evs:
+        if ev["kind"] != "save":
+            ev["target"] = _target(c, ev)
+    for ev in evs:                                           # L 기록: 봉 날짜가 있으면 그 날짜, 없으면 그 실행의 봉
+        if ev["kind"] == "error":
+            date = ev["rec"].get("date")
+            run = by_run.get(ev["run_id"])
+            if isinstance(date, str) and date:
+                ev["target"], ev["base"] = date, (run or ev)["base"]
+            elif run is not None:
+                ev["target"], ev["base"] = run["target"], run["base"]
+    outside = [r for r in c.errors + [x for x in c.runs if x.get("event") in ("end", "lock_timeout")]
+               if r.get("market") == mk and r.get("start_date") == c.S and not c.inwin(r)]
+    c._journal = {"events": [e for e in evs if e["kind"] != "save"], "by_run": by_run, "outside": len(outside)}
+    return c._journal
+
+
+def _target(c, ev):
+    base = ev["base"]
+    if base is None:
+        return None
+    rec = ev["rec"]
+    found = [p.get("date") for p in rec.get("problems") or []
+             if isinstance(p, dict) and p.get("level") in ("D", "L") and isinstance(p.get("date"), str)
+             and p.get("date") > base]
+    if found:
+        return min(found)
+    cl = c.cal_by_run.get(ev["run_id"]) if ev["run_id"] else None
+    if cl is not None:
+        nxt = [d for d in cl.get("dates") or [] if isinstance(d, str) and d > base]
+        if nxt:
+            return min(nxt)
+    return next((d for d in c.dates if d > base), None)
+
+
+def _scope(ev, B, unknown_in) -> str:
+    """일 ev 가 보고서 범위(처리하려던 봉 ≤ B)에 드는가: "in" / "out" / "unknown"(어느 봉의 일인지 모름).
+    target 을 모르면: 그때 마지막 저장 봉이 이미 B 이상이면 B 뒤의 일(out), 아니면 unknown_in 에 따라 in/unknown."""
+    t = ev["target"]
+    if t is not None:
+        return "in" if t <= B else "out"
+    if ev["base"] is not None and ev["base"] >= B:
+        return "out"
+    return "in" if unknown_in else "unknown"
+
+
+def _l_events(c, J) -> list:
+    """②-1 L 오류(2c 검토 R-2): errors.jsonl 의 L 줄과 runs.jsonl 끝 줄 중 종료 코드 2 인 실행을 run_id 로 합친 합집합.
+    (errors.jsonl 줄이 반쯤 쓰였거나 쓰기에 실패해도 runs.jsonl 의 종료 코드 2 로 잡는다.) 시작 줄만 있고 끝 줄이 없는
+    실행은 L 로 세지 않는다(따로 '끝 기록 없는 실행')."""
+    out = {}
+    for ev in J["events"]:
+        if ev["kind"] == "error":
+            k = ev["run_id"] or f"error#{id(ev)}"
+            e = out.setdefault(k, {"run_id": ev["run_id"], "target": ev["target"], "base": ev["base"], "codes": set(),
+                                   "src": set(), "at": ev["rec"].get("at")})
+            e["codes"] |= {str(p.get("code")) for p in ev["rec"].get("problems") or []
+                           if isinstance(p, dict) and p.get("level") == "L"}
+            e["src"].add("errors")
+            if e["target"] is None:
+                e["target"], e["base"] = ev["target"], ev["base"]
+    for ev in J["events"]:
+        if ev["kind"] == "end" and ev["rec"].get("exit_code") == h1.EXIT_LOGIC:
+            k = ev["run_id"] or f"end#{id(ev)}"
+            e = out.get(k)
+            if e is None:
+                out[k] = {"run_id": ev["run_id"], "target": ev["target"], "base": ev["base"],
+                          "codes": {"(errors.jsonl 기록 없음 — 종료 코드 2)"}, "src": {"runs"}, "at": ev["rec"].get("at")}
+            else:
+                e["src"].add("runs")
+    fps = {(r.get("error_run_id"), r.get("bar")) for r in c.changes
+           if r.get("kind") == "false_positive" and r.get("market") == c.mk}
+    for e in out.values():
+        e["false_positive"] = bool(e["run_id"]) and (e["run_id"], e["target"]) in fps
+    return list(out.values())
+
+
+def _restart_info(c) -> dict:
+    """재시작 수(2c 검토 R-7) = 셋 중 가장 큰 값: meta.restart_no(HEAD 로 보호), restarts.jsonl 의 restart_id 중
+    'done' 이거나 보관 폴더가 실제로 있는 것, archive/<시장>-* 폴더 수. 셋이 다르면 경고.
+    지금 창을 옮기려던 'moving' 줄(보관 폴더 없음, 시장 폴더 그대로)은 재시작으로 세지 않고 '끝나지 않은 restart 기록'."""
+    groups = {}
+    for r in c.restart_lines:
+        if r.get("market") != c.mk:
+            continue
+        g = groups.setdefault(h1._restart_id(r), {"recs": []})
+        g["recs"].append(r)
+        for k in ("at", "reason", "old_start", "old_last", "restart_no", "archive"):
+            if g.get(k) is None and r.get(k) is not None:
+                g[k] = r.get(k)
+    counted, pending = [], []
+    for g in groups.values():
+        done = any(r.get("status", "done") == "done" for r in g["recs"])
+        try:
+            arch = bool(g.get("archive")) and h1._archive_path(c.root, g).exists()
+        except (h1.H1Refused, ValueError):
+            arch = False
+        g["done"] = done
+        (counted if done or arch else pending).append(g)
+    adir = h1.h1_path(c.root, "archive")
+    n_arch = sum(1 for x in adir.iterdir() if x.is_dir() and x.name.startswith(f"{c.mk}-")) if adir.is_dir() else 0
+    meta_n = c.meta.get("restart_no")
+    meta_n = meta_n if isinstance(meta_n, int) and not isinstance(meta_n, bool) else 0
+    sources = {"meta.restart_no": meta_n, "restarts.jsonl": len(counted), "archive 폴더": n_arch}
+    return {"used": max(sources.values()), "sources": sources, "mismatch": len(set(sources.values())) > 1,
+            "list": [{k: g.get(k) for k in ("at", "reason", "old_start", "old_last", "done")} for g in counted],
+            "pending": [{k: g.get(k) for k in ("at", "reason", "old_start", "old_last")} for g in pending]}
+
+
+def _ops(c, bar_upto, B, unknown_in, end_at, allowed, allowed_why):
+    """운영 기준 칸. bar_upto = 하루 기록을 볼 마지막 봉. 일지 줄은 '처리하려던 봉 ≤ B' 인 것만 센다(_journal·_scope):
+    최종 = S+62(다 찼을 때), 월간 = 그달 마지막 날. unknown_in = 어느 봉의 일인지 모르는 줄을 넣을지(아니면 따로 셈).
+    end_at = 변경 일지·기업 행위의 시각 상한(그 봉을 저장한 때)."""
     mk, S = c.mk, c.S
-    inwin = lambda r: r.get("market") == mk and h1._in_window(r, S, c.created_at)   # noqa: E731
 
     def in_time(r):
         return end_at is None or _le_time(r.get("at"), end_at)
 
     dates = [d for d in c.dates if d <= bar_upto]
     out = {"n_bars": len(dates), "window_bars": int(c.rule("window_bars", h1.WINDOW_BARS)), "first": S,
-           "last": dates[-1] if dates else None}
+           "last": dates[-1] if dates else None, "bound": B}
     # 빠진 날: calendar.jsonl 마지막 정상 줄의 날짜 목록(S ~ 마지막 처리 봉) vs 하루 기록
     if c.cal_line is not None:
         cal = [d for d in c.cal_line.get("dates") or [] if S <= d <= bar_upto]
@@ -615,44 +850,63 @@ def _ops(c, bar_upto, jr_upto, end_at, allowed, allowed_why):
                           for r in _rows(c, arm, tn, bar_upto) if r.get("late")})
     out["late_calls"] = sum(r.get("late_calls") or 0 for arm in h1.ARMS for tn in h1.TRAINERS
                             for r in _rows(c, arm, tn, bar_upto))
-    # 일지(runs.jsonl 끝 줄): 이 창(h1._in_window) + 판정 창 안(봉이 jr_upto 이하, 봉 없는 줄은 시각이 end_at 이하)
-    ends = [r for r in c.runs if r.get("event") == "end" and inwin(r)]
+    # 실행 일지: 이 창(h1._in_window) + 처리하려던 봉이 범위(≤ B) 안인 것
+    J = _journal(c)
+    unknown = Counter()
 
-    def relevant(r):
-        bars = r.get("bars") or []
-        return any(b <= jr_upto for b in bars) if bars else in_time(r)
+    def pick(evs, label):
+        got = []
+        for ev in evs:
+            sc = _scope(ev, B, unknown_in)
+            if sc == "in":
+                got.append(ev)
+            elif sc == "unknown":
+                unknown[label] += 1
+        return got
 
-    rel = [r for r in ends if relevant(r)]
-    procs = [r for r in rel if r.get("command") in ("run", "start")]
-    out["batch_max"] = max((len(r.get("bars") or []) for r in procs), default=0)
-    out["backlog_fail"] = sum(1 for r in rel if r.get("exit_code") == h1.EXIT_BACKLOG)
-    out["gate_refused"] = sum(1 for r in rel if r.get("exit_code") == h1.EXIT_GATE)
-    # 봉을 몇 개 저장한 뒤 멈춘 실행의 멈춤은 '마지막으로 저장한 봉 다음 봉'의 일이다 → 그 봉이 범위(jr_upto) 밖이면 안 셈
-    stops = [r for r in rel if r.get("exit_code") in (h1.EXIT_DATA, h1.EXIT_D7)
-             and (not r.get("bars") or max(r["bars"]) < jr_upto)]
+    ends = [ev for ev in J["events"] if ev["kind"] == "end"]
+    procs = [ev for ev in ends if ev["rec"].get("command") in ("run", "start") and ev["bars"]]
+    out["batch_max"] = max((len(ev["bars"]) for ev in procs if any(b <= B for b in ev["bars"])), default=0)
+    code = lambda ev: ev["rec"].get("exit_code")   # noqa: E731
+    out["backlog_fail"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_BACKLOG], "밀린 봉 초과(6)"))
+    out["gate_refused"] = len(pick([ev for ev in ends if code(ev) == h1.EXIT_GATE], "관문 거절(3)"))
+    stops = pick([ev for ev in ends if code(ev) in (h1.EXIT_DATA, h1.EXIT_D7)], "자료 멈춤(4·7)")
     out["data_stops"] = len(stops)
 
-    def kinds_of(r):
-        ks = sorted({str(p.get("code")) for p in r.get("problems") or [] if p.get("level") == "D"})
+    def kinds_of(ev):
+        ks = sorted({str(p.get("code")) for p in ev["rec"].get("problems") or []
+                     if isinstance(p, dict) and p.get("level") == "D"})
         return ks or ["(종류 없음)"]
-    out["data_kinds"] = dict(sorted(Counter(k for r in stops for k in kinds_of(r)).items()))
-    out["data_by_exit"] = {code: {"n": sum(1 for r in stops if r.get("exit_code") == code),
-                                  "kinds": dict(sorted(Counter(k for r in stops if r.get("exit_code") == code
-                                                               for k in kinds_of(r)).items()))}
-                           for code in (h1.EXIT_DATA, h1.EXIT_D7)}
-    out["lock_timeouts"] = sum(1 for r in c.runs if r.get("event") == "lock_timeout" and inwin(r) and in_time(r))
-    errs = [r for r in c.errors if inwin(r) and ((r.get("date") <= jr_upto) if r.get("date") else in_time(r))]
+    out["data_kinds"] = dict(sorted(Counter(k for ev in stops for k in kinds_of(ev)).items()))
+    out["data_by_exit"] = {x: {"n": sum(1 for ev in stops if code(ev) == x),
+                               "kinds": dict(sorted(Counter(k for ev in stops if code(ev) == x
+                                                            for k in kinds_of(ev)).items()))}
+                           for x in (h1.EXIT_DATA, h1.EXIT_D7)}
+    out["lock_timeouts"] = len(pick([ev for ev in J["events"] if ev["kind"] == "lock"], "잠금 초과(5)"))
+    out["no_end"] = len(pick([ev for ev in J["events"] if ev["kind"] == "orphan"], "끝 기록 없는 실행"))
+    # ②-1 L 오류: errors.jsonl ∪ runs.jsonl 종료 코드 2 (run_id 로 한 번), 사전 등록 ④ 거짓 양성 판정은 빼고 따로
+    lev = []
+    for e in _l_events(c, J):
+        sc = _scope(e, B, unknown_in)
+        if sc == "unknown":
+            unknown["장부 논리 오류(L)"] += 1
+        elif sc == "in":
+            lev.append(e)
+    errs = [e for e in lev if not e["false_positive"]]
     out["l_errors"] = len(errs)
-    out["l_codes"] = dict(sorted(Counter(p.get("code") for r in errs for p in r.get("problems") or []
-                                         if p.get("level") == "L").items()))
-    out["l_list"] = [(r.get("at"), r.get("date"), ", ".join(sorted({p.get("code") for p in r.get("problems") or []
-                                                                     if p.get("level") == "L"})))
-                     for r in errs]
+    out["l_false_positive"] = len(lev) - len(errs)
+    out["l_codes"] = dict(sorted(Counter(k for e in errs for k in e["codes"]).items()))
+    out["l_runs_only"] = sum(1 for e in errs if e["src"] == {"runs"})
+    out["l_list"] = [(e["at"], e["target"], ", ".join(sorted(e["codes"]))) for e in errs]
+    out["unknown"] = dict(sorted(unknown.items()))
+    out["outside"] = J["outside"]
+    out["broken"] = {k: v for k, v in c.broken.items() if v}
     # 다른 지문으로 처리한 봉 (②-3): 하루 기록·실행 일지의 (code_hash, env) 가 재현 통과 기록에 없음
     bad_rows = sorted({r["date"] for arm in h1.ARMS for tn in h1.TRAINERS for r in _rows(c, arm, tn, bar_upto)
                        if allowed is None or (r.get("code_hash"), h1.env_key(r.get("env"))) not in allowed})
-    bad_runs = sorted({b for r in procs for b in (r.get("bars") or []) if b <= jr_upto
-                       and (allowed is None or (r.get("code_hash"), h1.env_key(r.get("env"))) not in allowed)})
+    bad_runs = sorted({b for ev in procs for b in ev["bars"] if b <= B and b <= bar_upto
+                       and (allowed is None or (ev["rec"].get("code_hash"), h1.env_key(ev["rec"].get("env")))
+                            not in allowed)})
     out["other_fp_rows"], out["other_fp_runs"] = bad_rows, bad_runs
     out["other_fp"] = sorted(set(bad_rows) | set(bad_runs))
     out["allowed_n"] = None if allowed is None else len(allowed)
@@ -668,22 +922,17 @@ def _ops(c, bar_upto, jr_upto, end_at, allowed, allowed_why):
                                f"FinanceDataReader {env.get('FinanceDataReader')}"})
             prev = k
     out["fingerprints"] = fps
-    # 재시작 · 코드 변경 일지 · 기업 행위
-    groups = {}                                        # restart_id → 의도 줄('moving')·끝 줄('done')을 합친 것
-    for r in h1._restart_records(mk, c.root):
-        g = groups.setdefault(h1._restart_id(r), {})
-        for k in ("at", "reason", "old_start", "old_last", "restart_no"):
-            if g.get(k) is None and r.get(k) is not None:
-                g[k] = r.get(k)
-        g["done"] = g.get("done", False) or r.get("status", "done") == "done"
-    out["restarts"] = list(groups.values())
-    out["restarts_used"] = h1._count_restarts(mk, c.root)
+    # 재시작(R-7) · 코드 변경 일지 · 기업 행위
+    rs = _restart_info(c)
+    out["restarts"], out["restarts_pending"] = rs["list"], rs["pending"]
+    out["restarts_used"], out["restart_sources"], out["restart_mismatch"] = rs["used"], rs["sources"], rs["mismatch"]
     max_rs = int(c.rule("max_restarts", h1.MAX_RESTARTS))
     out["max_restarts"] = max_rs
     out["restarts_left"] = max(0, max_rs - out["restarts_used"])
-    ch = [r for r in c.changes if (r.get("market") in (mk, None)) and (c.created_at is None
-                                                                          or not _le_time(r.get("at"), c.created_at))
-          and in_time(r)]
+    ch_all = [r for r in c.changes if (r.get("market") in (mk, None)) and (c.created_at is None
+                                                                             or not _le_time(r.get("at"), c.created_at))]
+    ch = [r for r in ch_all if in_time(r)]
+    out["changes_after"] = len(ch_all) - len(ch)
     # 변경 일지: 같은 일의 의도 줄(pending)·끝 줄(done/abandoned)은 한 번으로(run_id), 종류별로 센다
     seen_ch, kinds = set(), Counter()
     for r in ch:
@@ -775,7 +1024,7 @@ def _trades(c, start, cut):
     out = {}
     for arm in h1.ARMS:
         a = {"stock_buy": 0, "stock_sell": 0, "idle_buy": 0, "idle_sell": 0, "delist": 0,
-             "skips": {k: 0 for k in SKIP_KINDS}, "over_slots": 0,
+             "skips": {k: 0 for k in SKIP_KINDS}, "over_slots": 0, "marathon_short": 0,
              "cost": {kind: {"fee": 0.0, "slip": 0.0, "tax": 0.0} for kind in ("stock", "idle")}}
         for tn in h1.TRAINERS:
             st = c.states[arm][tn]
@@ -792,23 +1041,45 @@ def _trades(c, start, cut):
             for s in st["skips"]:
                 if start <= s["date"] <= cut:
                     a["skips"][s["kind"]] = a["skips"].get(s["kind"], 0) + 1
+                    if tn == h1.TRAINERS[0] and s["kind"] == "현금부족":
+                        a["marathon_short"] += 1
             a["over_slots"] += sum(r.get("over_slots") or 0 for r in _rows(c, arm, tn, cut, start))
         out[arm] = a
     return out
 
 
+def _shadow_desc(start_cash, prev, value) -> str:
+    """그림자 서킷이 걸린 날의 쉬운 설명(risk_guard 와 같은 순서: 누적 먼저, 그다음 하루)."""
+    cum_lim, day_lim = h1.SHADOW_BREAKER
+    cum = value / start_cash - 1 if start_cash else 0.0
+    if cum <= -cum_lim:
+        what = f"누적 {cum * 100:.1f}%(한도 -{cum_lim * 100:.0f}%)"
+    else:
+        day = value / prev - 1 if prev else 0.0
+        what = f"하루 {day * 100:.1f}%(한도 -{day_lim * 100:.0f}%)"
+    return what + " — 서킷이 켜져 있었다면 멈췄을 날(실제로는 팔거나 멈추지 않음)"
+
+
 def _shadow(c, cut):
-    """그림자 서킷: (장부, 트레이너)별 첫 발동일·사유·발동한 날 수 (S ~ cut)."""
+    """그림자 서킷: (장부, 트레이너)별 첫 발동일·사유·발동한 날 수 (S ~ cut). why = 장부에 적힌 risk_guard 문구 그대로,
+    desc = 보고서용 쉬운 설명(그날 평가액으로 다시 계산한 누적·하루 변화)."""
     out = []
     for arm in h1.ARMS:
         for tn in h1.TRAINERS:
-            hits = [(r["date"], e) for r in _rows(c, arm, tn, cut) for e in r.get("events") or []
-                    if e.get("kind") == "shadow_breaker"]
-            days = sorted({d for d, _ in hits})
+            rows = _rows(c, arm, tn, cut)
+            hits, prev = [], None
+            for r in rows:
+                for e in r.get("events") or []:
+                    if e.get("kind") == "shadow_breaker":
+                        hits.append((r["date"], e, prev, r["value"]))
+                prev = r["value"]
+            days = sorted({d for d, _, _, _ in hits})
             first = hits[0] if hits else None
+            sc = c.states[arm][tn]["start_cash"]
             out.append({"arm": arm, "trainer": tn, "first": first[0] if first else None,
-                        "why": first[1].get("why") if first else None, "days": len(days),
-                        "flag_first": next((d for d, e in hits if e.get("first")), None)})
+                        "why": first[1].get("why") if first else None,
+                        "desc": _shadow_desc(sc, first[2], first[3]) if first else None, "days": len(days),
+                        "flag_first": next((d for d, e, _, _ in hits if e.get("first")), None)})
     return out
 
 
@@ -898,15 +1169,18 @@ def _interest(c, cut, period_start, rates):
     last_rate = info["last"]
     offline = rates["mode"] != "online"
     table = []
+    monthly_rule = res["rule"] == "prev_month"
     for d, key, got, v, i in zip(res["dates"], res["keys"], res["rate_dates"], res["rates"], res["interest"]):
         if not math.isfinite(v):
             note = "금리 없음(자료보다 앞) → 0 으로 계산"
         elif key > last_rate:
-            note = f"자료 끝 → {got} 값 이월" + (f" (오프라인: {got} 값 이월)" if offline else "")
+            note = (f"자료 끝 → {got[:7] if monthly_rule else got} 값 이월"
+                    + (f" (오프라인: {got} 값 이월)" if offline else ""))
         elif got != key:
-            note = f"그날 값 없음 → {got} 값"
+            note = (f"전달({key[:7]}) 값 없음 → {got[:7]} 값 이월" if monthly_rule
+                    else f"전 거래일 {key} 값 없음(휴일) → {got} 값")
         else:
-            note = ""
+            note = f"전달({key[:7]}) 값 사용(월 금리)" if monthly_rule else ""
         table.append({"date": d, "key": key, "rate_date": got, "rate": v, "interest": i, "note": note})
     before = [x["interest"] for x in table if x["date"] < period_start]
     v0, v1 = team0[-1]["value"], team1[-1]["value"]
@@ -936,6 +1210,9 @@ def _rates_for(mk, root, online):
 # ============================ 장부 다시 점검 (§3.8-10) ============================
 
 def _recheck(c, cut_date=None):
+    """장부 다시 점검(§3.8-10): 저장 자료(만든 때의 장부 전체)로 h1_check 를 다시 돈다.
+    cut_date 가 있으면 날짜가 그 봉 이하이거나 날짜 없는 문제를 'n_window' 로(최종 판정 ②-1),
+    날짜가 cut_date 이하인 문제만 'n_upto' 로(월간 10절: 그달 마지막 봉까지의 하루 기록) 따로 센다(2c 검토 R-6)."""
     cal = c.cal_line.get("dates") if c.cal_line else None
     probs = []
     for arm in h1.ARMS:
@@ -954,9 +1231,11 @@ def _recheck(c, cut_date=None):
     except h1.H1LogicError as e:
         uni_ok, uni_why = False, str(e)
     in_win = [p for p in errs if cut_date is None or p.date is None or p.date <= cut_date]
+    upto = [p for p in errs if p.date is not None and (cut_date is None or p.date <= cut_date)]
     return {"n": len(errs), "codes": dict(sorted(Counter(p.code for p in errs).items())),
             "list": [f"{p.code} {p.arm or ''}/{p.trainer or ''} {p.date or ''}: {p.detail}" for p in errs[:20]],
-            "n_window": len(in_win), "universe_ok": uni_ok, "universe_why": uni_why,
+            "n_window": len(in_win), "n_upto": len(upto), "n_nodate": sum(1 for p in errs if p.date is None),
+            "cut": cut_date, "universe_ok": uni_ok, "universe_why": uni_why,
             "calendar_at": c.cal_line.get("at") if c.cal_line else None}
 
 
@@ -995,16 +1274,17 @@ def _collect_locked(mk, root, month, final, online) -> dict:
         cut = max(d for d in c.dates if d <= f"{month}-31")
         period_start = max(S, f"{month}-01")
         year_start = max(S, f"{month[:4]}-01-01")
-    # 운영 기준·일지는 S ~ cut 까지만 본다(최종: S+62 까지, 월간: 그달 마지막 처리 봉까지 — 지난달 보고서를 다시 만들어도
-    # 그 뒤 일이 섞이지 않게). 아직 진행 중인 창(최종 판정 전·이번 달)은 마지막 저장 뒤의 멈춤·거절(봉 없는 줄)까지 넣는다.
+    # 운영 기준·일지는 S ~ cut 까지만 본다. 일지 줄은 '그 실행이 처리하려던 봉'으로 나눈다(_journal, 2c 검토 R-3·R-5):
+    # 최종(다 찬 창) = S+62 까지, 덜 찬 창 = 지금까지 전부, 월간 = 그달 마지막 날까지(어느 달인지 모르는 줄은 따로 셈) —
+    # 그래서 지난달 보고서를 나중에 다시 만들어도 그달 숫자는 같다. 변경 일지·기업 행위는 그 봉을 저장한 때까지.
     if final and complete:
-        end_at, jr_upto = _saved_at(c, s62), s62
-    elif cut == last:
-        end_at, jr_upto = None, _FAR
+        B, unknown_in, end_at = s62, True, _saved_at(c, s62)
+    elif final:
+        B, unknown_in, end_at = _FAR, True, None
     else:
-        end_at, jr_upto = _saved_at(c, cut), cut
-    data.update({"cut": cut, "period_start": period_start, "end_at": end_at})
-    data["ops"] = _ops(c, cut, jr_upto, end_at, allowed, allowed_why)
+        B, unknown_in, end_at = f"{month}-31", False, _saved_at(c, cut)
+    data.update({"cut": cut, "period_start": period_start, "end_at": end_at, "bound": B})
+    data["ops"] = _ops(c, cut, B, unknown_in, end_at, allowed, allowed_why)
     data["values"] = _values(c, cut, None if final else f"{month}-01")
     data["ratios"] = {"period": _ratios(c, period_start, cut)}
     data["trades"] = {"period": _trades(c, period_start, cut)}
@@ -1014,7 +1294,7 @@ def _collect_locked(mk, root, month, final, online) -> dict:
     data["realized"] = _realized_all(c, cut, period_start, year_start)
     data["leader"] = _leader(c, S, cut)
     data["interest"] = _interest(c, cut, period_start, rates)
-    data["recheck"] = _recheck(c, s62 if final and complete else None)
+    data["recheck"] = _recheck(c, s62 if final and complete else (cut if not final else None))
     if final:
         data["verdict"] = _verdict(data)
         data["extension"] = _extension(c, s62) if complete and last > s62 else None
@@ -1033,7 +1313,9 @@ def _verdict(d) -> dict:
     c0 = {"ok": bool(d["complete"]),
           "detail": f"처리 {min(ops['n_bars'], wb)}/{wb}봉" + ("" if d["complete"] else f", 남은 봉 {ops['bars_left']}개")}
     c1 = {"ok": ops["l_errors"] == 0 and rc["n_window"] == 0,
-          "detail": f"errors.jsonl 의 L 오류 {ops['l_errors']}건, 저장 자료로 다시 점검한 L 오류 {rc['n_window']}건"}
+          "detail": f"일지의 L 오류(errors.jsonl·종료 코드 2) {ops['l_errors']}건"
+                    + (f"(거짓 양성 판정 {ops['l_false_positive']}건은 뺌, 사전 등록 ④)" if ops["l_false_positive"] else "")
+                    + f", 저장 자료로 다시 점검한 L 오류 {rc['n_window']}건"}
     missing = ops["missing"]
     c2_parts = {
         "빠진 날 0": missing is not None and not missing and not ops["extra"] and not ops["ledger_dates_differ"],
@@ -1105,10 +1387,10 @@ def _extension(c, s62) -> dict:
     """연장 기록: 판정 창(S+62) 뒤에 처리한 봉. 판정에 쓰지 않는다(사전 등록 ①)."""
     ext = [d for d in c.dates if d > s62]
     last = ext[-1]
+    lev = _l_events(c, _journal(c))
     out = {"n": len(ext), "first": ext[0], "last": last,
            "late": sum(1 for r in c.canon if r["date"] > s62 and r.get("late")),
-           "l_errors": sum(1 for r in c.errors if r.get("market") == c.mk and h1._in_window(r, c.S, c.created_at)
-                           and r.get("date") and r["date"] > s62)}
+           "l_errors": sum(1 for e in lev if _scope(e, s62, True) == "out" and not e["false_positive"])}
     for arm in h1.ARMS:
         team = _team(c, arm, last)
         base = next(r["value"] for r in reversed(team) if r["date"] <= s62)
@@ -1140,6 +1422,13 @@ def _pct(x, digits=2):
     return "계산 불가" if x is None else f"{x * 100:+.{digits}f}%"
 
 
+def _mdd_pct(x):
+    """MDD 표기: 낙폭이 없으면 '0.00%'(+ 기호 없음), 있으면 '-4.24%'."""
+    if x is None:
+        return "계산 불가"
+    return "0.00%" if x == 0 else f"{x * 100:.2f}%"
+
+
 def _pp(x):
     return "계산 불가" if x is None else f"{x:+.2f}%p"
 
@@ -1168,10 +1457,19 @@ def render(d) -> str:
                  + (f" ~ S+62 {d['s62']}" if d["complete"] else " (아직 끝나지 않음)"))
     else:
         L.append(f"# H1 포워드 월간 보고서 — {d['name']}({mk}) {d['month']} · 판정 창 S {S}")
-    L += ["",
-          f"- 기준: 저장된 마지막 봉 {d['last']} (HEAD {d['head']['run_id']}, {d['head']['written_at']}) · "
-          f"이 보고서의 값은 {d['period_start']} ~ {d['cut']}" + (" (S 이후 누적도 같이)" if d["kind"] != "final" else ""),
-          f"- 시작 금액(두 장부 같음): {_money(mk, val['arms']['A0']['start'])} · 재시작 번호 {d['restart_no']} · "
+    if d["kind"] == "final":
+        L += ["",
+              f"- 이 보고서의 값은 {d['period_start']} ~ {d['cut']}"
+              + (" (판정 창 S ~ S+62 로 고정)" if d["complete"] else " (지금까지)"),
+              f"- 만든 때의 장부: 저장된 마지막 봉 {d['last']} (HEAD {d['head']['run_id']}, {d['head']['written_at']})"]
+    else:
+        L += ["",
+              f"- **이 달 숫자(2~9절)는 그달 마지막 처리 봉 {d['cut']} 까지로 고정**이다: 값은 {d['period_start']} ~ "
+              f"{d['cut']} (S 이후 누적도 같이), 일지는 '그 실행이 처리하려던 봉'이 {d['month']} 안인 것까지. "
+              "다음 달 봉을 더 처리한 뒤 다시 만들어도 이 숫자는 같다.",
+              f"- 머리말의 HEAD 와 10절 다시 점검의 '만든 때' 부분은 **보고서를 만든 때의 장부 전체** 기준이다: 저장된 마지막 봉 "
+              f"{d['last']} (HEAD {d['head']['run_id']}, {d['head']['written_at']})"]
+    L += [f"- 시작 금액(두 장부 같음): {_money(mk, val['arms']['A0']['start'])} · 재시작 번호 {d['restart_no']} · "
           f"창 만든 시각 {d['created_at']}",
           "- 진짜 돈·진짜 주문은 없다. 장부(가짜 지갑)만 쓴다.", ""]
     # 1. 고정 문장
@@ -1241,8 +1539,10 @@ def _render_ops(d):
     final = d["kind"] == "final"
     if final and d["complete"]:
         head = f"## 2. 운영 기준 (판정 창 안: S {d['S']} ~ S+62 {d['s62']})"
-    else:
+    elif final:
         head = f"## 2. 운영 기준 (판정 아님 — 이 창의 S {d['S']} ~ {ops['last']} 상태)"
+    else:
+        head = f"## 2. 운영 기준 (판정 아님 — 이 창의 S {d['S']} ~ {d['month']} 끝까지)"
     L = [head, ""]
     prog = f"{min(ops['n_bars'], ops['window_bars'])}/{ops['window_bars']}봉"
     if ops["n_bars"] > ops["window_bars"]:
@@ -1263,10 +1563,13 @@ def _render_ops(d):
     stops_txt = (f"{ops['data_stops']}번 — 종료 코드 4(자료 D1~D6·사전 조건 PRE·환경 ENV) {be[h1.EXIT_DATA]['n']}번: {k4} / "
                  f"종료 코드 7(기준 지수 늦음) {be[h1.EXIT_D7]['n']}번: {k7} (재시작 아님)")
     l_codes = ", ".join(f"{k} {v}" for k, v in ops["l_codes"].items())
+    l_txt = (f"{ops['l_errors']}건" + (f" ({l_codes})" if l_codes else "") + " — 0 이어야 함(②-1)"
+             + (f" · 그중 errors.jsonl 기록 없이 종료 코드 2 로만 남은 실행 {ops['l_runs_only']}번" if ops["l_runs_only"] else "")
+             + (f" · 거짓 양성으로 판정(사전 등록 ④) {ops['l_false_positive']}건은 뺌" if ops["l_false_positive"] else ""))
+    rs = ops["restart_sources"]
     rows = [
         ["판정 창 진행", f"{prog} · 시작 S {ops['first']} · {end}"],
-        ["장부 논리 오류(L, errors.jsonl)", f"{ops['l_errors']}건" + (f" ({l_codes})" if l_codes else "")
-         + " — 0 이어야 함(②-1)"],
+        ["장부 논리 오류(L: errors.jsonl + 종료 코드 2 실행)", l_txt],
         ["빠진 날(calendar.jsonl vs 하루 기록)", miss + " — 0 이어야 함(②-2)"],
         ["늦은 봉(다음 장 시작 뒤 처리)", f"{len(ops['late'])}개 / 상한 {ops['max_late_total']}"
          + (f" ({', '.join(ops['late'][:12])})" if ops["late"] else "")
@@ -1279,21 +1582,40 @@ def _render_ops(d):
         ["관문 거절(종료 코드 3: 재현 미통과 코드·환경 또는 규칙 다름)", f"{ops['gate_refused']}번"],
         ["자료 멈춤(종료 코드 4·7)", stops_txt],
         ["잠금 30분 초과(종료 코드 5)", f"{ops['lock_timeouts']}번"],
+        ["끝 기록 없는 실행(kill·전원 꺼짐 — 판정에는 안 씀)", f"{ops['no_end']}번"],
         ["재시작", f"{ops['restarts_used']}번 / 상한 {ops['max_restarts']} (남은 {ops['restarts_left']}번)"],
         ["마감", f"{ops['deadline']} 까지 {ops['days_to_deadline']}일(마지막 처리 봉 기준) · "
                  f"평일 {ops['weekdays_to_deadline']}일 · 남은 창 봉 {ops['bars_left']}개"],
     ]
+    if ops["unknown"]:
+        rows.append(["어느 달인지 모름(처리하려던 봉을 아직 모름 — 이 달 숫자에 안 넣음)",
+                     ", ".join(f"{k} {v}" for k, v in ops["unknown"].items())])
     L += _table(["항목", "값"], rows)
     L.append("")
+    L.append("- 일지 줄은 '그 실행이 처리하려던 봉'으로 셈한다(봉을 몇 개 저장한 뒤 멈췄으면 그 다음 봉의 일).")
+    if ops["outside"]:
+        L.append(f"- 창 밖 기록 {ops['outside']}줄: start_date 는 이 창의 S 와 같지만 창이 만들어지기 전의 줄(실패한 start, "
+                 "같은 S 의 옛 창)이라 세지 않았다.")
+    if ops["broken"]:
+        L.append("- ※ 읽지 못한(깨진) 일지 줄: " + ", ".join(f"{k} {v}줄" for k, v in ops["broken"].items())
+                 + " — 쓰다 꺼진 줄일 수 있다. 장부 논리 오류는 runs.jsonl 의 종료 코드 2 로도 센다.")
+    if ops["restart_mismatch"]:
+        L.append("- ※ 재시작 수의 출처가 서로 다름: " + ", ".join(f"{k} {v}" for k, v in rs.items())
+                 + " → 가장 큰 값으로 셈. restarts.jsonl·archive/ 폴더를 사람이 확인하세요.")
     if ops["restarts"]:
         L.append("- 재시작 기록: " + "; ".join(f"{r['at']} (옛 S {r['old_start']} ~ {r['old_last']}, 사유 {r['reason']!r})"
                                            for r in ops["restarts"]))
+    if ops["restarts_pending"]:
+        L.append("- 끝나지 않은 restart 기록(폴더를 아직 옮기지 않음 — 재시작으로 세지 않음): "
+                 + "; ".join(f"{r['at']} 사유 {r['reason']!r}" for r in ops["restarts_pending"])
+                 + " → 다시 python h1.py restart 를 치면 마저 하거나, 의도가 아니면 사람이 확인")
     fps = ops["fingerprints"]
     L.append(f"- 코드·환경 지문: {len(fps)}가지" + (" (바뀐 날 " + ", ".join(
         f"{f['date']} code {f['code_hash']}… / {f['env']}" for f in fps[1:]) + ")" if len(fps) > 1 else "")
         + (f" · 처음 {fps[0]['date']} code {fps[0]['code_hash']}… / {fps[0]['env']}" if fps else ""))
     ch = ", ".join(f"{CHANGE_WORD.get(k, k)} {v}" for k, v in ops["changes"].items()) or "없음"
-    L.append(f"- 코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤): {ch}")
+    L.append(f"- 코드·규칙 변경 일지(changes.jsonl, 이 창이 만들어진 뒤 ~ {d['cut']} 저장 때): {ch}"
+             + (f" · 그 뒤의 변경 {ops['changes_after']}줄은 다음 봉의 달에 셈" if ops["changes_after"] and not final else ""))
     if ops["amend"]:
         L.append("- 세율 줄 추가(amend-rules): " + "; ".join(f"{a} 출처 {s}" for a, s in ops["amend"]))
     corp = ops["corp"]
@@ -1320,12 +1642,12 @@ def _render_values(d):
     for arm in h1.ARMS:
         a = val["arms"][arm]
         rows.append([f"{arm} {ARM_WORD[arm]}", _money(mk, a["value"]), _pct(a["ret"])]
-                    + ([_pct(a["ret_period"])] if monthly else []) + [_pct(a["mdd"])])
+                    + ([_pct(a["ret_period"])] if monthly else []) + [_mdd_pct(a["mdd"])])
     bh_txt = _money(mk, bh["value"]) if bh["started"] else "아직 없음(S+1 시가에 시작)"
     rows.append([f"{idle} 들고 있기(같은 시작: S+1 시가·소수 단위)", bh_txt,
                  _pct(bh["return"]) if bh["started"] else "-"]
                 + ([_pct(bh["ret_period"]) if bh["started"] else "-"] if monthly else [])
-                + [_pct(bh["mdd"]) if bh["started"] else "-"])
+                + [_mdd_pct(bh["mdd"]) if bh["started"] else "-"])
     L += _table(head, rows)
     L += ["",
           f"- A1−A0: {_money(mk, val['diff'], True)} ({_pp(val['diff_pp'])})"
@@ -1333,11 +1655,13 @@ def _render_values(d):
           f"- A1 − {idle} 들고 있기: {_pp(bh['a1_minus_pp'])}" if bh["started"] else f"- {idle} 들고 있기는 S+1 부터",
           f"- A1 이 들고 있는 {idle}: {h1.fmt_units(a1['units'])}단위(세 트레이너 합)"
           + (f" · {idle} 들고 있기 단위 {h1.fmt_units(bh['units'])}" if bh["started"] else ""),
-          "- 수익률 = 평가액 ÷ 시작 금액 − 1(평가액 = 현금 + 주식 × 그날 종가 + 지수 단위 × 지수 종가, 파는 비용은 빼지 않음).", ""]
+          "- 수익률 = 평가액 ÷ 시작 금액 − 1(평가액 = 현금 + 주식 × 그날 종가 + 지수 단위 × 지수 종가, 파는 비용은 빼지 않음).",
+          "- MDD(최대 낙폭) = 최고점에서 가장 많이 떨어진 비율. S 종가(= 시작 금액)부터 매일 종가 평가액으로 잰다"
+          "(R2 와 같은 방식). 떨어진 적이 없으면 0.00%.", ""]
     rows = []
     for t in val["trainers"]:
-        rows.append([t["trainer"], _money(mk, t["A0"]["value"]), _pct(t["A0"]["ret"]), _pct(t["A0"]["mdd"]),
-                     _money(mk, t["A1"]["value"]), _pct(t["A1"]["ret"]), _pct(t["A1"]["mdd"]),
+        rows.append([t["trainer"], _money(mk, t["A0"]["value"]), _pct(t["A0"]["ret"]), _mdd_pct(t["A0"]["mdd"]),
+                     _money(mk, t["A1"]["value"]), _pct(t["A1"]["ret"]), _mdd_pct(t["A1"]["mdd"]),
                      _money(mk, t["diff"], True)])
     L += ["트레이너별:", ""]
     L += _table(["트레이너", "A0 평가액", "A0 S 이후", "A0 MDD", "A1 평가액", "A1 S 이후", "A1 MDD", "A1−A0"], rows)
@@ -1383,17 +1707,21 @@ def _render_trades(d):
             rows.append(row(f"비용 {word} {kw}", lambda a, kind=kind, k=k: _money(mk, a["cost"][kind][k])))
     L = ["## 5. 매매 · 보류 · 비용", ""]
     L += _table(head, rows)
-    L += ["", "- 마라토너는 종목당 상한 30% × 5종목 = 150% 라서 4·5번째 매수는 늘 '현금 부족' 보류가 된다(team.py 그대로, R2 P6).",
+    ms = {arm: tr["period"][arm]["marathon_short"] for arm in h1.ARMS}
+    L += ["", "- 마라토너는 종목당 상한이 30% 라서 5종목을 다 채우려면 150% 가 든다 — 현금(A1 은 현금+지수)이 모자라면 4·5번째 "
+          "매수가 '현금 부족' 보류가 될 수 있다(team.py 그대로, R2 P6). "
+          f"이 기간 마라토너의 '현금 부족' 보류: A0 {ms['A0']}건 · A1 {ms['A1']}건.",
           "- A1 은 주식을 살 때 모자란 만큼만 지수를 팔고, 남은 현금(1 이상)은 다시 지수로 산다(지수 다리 비용이 생김).", ""]
     return L
 
 
 def _render_shadow(d):
-    rows = [[f"{s['arm']} {s['trainer']}", s["first"] or "없음", s["why"] or "-", s["days"]] for s in d["shadow"]]
+    rows = [[f"{s['arm']} {s['trainer']}", s["first"] or "없음", s["desc"] or "-", s["days"]] for s in d["shadow"]]
     L = [f"## 6. 그림자 서킷 (S ~ {d['cut']}, 계산만 — 장부는 바뀌지 않음)", "",
          "켜져 있었다면 걸렸을지(누적 −10%·하루 −7%)를 매일 계산만 한 기록이다. 판정에 쓰지 않는다(사전 등록 ③).", ""]
     L += _table(["장부·트레이너", "첫 발동일", "사유(첫 발동)", "발동한 날 수"], rows)
-    L += ["", "- 사유 글은 risk_guard 서킷 문구 그대로다. H1 장부는 실제로 팔지도 멈추지도 않았다(stopped 는 늘 False).",
+    L += ["", "- H1 장부는 실제로 팔지도 멈추지도 않았다(stopped 는 늘 False). 사유는 그날 평가액으로 다시 센 누적·하루 변화다"
+          "(장부 하루 기록 events 에는 risk_guard 문구가 그대로 있다).",
           "- 첫 발동 뒤에도 매일 다시 계산한다(영구 정지를 흉내 내지 않음). '발동한 날 수'는 걸렸을 날의 수다.", ""]
     return L
 
@@ -1510,10 +1838,15 @@ def _render_interest(d):
 
 def _render_recheck(d):
     rc = d["recheck"]
-    L = ["## 10. 장부 다시 점검 (저장 자료만으로 h1_check)", "",
-         f"- check_ledger(A0·A1)·check_pair·check_decisions(HEAD 의 판정 기록 앞부분 지문) → **L 오류 {rc['n']}건**"
-         + (f" ({', '.join(f'{k} {v}' for k, v in rc['codes'].items())})" if rc["codes"] else "") + " — 0 이어야 함",
-         f"- 달력: calendar.jsonl 마지막 정상 줄({rc['calendar_at'] or '없음'})",
+    monthly = d["kind"] != "final"
+    L = ["## 10. 장부 다시 점검 (저장 자료만으로 h1_check)", ""]
+    if monthly:
+        L.append(f"- **그달 마지막 봉 {d['cut']} 까지의 하루 기록**(날짜가 그 봉 이하)에서 찾은 L 오류 {rc['n_upto']}건"
+                 " — 0 이어야 함")
+    L += [f"- 만든 때의 장부 전체로 다시 돈 check_ledger(A0·A1)·check_pair·check_decisions(HEAD 의 판정 기록 앞부분 지문) → "
+          f"**L 오류 {rc['n']}건**" + (f" ({', '.join(f'{k} {v}' for k, v in rc['codes'].items())})" if rc["codes"] else "")
+          + (f", 그중 날짜 없는 것 {rc['n_nodate']}건" if rc["n_nodate"] else "") + " — 0 이어야 함",
+          f"- 달력: calendar.jsonl 마지막 정상 줄({rc['calendar_at'] or '없음'}, 만든 때 기준)",
          "- 종목군 파일 지문(L22 일부): " + ("meta 와 같음" if rc["universe_ok"] else f"**다름** ({rc['universe_why']})"),
          "- 코드·환경 지문(L22 나머지)은 2절 '다른 지문으로 처리한 봉'에 있다(재현 통과 기록과 비교).",
          "- 오프라인으로는 다시 못 보는 점검: " + "; ".join(OFFLINE_CHECKS) + "."]
