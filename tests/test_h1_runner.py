@@ -2,7 +2,7 @@
 
 장부 폴더는 tmp_path, 자료는 가짜 DataSource(tests/h1_fake_source.py), 시계는 시간대 있는 고정 시각.
 진짜 claude 는 절대 부르지 않는다: analyst.analyze_logged·analyze·claude_cli_version 을 가짜로 바꿔 끼우고,
-claude 프로세스를 띄우려 하면 실패하게 한다. 시험이 끝난 뒤 저장소에 state/ 가 생기면 실패한다.
+claude 프로세스를 띄우려 하면 실패하게 한다. 시험이 저장소 state/·results/ 를 건드리면(이미 있던 것 포함) 실패한다.
 
 설계 §6 ID ↔ 시험
 - T-F1a  test_T_F1a_*         경로 모양, H1 폴더 밖·운영 폴더 거절
@@ -75,9 +75,9 @@ class Crash(BaseException):
 
 @pytest.fixture(autouse=True)
 def guards(monkeypatch):
-    """진짜 claude 금지 · 잠금에서 실제로 기다리지 않음 · 저장소에 state/ 가 생기면 실패."""
-    repo_state = ROOT / "state"
-    existed = repo_state.exists()
+    """진짜 claude 금지 · 잠금에서 실제로 기다리지 않음 · 저장소 state/·results/ 를 건드리면 실패."""
+    import h1_repo_guard as rg                                   # 저장소 state/·results/ 앞뒤 비교(단계 3 검토 T-3)
+    repo_before = rg.snapshot(ROOT)
 
     def boom(*a, **k):
         raise AssertionError("시험이 진짜 claude 를 부르려 했어요")
@@ -96,8 +96,8 @@ def guards(monkeypatch):
         raise AssertionError("잠금이 실제로 기다리려 했어요")
     monkeypatch.setattr(h1, "_lock_sleep", no_wait)
     yield
-    if not existed:
-        assert not repo_state.exists(), "시험이 저장소에 state/ 를 만들었어요"
+    moved = rg.changes(repo_before, rg.snapshot(ROOT))
+    assert not moved, "시험이 저장소 state/·results/ 를 건드렸어요(이미 있던 맥 장부 포함): " + "; ".join(moved[:5])
 
 
 # ============================ 시험 도우미 ============================

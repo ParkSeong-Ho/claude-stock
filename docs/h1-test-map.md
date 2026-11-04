@@ -1,12 +1,19 @@
 # H1 시험 지도 (단계 3 "시험 보강")
 
-- 작성: 2026-11-04 · 브랜치 `h1-forward` · 대상: a161e1c(단계 2 끝, 시험 755개) + 단계 3 변경(시험 789개)
+- 작성: 2026-11-04 · 브랜치 `h1-forward` · 대상: a161e1c(단계 2 끝, 시험 755개) + 단계 3 변경(시험 804개)
+- **고침(검토 3 반영)**: 처음 판(9039f3b)은 "157/157 완전"이라 했으나 독립 검토(`docs/h1-review-3.md` T-1~T-14)가 그중 일부가
+  규칙 하나를 지키는 시험이 없음을 돌연변이로 보였다(HEAD 복구의 백업 확인, L15 분할 경계, L11 하한·L4 신호일·L17 짝 판정,
+  G9 의 세율 날짜, status 의 늦은 봉·팀장 수 경계 등). 아래 "완전" 기준을 새로 적고, 그 기준으로 다시 세고, 빈 곳은 시험으로 채웠다.
 - 기준 설계: `docs/h1-forward-design.md` **3판** §2.2·§2.5·§3.9·§4·§6·§10.2c·§10.2d·§10.2e
 - 이 문서가 하는 일: 설계가 "이렇게 시험한다"고 적은 것마다 **실제로 어느 시험이 그것을 보는지**(파일::함수)와
   **얼마나 덮는지**(완전·일부·없음)를 적는다. 단계 3 에서 "일부·없음"을 새 시험(`tests/test_h1_gaps.py`)으로 채웠다.
 - 낱말: **음성 대조** = 일부러 틀린 장부·자료를 넣었을 때 그 오류 코드가 정말 나는지(점검이 눈을 뜨고 있는지).
   **거짓 양성 없음** = 정상 장면에서는 그 코드가 나지 않는지(멀쩡한 장부를 틀렸다고 하지 않는지).
   **돌연변이 점검** = 코드 한 곳을 일부러 틀리게 바꿔 놓고 전체 시험이 그것을 잡는지(시험이 정말 지키고 있는지).
+- **"완전"의 기준**: ① 설계가 그 항목에 적은 시험 점마다 그것을 **직접 단언하는** 시험이 있고, ② 그 항목 안의 규칙(조건 하나·
+  경계 하나)마다 **그 규칙만 틀리게 바꾸면 실패하는** 시험(음성 대조·경계값 시험)이 있다. ②는 돌연변이 표본(작성자 41개 +
+  검토자 25개, 8절)으로 실제로 확인한 것과, 표본 밖은 시험을 읽어서 판단한 것이 섞여 있다 — 읽어서 판단한 것은 틀릴 수 있다.
+  "일부" = 시험 점 하나라도, 또는 규칙 하나라도 그런 시험이 없음. "없음" = 그 항목을 보는 시험이 없음.
 - 파일 이름은 `tests/` 를 뺀다. 예) `test_h1_engine::test_T_START_…` = `tests/test_h1_engine.py` 의 그 함수.
   `[…]` 는 매개변수 이름(그 경우만), `…` 는 이름 뒷부분 줄임(파일 안에서 하나뿐인 앞부분).
 
@@ -14,17 +21,19 @@
 
 ## 0. 빠진 것 목록 (요약)
 
-**세어 보면** (단계 3 전 → 지금)
+**세어 보면** (위 "완전" 기준으로. 단계 3 전 → 처음 판(9039f3b)이 실제로 덮던 것 → 지금)
 
-| 묶음 | 항목 수 | 단계 3 전 완전 / 일부 / 없음 | 지금 |
-|---|---:|---|---|
-| §6 시험 ID | 55 | 54 / 1 / 0 | 55 / 0 / 0 |
-| §4 점검 코드 L1~L24·D1~D7·W1~W5 | 36 | 27 / 9 / 0 | 36 / 0 / 0 |
-| §2.2 판정 규칙 ①②-1②-2②-3③⑤⑥⑦⑧⑩ | 10 | 5 / 5 / 0 | 10 / 0 / 0 |
-| §2.5 시작·커밋·재시작 | 12 | 11 / 1 / 0 | 12 / 0 / 0 |
-| §3.9 종료 코드 0·1·2·3·4·5·6·7·8·9·130 | 11 | 10 / 0 / 1 | 11 / 0 / 0 |
-| §10.2c·10.2d·10.2e 결정 | 33 | 31 / 1 / 1 (+ 단계 7 몫 1, 세지 않음) | 33 / 0 / 0 |
-| **합** | **157** | **138 / 17 / 2** | **157 / 0 / 0** |
+| 묶음 | 항목 수 | 단계 3 전 완전 / 일부 / 없음 | 처음 판(검토 3 이 확인) | 지금 |
+|---|---:|---|---|---|
+| §6 시험 ID | 55 | 53 / 2 / 0 | 53 / 2 / 0 (T-HEAD·T-DELIST 일부) | 55 / 0 / 0 |
+| §4 점검 코드 L1~L24·D1~D7·W1~W5 | 36 | 23 / 13 / 0 | 32 / 4 / 0 (L4·L11·L15·L17 일부) | 36 / 0 / 0 |
+| §2.2 판정 규칙 ①②-1②-2②-3③⑤⑥⑦⑧⑩ | 10 | 5 / 5 / 0 | 9 / 1 / 0 (⑦-4 세율 날짜) | 10 / 0 / 0 |
+| §2.5 시작·커밋·재시작 | 12 | 10 / 2 / 0 | 11 / 1 / 0 (커밋 지점의 백업 확인) | 12 / 0 / 0 |
+| §3.9 종료 코드 0·1·2·3·4·5·6·7·8·9·130 | 11 | 10 / 0 / 1 | 11 / 0 / 0 | 11 / 0 / 0 |
+| §10.2c·10.2d·10.2e 결정 | 33 | 31 / 1 / 1 | 32 / 1 / 0 (status 의 늦은 봉·팀장 수·연장 L·D7 요약) | 33 / 0 / 0 |
+| **합** | **157** | **132 / 23 / 2** | **148 / 9 / 0** | **157 / 0 / 0** |
+
+(§10.2d "운영 전 확인"은 단계 7 몫이라 세지 않음. 처음 판의 "단계 3 전 138/17/2" 는 느슨한 기준으로 센 것이라 위처럼 고침.)
 
 **빠졌던 것과 채운 시험** (번호는 `tests/test_h1_gaps.py` 머리말과 같음)
 
@@ -45,9 +54,27 @@
 | 13 | ① 시장별 판정: 다른 시장의 L·멈춤 줄이 섞이지 않는지 | §2.2 ① | `test_G12_다른_시장의_L_과_멈춤은_이_시장_숫자에_안_섞임` |
 | 14 | ⑦ 고른 것·출처·시각을 corp_actions.jsonl·changes.jsonl 에 남기는지(정정 확정·상장폐지) | §2.2 ⑦ | `test_G13_…`, `test_G9_…` |
 
-- 새 시험 34건(`tests/test_h1_gaps.py`, 약 8초). 기존 시험 파일·골든 파일은 **한 줄도 고치지 않았다**.
-- 찾은 진짜 버그: **없음**(장부 계산·점검·보고서 판정이 설계와 다르게 도는 곳은 못 찾음). 다만 status 의 세기는 설계
-  §10.2e 가 단계 3 에서 맞추라고 한 대로 고쳤다(7절). 설계 문구와 다른 곳·설계에 보탤 것은 10절.
+**검토 3 반영으로 더 채운 것** (`tests/test_h1_gaps.py` 끝 절, 15건)
+
+| # | 빠졌던 것 | 어디 | 채운 시험 |
+|---|---|---|---|
+| 15 | 장부가 HEAD 와 다르고 백업이 **있지만** HEAD 와 안 맞으면 되살리지 말고 L24(검토 T-1, 돌연변이 H-HEADrestore 살아남음) | §2.5 커밋 지점·T-HEAD | `test_T1_백업이_있어도_HEAD_와_안_맞으면_되살리지_않고_L24` |
+| 16 | 산 날 장 마감 뒤 분할(효력 다음 날, `applied_after == 매수일`) 경계 — L15 매수가·L3 분할 전 체결(T-2, K-L15split) | §4 L15·L3 | `test_T2_산_날_장_마감_뒤_분할_적용_경계는_L_없음` |
+| 17 | 저장소 깨끗함 점검이 "state/ 가 없다가 생겼나"뿐(맥처럼 state/h1 이 이미 있으면 꺼짐, T-3) | 시험 지킴이·도구 | 모든 h1 시험 fixture 를 앞뒤 비교로(`tests/h1_repo_guard.py`), `test_T3_…`(3: 도우미, 맥 흉내 가짜 저장소에서 도구) |
+| 18 | 연장 봉 없이 S+63 처리 중 난 L 이 보고서에 안 보임(T-5) — **코드도 고침** | §10.2e·①(연장) | `test_T5_S62_다음_봉에서_난_L_은_연장_봉이_없어도_보고서에_보임` |
+| 19 | 종료 코드 7 로 끝난 실행의 끝 요약이 자기 D7 을 안 셈(T-6) — **코드도 고침** | §10.2e status 와 보고서 | `test_T6_D7_로_끝난_실행의_끝_요약도_status_와_같은_숫자` |
+| 20 | status 의 늦은 봉·팀장 수가 S+62 에서 끊기는지(T-7, R-lateExt·R-leaderExt) | §10.2e | `test_T7_status_늦은_봉과_팀장_수는_S62_에서_끊김` |
+| 21 | G9 의 두 날짜가 같은 세율 구간이라 "그 봉 날짜 세율"을 못 가름(T-8, H-delistTaxDate) | ⑦-4·T-DELIST | `test_G9_…` 를 2025-12-30(0.15%) → 2026-01-02(0.20%) 장면으로 바꿈 |
+| 22 | L11 하한·L4 신호일·check_pair L17 판정 비교에 따로 음성 대조(T-9, K-L11lo·K-L4sig·K-L17verdict) | §4 L11·L4·L17 | `test_T9_규칙마다_음성_대조`(3) |
+| 23 | 국내 23:05 D7 → 다음 날 07:40 보조 실행, 늦은 봉 + D7 한 실행, 재시작 뒤 옛 창의 late_no_llm 기록 재사용(T-14) | §2.3·§2.4·§3.6 | `test_T14a_…`·`test_T14b_…`·`test_T14c_…` |
+| 24 | 재시작 수를 status·restart 상한·start 도 보고서 R-7(세 출처 중 큰 값)로 — **코드도 고침** | §10.2e R-7·⑤ | `test_재시작_수는_status_restart_보고서가_같은_규칙` |
+
+- 새 시험 49건(`tests/test_h1_gaps.py`, 약 10초)과 도우미 `tests/h1_repo_guard.py`. 골든 파일과 306개 원래 시험은 그대로다.
+  기존 h1 시험 파일 셋(`test_h1_runner.py`·`test_h1_report.py`·`test_h1_review2b2.py`)은 꼭 필요한 곳만 고쳤다:
+  각 파일의 지킴이 fixture 를 "state/ 가 생겼나" → "state/·results/ 아래가 앞뒤로 같나"로(T-3), `test_h1_report.py` 의
+  R1 시험 한 줄은 지운 `_window_counts` 대신 `window_counts` 를 쓰게(T-12).
+- 찾은 진짜 버그: **없음**(장부 계산·점검·보고서 판정이 설계와 다르게 도는 곳은 못 찾음). 검토 3 이 찾은 것도 "시험이 지키지
+  않는 곳"이었고 코드는 바르게 돌았다(P5·P6 바른 코드 확인). 고친 코드(7절)는 status·요약·보고서가 같은 수를 보이게 하는 것뿐.
 
 ---
 
@@ -92,7 +119,7 @@
 | T-HALT | `test_h1_engine::test_T_HALT_국내_3일_정지`, `test_h1_check::test_정상_장부_여러_날_L_0[halt]` | 완전 | |
 | T-LATEDATA | `test_h1_runner::test_T_LATEDATA_…`(2), `test_h1_review2b1::test_B7_T_LATEDATA_첫_처리는_D3_다음_처리는_정상` | 완전 | |
 | T-RETRO | `test_h1_runner::test_T_RETRO_…`(2)·`test_T_LATEDATA_T_RETRO_국내_Volume0_행은_정지로_진행_정지일_marks_는_D6_안남`, `test_h1_review2b2::test_C2_…`·`test_C16_…` | 완전 | |
-| T-DELIST | `test_h1_runner::test_T_DELIST_…`(2), `test_h1_engine::test_T_DELIST_정리_a_prime`, `test_h1_check::test_B1_…`(5), `test_h1_review2b1::test_B4_…`(2) | **일부 → 완전** | 국내 매도세가 붙는 정리 비용 손계산이 없었음(미국만) → `test_h1_gaps::test_G9_…` |
+| T-DELIST | `test_h1_runner::test_T_DELIST_…`(2), `test_h1_engine::test_T_DELIST_정리_a_prime`, `test_h1_check::test_B1_…`(5), `test_h1_review2b1::test_B4_…`(2), `test_h1_gaps::test_G9_…` | **일부 → 완전** | 국내 매도세가 붙는 정리 비용 손계산이 없었음(미국만). 처음 G9 는 두 날짜가 같은 세율 구간이라 "그 봉 날짜 세율"을 못 갈랐음(검토 T-8) → 2025-12-30 → 2026-01-02 장면 |
 | T-CORR | `test_h1_runner::test_T_CORR_정정_확정`, `test_h1_review2b2::test_C10_정정_확정은_분할_모양을_거절` | 완전 | 일지 기록은 `test_G13_…` 로 보탬 |
 | T-AMEND | `test_h1_runner::test_T_AMEND_세율_줄_추가`, `test_h1_review2b2::test_C7_amend_rules_커밋_전후에_꺼짐` | 완전 | |
 | T-CAL | `test_h1_runner::test_T_CAL_…`(3), `test_h1_review2b2::test_C18_연도_경계_KRX_휴장일을_뺀_달력`·`test_C17_D5_종목군_정확히_절반이_거래한_날도_구멍` | 완전 | 22:30:00 정각은 `test_G8_KS200_확정_시각_22시30분_정각` |
@@ -102,7 +129,7 @@
 | T-LOOK | `test_h1_engine::test_T_LOOK_전체_시세_자른_시세_흔든_미래`·`test_T_LOOK_진짜_브레인도_자른_시세와_같음` | 완전 | |
 | T-GATE | `test_h1_runner::test_T_GATE_지문_env_다르면_3_파일_0개`·`test_T_GATE_규칙_상수가_다르면_3`·`test_C5_통과_기록이_줄거나_바뀌면_L_이_아니라_3` | 완전 | |
 | T-LOCK | `test_h1_runner::test_T_LOCK_30분_넘게_잠금이면_5_모든_명령`(start·run·restart·corp-action·amend-rules·status)·`test_T_LOCK_기다리는_동안_풀리면_진행`, `test_h1_report::test_cli_잠금_30분_넘으면_5`(report) | 완전 | |
-| T-HEAD | `test_h1_runner::test_T_HEAD_…`(4), `test_h1_review2b2::test_C1_디스크_가득은_ENV_4_L_아님_다음_실행이_되살림`·`test_C17_커밋_도중_남은_tmp_는_다음_실행이_치움` | 완전 | |
+| T-HEAD | `test_h1_runner::test_T_HEAD_…`(4), `test_h1_review2b2::test_C1_디스크_가득은_ENV_4_L_아님_다음_실행이_되살림`·`test_C17_커밋_도중_남은_tmp_는_다음_실행이_치움`, `test_h1_gaps::test_T1_백업이_있어도_HEAD_와_안_맞으면_되살리지_않고_L24` | **일부 → 완전** | "HEAD 와 백업이 모두 안 맞음 → L24" 를 백업이 **없는** 경우로만 봤음. 백업이 있지만 다른 경우(검토 T-1)를 T1 이 봄 |
 | T-STRICT | `test_h1_runner::test_T_STRICT_깨진_장부는_2_새로_시작_안함`(5), `test_h1_review2b1::test_B9_…`(3) | 완전 | |
 | T-NEWSTART | `test_h1_runner::test_T_NEWSTART_…`(3), `test_h1_review2b2::test_C6_…`(2)·`test_C8_…`(5) | 완전 | next_open(S) 정각은 `test_G8_start_는_next_open_S_정각부터_거절` |
 | T-UNIV | `test_h1_runner::test_T_UNIV_…`(2) | 완전 | |
@@ -129,20 +156,20 @@
 | L1 | `C[L1-m_L1]` | 공통 | 완전 |
 | L2 | `C[L2-m_L2]`·`C[L2-m_L2b]` | 공통 | 완전 |
 | L3 | `C[L3-m_L3]`·`C[L3-m_L3b]`, `test_h1_check::test_check_day_오늘_체결가_시세와_다름_L3_행_없음_L6`·`test_check_day_정지_목록_다름_L6_지수_봉_다름_L3` | 공통, 분할 뒤 지난 체결을 새 시세와 견주지 않음 `test_h1_runner::test_T_RETRO_분할_의심_…`·`test_h1_review2b1::test_B2_분할_뒤_여러_봉_L_0` | 완전 |
-| L4 | `C[L4-m_L4]`(정지 아닌 날 남은 주문)·`C[L4-m_L4b]`(국내 정지 표시 지움), `test_h1_check::test_B6_매수가_매도보다_먼저면_L4` | 공통(정지로 기다린 주문 `[halt]`), `test_h1_runner::test_T_LATEDATA_보유_종목_행이_늦게_오면_D3_다음_실행_정상` | 완전 |
+| L4 | `C[L4-m_L4]`(정지 아닌 날 남은 주문)·`C[L4-m_L4b]`(국내 정지 표시 지움), `test_h1_check::test_B6_매수가_매도보다_먼저면_L4`, **`test_h1_gaps::test_T9_규칙마다_음성_대조[L4신호일]`** | 공통(정지로 기다린 주문 `[halt]`), `test_h1_runner::test_T_LATEDATA_보유_종목_행이_늦게_오면_D3_다음_실행_정상` | **일부 → 완전** (신호일 < 체결일 규칙, 검토 T-9) |
 | L5 | `C[L5-m_L5]`(보유 종목 매수 대기), **`test_h1_gaps::test_G5_L5_그날그날_보유와_매수_대기가_5를_넘으면`** | 공통, `test_h1_engine::test_T_F2_빈자리_부족과_대기_매수도_센다` | **일부 → 완전** (그날그날 ≤ 5 규칙에 음성 대조가 없었음, M35) |
 | L6 | `C[L6-m_L6]`, `test_h1_check::test_check_day_오늘_체결가_시세와_다름_L3_행_없음_L6`, `test_h1_review2b1::test_B3_엄격_cache_예외는_L6_과_그때까지의_지문` | 공통(`[halt]`), `test_h1_engine::test_T_HALT_국내_3일_정지` | 완전 |
 | L7 | `C[L7-m_L7]`, `test_h1_engine::test_R14_가격표에_보유_종목이_빠지면_L7` | 공통 | 완전 |
 | L8 | `C[L8-m_L8]`, `test_h1_check::test_check_day_지난_체결_고침_L8`, `test_h1_review2b1::test_B2_분할을_한_장부만_적용하면_L`·`test_B2_r_를_틀리게_적용하면_L`·`test_B2_분할_기록이_한_장부에만_있으면_L` | 공통, `test_B2_분할_뒤_여러_봉_L_0` | 완전 |
 | L9 | `C[L9-m_L9]` | 공통(미국·국내 매도세·지수 다리) | 완전 |
 | L10 | `C[L10-m_L10]`(S+1 첫 체결)·`C[L10-m_L10b]`(A0 지수 보유), **`test_h1_gaps::test_G6_L10_A1_종가_현금이_1_이상이면_쓸어_담기_누락`** | 공통(S 날 예외 포함), `test_h1_engine::test_T_START_…` | **일부 → 완전** (종가 현금 < 1 규칙에 음성 대조가 없었음, M36) |
-| L11 | `C[L11-m_L11]`·`C[L11-m_L11b]`, `test_h1_engine::test_T_A1_4_지수_판_뒤_매수_실패는_L11`·`test_T_A1_5_줄임_셋_다_실패면_L11` | 공통, `test_T_A1_4_경계_여유_위아래` | 완전 |
+| L11 | `C[L11-m_L11]`·`C[L11-m_L11b]`, `test_h1_engine::test_T_A1_4_지수_판_뒤_매수_실패는_L11`·`test_T_A1_5_줄임_셋_다_실패면_L11`, **`test_T9_…[L11하한]`** | 공통, `test_T_A1_4_경계_여유_위아래` | **일부 → 완전** (메운 금액 하한, 검토 T-9) |
 | L12 | `C[L12-m_L12]`·`C[L12-m_L12b]`, `test_h1_check::test_B6_다시_센_가능_금액과_다른_기록은_L12` | 공통, `test_B6_경계_보류_need_약_avail_1빼기_1e9` | 완전 |
 | L13 | `C[L13-m_L13]` | 공통 | 완전 |
 | L14 | `C[L14-m_L14]`·`C[L14-m_L14b]`, `test_h1_check::test_check_day_전날_대기가_아니던_주문의_체결_L14` | 공통 | 완전 |
-| L15 | `C[L15-m_L15]`·`C[L15-m_L15b]`(국내 정지일도 셈) | 공통(`[halt]`), `test_T_LATEDATA_…` | 완전 |
+| L15 | `C[L15-m_L15]`·`C[L15-m_L15b]`(국내 정지일도 셈) | 공통(`[halt]`), `test_T_LATEDATA_…`, **`test_h1_gaps::test_T2_산_날_장_마감_뒤_분할_적용_경계는_L_없음`**(L3 의 같은 경계도) | **일부 → 완전** (산 날 마감 뒤 분할 경계, 검토 T-2) |
 | L16 | `C[L16-m_L16]`, `test_h1_check::test_음성_대조_L16_달력`·`test_check_day_오늘_하루_기록_없음_L16`, `test_h1_report::test_final_운영_기준_어기면_창_실패[빠진날]` | 공통, `test_h1_review2b2::test_C18_연도_경계_KRX_휴장일을_뺀_달력` | 완전 |
-| L17 | `C[L17-m_L17]`·`C[L17-m_L17b]`, `test_h1_check::test_B7_두_장부를_똑같이_틀린_판정은_장부_점검이_L17` | 공통, `test_h1_engine::test_T_F5a_…` | 완전 |
+| L17 | `C[L17-m_L17]`·`C[L17-m_L17b]`, `test_h1_check::test_B7_두_장부를_똑같이_틀린_판정은_장부_점검이_L17`, **`test_T9_…[L17짝판정]`** | 공통, `test_h1_engine::test_T_F5a_…` | **일부 → 완전** (짝 점검의 판정 비교, 검토 T-9) |
 | L18 | `test_h1_check::test_음성_대조_L18_판정_기록`, `test_h1_engine::test_T_JSONL_지난_줄_수정은_L18`·`test_T_JSONL_중간_줄_깨짐_중복_열쇠`, `test_h1_runner::test_T_JSONL_지난_줄이_바뀌면_L18` | 공통, `test_T_JSONL_반쯤_쓴_마지막_줄은_잘라냄`(L18 아님) | 완전 |
 | L19 | `C[L19-m_L19]`·`C[L19-m_L19b]`, **`test_h1_gaps::test_G7_L19_빈자리_부족_후보가_있는데_빈자리를_다_안_채움`** | 공통, `test_T_F2_확신도_hold_veto_MAX_POSITIONS` | **일부 → 완전** (빈자리 다 채움 규칙에 음성 대조가 없었음, M37) |
 | L20 | `C[L20-m_L20]`·`C[L20-m_L20b]`, `test_h1_check::test_B7_first_만_틀린_그림자_서킷은_L20` | 공통(`[crash]`), `test_T_SHADOW_폭락_장면_두_장부` | 완전 |
@@ -176,7 +203,7 @@
 | ③ 수익률은 기록만 | `test_h1_report::test_고정_문장과_절_순서`, `test_final_깨끗한_창은_통과`("③ 수익률은 기록만 \| 판정에 안 씀") | 완전 |
 | ⑤ 재시작(사유 셋·최대 2번·마감·판정 기록·종목군 유지) | `test_h1_runner::test_T_NEWSTART_명시_시작_규칙`·`test_T_NEWSTART_재시작_상한`·`test_T_UNIV_…`, `test_h1_review2b2::test_C6_…`(2), `test_h1_report::test_final_재시작_상한을_넘으면_H1_포워드_실패`·`test_final_마감을_넘으면_…`·`test_final_마감까지_끝날_수_없으면_…`·`test_final_재시작_상한_밖의_창은_통과해도_실패`·`test_R7_…`, **`test_G3_재시작해도_판정_기록은_그대로_같은_열쇠는_다시_씀`** | 일부 → 완전 (판정 기록 유지·재사용이 없었음) |
 | ⑥ 코드 동결(i 통과 기록 추가·ii 세율 줄 추가, 그 밖은 3) | `test_C5_통과_기록이_줄거나_바뀌면_L_이_아니라_3`(새 코드 통과 기록 더함), `test_T_AMEND_세율_줄_추가`, `test_T_GATE_…`(2), `test_C11_corp_action_도_관문과_규칙_확인` | 완전 |
-| ⑦ 분할·합병·상장폐지(1 기다림·2 분할 공식·3 그 밖 재시작·4 상장폐지·5 정정 확정, 기록 두 곳) | `test_T_D_…[D6]`(1: 원래 값으로 돌아오면 정상), `test_T_RETRO_…`·`test_C2_…`·`test_C16_…`(2), `test_T_RETRO_정수가_아니면_split_거절`(3), `test_T_DELIST_…`(4), `test_T_CORR_…`·`test_C10_…`(5), **`test_G9_…`·`test_G13_…`(기록)** | 일부 → 완전 (상장폐지·정정 확정의 corp_actions.jsonl·changes.jsonl 기록) |
+| ⑦ 분할·합병·상장폐지(1 기다림·2 분할 공식·3 그 밖 재시작·4 상장폐지·5 정정 확정, 기록 두 곳) | `test_T_D_…[D6]`(1: 원래 값으로 돌아오면 정상), `test_T_RETRO_…`·`test_C2_…`·`test_C16_…`(2), `test_T_RETRO_정수가_아니면_split_거절`(3), `test_T_DELIST_…`(4), `test_T_CORR_…`·`test_C10_…`(5), **`test_G9_…`·`test_G13_…`(기록)** | 일부 → 완전 (상장폐지·정정 확정의 corp_actions.jsonl·changes.jsonl 기록, 정리 세율은 정리 봉 날짜 — G9 를 세율 구간이 다른 두 날짜로) |
 | ⑧ 팀장 폴백 20% 표시 | `test_T_F8a_팀장_수와_폴백_20퍼센트`·`test_T_F8a_폴백_20퍼센트_경계` | 완전 |
 | ⑩ 고정 값(meta.rules, 다르면 3) | `test_h1_engine::test_상수와_규칙값`(일부 칸), `test_T_GATE_규칙_상수가_다르면_3`(한 칸), **`test_G11_규칙_상수는_설계_숫자와_같다`(us·kr)·`test_G11_start_는_meta_rules_에_그대로_적고_어느_칸이_달라도_3`** | 일부 → 완전 |
 
@@ -197,7 +224,7 @@
 | 늦은 봉 정의(next_open 이후 처리 → 폴백·late) | `test_T_LATE_…`, `test_T_LLMTIME_…`, `test_G8_봉_시작이_next_open_정각이면_late` | 완전 |
 | 한 번에 5봉 넘으면 6, 창 전체 10봉 넘으면 창 실패 | `test_C17_밀린_봉_5개는_처리_6개는_6`, `test_final_…[늦은봉11]`·`test_final_경계값은_통과` | 완전 |
 | 멱등(장부 6개·meta·HEAD·backup·판정 기록 그대로, 일지는 줄 추가) | `test_T_F7_같은_봉_두번째_run_은_아무것도_안_바뀜` | 완전 |
-| 커밋 순서(판정 기록 → 백업 → 장부 6개 → HEAD), 읽을 때 백업으로 되살림, 그 밖은 L24 | `test_T_HEAD_…`(4), `test_T_JSONL_HEAD_전에_꺼지면_남은_판정_줄을_재사용`, `test_C1_디스크_가득은_…`, `test_C17_커밋_도중_남은_tmp_는_다음_실행이_치움`, 돌연변이 M21·M22 | 완전 |
+| 커밋 순서(판정 기록 → 백업 → 장부 6개 → HEAD), 읽을 때 백업이 **HEAD 와 맞을 때만** 되살림, 그 밖은 L24 | `test_T_HEAD_…`(4), `test_T_JSONL_HEAD_전에_꺼지면_남은_판정_줄을_재사용`, `test_C1_디스크_가득은_…`, `test_C17_커밋_도중_남은_tmp_는_다음_실행이_치움`, **`test_T1_…`**, 돌연변이 M21·M22·H-backupAfter·H-HEADrestore | **일부 → 완전** (백업 확인, 검토 T-1) |
 | 백업 열쇠 = HEAD run_id(corp-action·amend-rules 도 새 run_id), 최근 10개 | `test_T_HEAD_corp_action_뒤_같은_last_date_에서_멈춤`·`test_T_HEAD_백업은_최근_10개`, `test_T_AMEND_…`(run_id) | 완전 |
 | 재시작(잠금 아래 archive 로 옮김·restarts.jsonl·그 밖 파일 그대로 → start) | `test_T_NEWSTART_명시_시작_규칙`, `test_C6_…`(2), `test_G3_…` | 완전 |
 
@@ -267,9 +294,9 @@
 | 경계 시각(끝 줄 없으면 하루 기록 run_at) | `test_R3_…` | 완전 |
 | ④ 거짓 양성 자동 기록 | `test_R4_…`(3), `test_S3_…`(3) | 완전 |
 | 월간 보고서(처리하려던 봉의 달) | `test_R5_…`(2), `test_R6_…`, `test_month_지난달_보고서는_그달_마지막_봉까지만` | 완전 |
-| 재시작 수 = 세 출처 중 큰 값 | `test_R7_…` | 완전 |
+| 재시작 수 = 세 출처 중 큰 값 | `test_R7_…`, **`test_재시작_수는_status_restart_보고서가_같은_규칙`**(status 머리·restart 상한·start 의 restart_no 도 같은 `h1.restart_info`) | 완전 |
 | 폴백 비율 분모(이 창 하루 기록이 가리키는 기록) | `test_T_F8a_팀장_수와_폴백_20퍼센트`, 요약의 팀장 수도 같은 함수(`h1.window_decision_keys`) — `test_S1_…` 등 | 완전 |
-| **status 와 보고서**(L 오류·거짓 양성 세기 맞추기) | **`test_S1_…`~`test_S4_…`(12건), `test_G12_…`** | **없음 → 완전**(코드 고침, 7절) |
+| **status 와 보고서**(L 오류·거짓 양성 세기 맞추기) | **`test_S1_…`~`test_S4_…`(12건), `test_G12_…`, `test_T5_…`·`test_T6_…`·`test_T7_…`·`test_T14a_…`·`test_T14b_…`** | **없음 → 완전**(코드 고침, 7절. 처음 판은 연장 L·D7 요약·늦은 봉/팀장 경계가 빠져 일부였음 — 검토 T-5~T-7) |
 | 마감 전 실패 | `test_final_마감까지_끝날_수_없으면_H1_포워드_실패` | 완전 |
 
 ---
@@ -286,10 +313,15 @@
   - `_ops` 의 일지 세기 부분을 `_journal_counts(c, B, unknown_in)` 로 떼어 냈다. 보고서 출력은 바이트까지 그대로다: 기존 보고서 시험 전부 통과,
     그리고 보고서 시험의 세 장면(미국 E2E·국내 정지·깨끗한 63봉 창)을 한 번 만들어 단계 2 코드(a161e1c 사본)와 지금 코드로
     최종·이번 달·2026-02 보고서를 각각 만들어 보니 9개 모두 바이트까지 같았다(scratch 대조).
-  - `_context(mk, root, loaded, decisions, exclude_run_ids)`: 이미 읽은 장부에 일지를 붙인다(`_load` 도 이것을 씀).
-  - `window_counts(market, root, loaded, *, decisions, exclude_run_ids)`: status·요약용. **보고서 --final 과 같은 범위**
+  - `_context(mk, root, loaded, decisions, exclude_run_ids, extra_runs)`: 이미 읽은 장부에 일지를 붙인다(`_load` 도 이것을 씀).
+    `exclude_run_ids` = status 자기 시작 줄 빼기, `extra_runs` = 실행 끝 요약이 곧 쓸 자기 끝 줄을 더해 세기(검토 T-6).
+  - `window_counts(market, root, loaded, *, decisions, exclude_run_ids, extra_runs)`: status·요약용. **보고서 --final 과 같은 범위**
     (창이 다 찼으면 S~S+62, 덜 찼으면 지금까지·어느 봉의 일인지 모르는 줄 포함). 연장 구간 L 은 `ext_l_errors` 로 따로.
+    판정 창 크기 `window_bars`(meta.rules)도 돌려준다.
   - `_late_dates`·`_ext_l_errors` 를 떼어 `_ops`·`_extension` 과 같이 씀. 팀장 수는 `_leader` 그대로.
+  - (검토 T-5) `--final` 에 `ext_l_errors` 를 넣고, 창이 다 찼는데 연장 봉이 아직 없어도 S+62 뒤 L 이 있으면 연장 절에
+    "그 뒤 봉을 처리하다 난 L 오류(errors.jsonl·종료 코드 2) N건 — 판정에는 안 씀" 한 줄을 찍는다(그런 L 이 없으면 출력은 그대로).
+  - `_restart_info(c)` 는 `h1.restart_info` 하나를 부른다(아래).
 - `h1.py`
   - `window_counts(...)`: 함수 안에서만 `h1_report` 를 늦게 import 해 위를 부른다(모듈을 읽을 때 h1 → h1_report 의존 없음,
     두 파일 머리말의 import 설명도 고침).
@@ -299,16 +331,27 @@
     '끝 기록 없는 실행'으로 세지 않게 뺀다. 판정 기록이 깨져 있으면 status 는 죽지 않고 그 사실을 한 줄로 알린다.
     늦은 봉·한 번에 따라잡은 봉·자료 멈춤 종류도 보고서 숫자다(전에는 A0 마라토너 하루 기록 전부·run 명령만·문제 줄마다 셌음 —
     보통 장면에서는 같고, 창이 다 찬 뒤 연장 구간·start 봉·한 실행에 같은 D 가 둘 이상일 때만 달랐음).
-  - `_print_summary`(run·start 끝 요약)도 `window_counts`(자기 실행 줄은 뺌). `summary_lines(…, counts=)` 는 거짓 양성 수와
-    팀장 LLM/폴백 수(보고서 ⑧ 분모와 같은 `window_decision_keys`)를 거기서 쓴다.
-  - `_window_counts(root, mk, S, created_at)` 은 옛 이름 그대로 두고 `window_counts` 의 (L, 자료 멈춤)을 돌려준다.
+  - `_print_summary`(run·start 끝 요약)도 `window_counts`. 곧 쓸 자기 끝 줄(`_RunLog.end_record`, `end` 가 쓰는 것과 같은 모양)을
+    더해 세므로 종료 코드 7 로 끝나는 실행의 요약도 status 처럼 "자료 멈춤 1 (D7)"(검토 T-6). `summary_lines(…, counts=)` 는
+    판정 창 크기·늦은 봉·거짓 양성 수·팀장 LLM/폴백 수(보고서 ⑧ 분모와 같은 `window_decision_keys`)를 거기서 쓴다.
+  - (검토 T-10) status 머리의 "판정 창 n/63" 도 meta.rules 의 창 크기를 쓴다. 안내 줄은 실제로 같은 것만 말한다:
+    "일지 숫자(L·④ 거짓 양성·자료 멈춤·관문 거절·늦은 봉·한 번에 따라잡은 봉·팀장 폴백)는 보고서 --final 과 같은 규칙·범위.
+    저장 자료로 다시 점검한 L·빠진 날·다른 지문(②-3)은 보고서에서".
+  - (검토 T-12) 운영 코드가 부르지 않던 길을 지웠다: `_window_counts`(시험만 불렀음 — `test_h1_report.py` R1 시험 한 줄과
+    gaps 도우미를 `window_counts` 로 바꿈), `summary_lines` 의 decisions 만 준 가지(아무도 안 불렀음). grep 으로 다른 호출 없음 확인.
   - `window_decision_keys(states, start, upto)` 를 h1 에 두고 보고서 `_window_keys` 가 이것을 부른다.
-- 시험: `test_h1_gaps::test_S1_…`~`test_S4_…` 가 같은 장면에서 status 글자·`h1.window_counts`·`h1._window_counts`·
-  보고서 `collect(final=True)["ops"]` 의 숫자(L 오류·거짓 양성·종료 코드 2 만·자료 멈춤과 종류·관문 거절·밀린 봉 초과·한 번에
-  따라잡은 봉·잠금 초과·끝 기록 없는 실행·창 밖 기록·늦은 봉)가 모두 같은지 본다.
-- 남긴 것(바꾸지 않음): status 머리의 "재시작 N/2" 는 지금도 `_count_restarts`(restarts.jsonl 의 restart_id 수)다.
-  보고서 R-7 은 meta·restarts.jsonl(done 또는 보관 폴더 있음)·보관 폴더 수 중 큰 값이라 restarts.jsonl 이 지워진 같은
-  드문 경우에 다를 수 있다. `restart` 명령의 상한 확인도 `_count_restarts` 다. → 10절 설계 반영 거리.
+  - **재시작 수**(진행 담당 결정): `h1.restart_info(market, root, meta, lines)` 하나가 보고서 R-7 규칙(meta.restart_no·
+    restarts.jsonl 의 done 또는 보관 폴더 있는 restart_id·archive 폴더 수 중 큰 값, 다르면 mismatch, 끝나지 않은 moving 은 pending)
+    으로 센다. 보고서 `_restart_info`, status 머리("재시작 N/2", 출처가 다르면 그 사실, pending 이 있으면 그 수), `restart` 의
+    상한 확인, `start` 가 meta 에 적는 `restart_no` 가 모두 이것을 쓴다(보수적으로 큰 값). `_count_restarts`(restarts.jsonl
+    의 restart_id 수)는 시험 몇 개가 쓰는 낮은 단계 도우미로만 남김.
+- 시험: `test_h1_gaps::test_S1_…`~`test_S4_…`·`test_T5_…`~`test_T7_…`·`test_T14a_…`·`test_T14b_…`·`test_G12_…` 가 같은 장면에서
+  status 글자(머리의 창 크기·L 줄·요약 줄)·`h1.window_counts`·보고서 `collect(final=True)`(ops·연장 L·팀장 수)의 숫자
+  (L 오류·거짓 양성·종료 코드 2 만·자료 멈춤과 종류·관문 거절·밀린 봉 초과·한 번에 따라잡은 봉·잠금 초과·끝 기록 없는 실행·
+  창 밖 기록·늦은 봉·연장 L·팀장 LLM/폴백)가 모두 같은지 본다(도우미 `same_counts`). 재시작 수는
+  `test_재시작_수는_status_restart_보고서가_같은_규칙`.
+- 보고서 출력: 위 변경 뒤에도 보고서 시험의 세 장면 × 최종·이번 달·2026-02 = 9개가 a161e1c 코드와 바이트까지 같다(scratch 대조,
+  T-5 의 새 줄은 연장 봉 없이 S+62 뒤 L 이 있을 때만 나와 이 장면들에는 없음).
 
 ---
 
@@ -423,14 +466,17 @@
 
 | # | 어디 | 지금 설계 | 실제 동작·제안 |
 |---|---|---|---|
-| 1 | §10.2e "status 와 보고서" | "단계 3 에서 맞춘다" | 맞췄다: status·실행 끝 요약은 `h1_report.window_counts`(= 보고서 `_journal_counts`) 하나로 센다. 범위는 **보고서 --final 과 같다**(창이 다 차면 S~S+62, 그 뒤 L 은 "연장 구간 L"로 따로, 덜 차면 지금까지). ④ 거짓 양성은 빼고 따로 보임, 자기 실행 줄은 '끝 기록 없는 실행'으로 안 셈. h1 은 이때만 h1_report 를 늦게 import. 표의 "단계 3 에서"를 결정 문장으로 바꿔 적기 |
+| 1 | §10.2e "status 와 보고서" | "단계 3 에서 맞춘다" | 맞췄다: status·실행 끝 요약은 `h1_report.window_counts`(= 보고서 `_journal_counts`) 하나로 센다. 범위는 **보고서 --final 과 같다**(창이 다 차면 S~S+62, 그 뒤 L 은 "연장 구간 L"로 따로, 덜 차면 지금까지). ④ 거짓 양성은 빼고 따로 보임. status 는 자기 시작 줄을 빼고, 실행 끝 요약은 곧 쓸 자기 끝 줄을 더해 센다(종료 코드 7 이면 D7 멈춤 1). 늦은 봉·팀장 LLM/폴백도 S+62 에서 끊는다. 창 크기는 meta.rules. h1 은 이때만 h1_report 를 늦게 import. 표의 "단계 3 에서"를 결정 문장으로 바꿔 적기 |
 | 2 | §3.8-2 운영 기준 | "L 오류 수(`errors.jsonl`)" | §10.2e R-2 대로 "errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), ④ 거짓 양성은 빼고 따로"로 본문 고치기 |
-| 3 | §3.7 runs.jsonl "창 세기" | `_in_window` 만 적음 | "같은 시각이면 창을 만든 start 보다 먼저 시작한 실행의 줄은 뺀다(보고서·status 모두)"를 더하기 |
-| 4 | §3.3 요약 예 | "팀장 LLM 3 / 폴백 0" | 팀장 수의 분모가 보고서 ⑧ 과 같다(이 창 하루 기록이 가리키는 판정 기록, `h1.window_decision_keys`)는 것과 "점검 L N (④ 거짓 양성 K건 뺌)" 표시를 적기 |
-| 5 | §2.2 ⑩ | "종목군 파일 지문"을 '다르면 종료 코드 3' 목록에 넣음 | 실제(그리고 §4 L22)는 `meta.universe_sha256` 와 다르면 **L22(종료 코드 2)**. ⑩ 목록에서 빼거나 "(L22 로 봄)"을 붙이기 |
-| 6 | §4 D4 | "이미 처리한 날짜가 새 달력에 없음" | 구현은 "이미 처리한 구간(S 전 거래일~last_date)에 새 날짜가 끼어듦"도 D4(코드 주석 '설계 D4 를 넓혀 해석', 시험 `test_T_CAL_처리한_구간에_날짜가_끼어들면_D4`). 설계 표에 더하기 |
-| 7 | §2.3-2·§4 D7 | "next_open(t) 를 지났으면", "확정 시각 … 뒤" | 정각이 어느 쪽인지 적기: 봉 시작 `지금 < next_open` 이면 llm(정각은 late), 묻기 직전 `지금 ≥ next_open` 이면 안 물음, D7 은 `지금 ≥ 확정 시각`(정각 포함 — `main.confirmed_bars` 가 정각부터 그 봉을 확정으로 침), start 는 `지금 ≥ next_open(S)` 거절. 이번에 정각 시험으로 고정함(G8) |
-| 8 | §6 표 | | 새 시험 ID 제안: **T-STATUS**(status·요약 = 보고서 숫자, `test_S1_…`~`test_S4_…`), **T-EXIT1**(종료 코드 1, `test_G2_…`), **T-W**(정상 장면 W 없음, `test_G10_…`), **T-RULES**(⑩ 전부, `test_G11_…`). T-LLMTIME·T-CAL·T-NEWSTART 에 "정각" 경계, T-L 에 "코드 안의 세부 규칙마다 음성 대조"(L5 그날그날·L10 종가 현금·L19 빈자리 다 채움이 빠졌었음) |
-| 9 | §4 끝 "(a) 음성 대조" | 코드마다 | "점검 코드 안의 **규칙마다**"로. 이번 돌연변이에서 코드에는 음성 대조가 있어도 규칙 하나가 비어 있던 곳이 3곳(M35~M37) |
-| 10 | §10.2e R-7 재시작 수 | 보고서만 "세 출처 중 큰 값" | `h1.py status` 머리의 "재시작 N/2" 와 `restart` 명령의 상한 확인은 여전히 restarts.jsonl 의 restart_id 수(`_count_restarts`, 끝나지 않은 moving 도 한 번으로 셈)다. 보통은 같지만 restarts.jsonl 이 지워진·깨진 드문 경우 보고서와 다를 수 있다(그때도 최종 판정은 보고서가 세 출처 중 큰 값으로 '상한 넘은 창'을 잡음). 같은 규칙으로 맞출지 정하기 — 이번에는 L 세기만 맞추고 이것은 바꾸지 않음 |
-| 11 | §6 머리 "바꿔 끼우는 곳" | | 시험 환경 점검 도구 `tools/h1_test_guard.py` 와 그 결과(9절)를 단계 4·7 확인 목록에 넣기 |
+| 3 | §3.8 `--final` 연장 기록 | S+62 뒤 처리한 봉 | 연장 봉이 아직 없어도 S+62 뒤 봉을 처리하다 난 L 은 연장 절에 한 줄로 보인다(판정에는 안 씀, 검토 T-5) — 본문에 더하기 |
+| 4 | §3.7 runs.jsonl "창 세기" | `_in_window` 만 적음 | "같은 시각이면 창을 만든 start 보다 먼저 시작한 실행의 줄은 뺀다(보고서·status 모두)"를 더하기 |
+| 5 | §3.3 요약 예 | "팀장 LLM 3 / 폴백 0" | 팀장 수의 분모가 보고서 ⑧ 과 같다(이 창 하루 기록이 가리키는 판정 기록, `h1.window_decision_keys`)는 것과 "점검 L N (④ 거짓 양성 K건 뺌)" 표시를 적기 |
+| 6 | §10.2e R-7 재시작 수 | 보고서만 "세 출처 중 큰 값" | **바꿈**(진행 담당 결정): status 머리·`restart` 상한 확인·`start` 의 meta.restart_no 도 같은 `h1.restart_info`(보수적으로 큰 값). 설계 §2.2 ⑤·§3.9(8 거절)·§10.2e R-7 에 "재시작 수는 어디서나 이 규칙"을 적기 |
+| 7 | §2.2 ⑩ | "종목군 파일 지문"을 '다르면 종료 코드 3' 목록에 넣음 | 실제(그리고 §4 L22)는 `meta.universe_sha256` 와 다르면 **L22(종료 코드 2)**. ⑩ 목록에서 빼거나 "(L22 로 봄)"을 붙이기 |
+| 8 | §4 D4 | "이미 처리한 날짜가 새 달력에 없음" | 구현은 "이미 처리한 구간(S 전 거래일~last_date)에 새 날짜가 끼어듦"도 D4(코드 주석 '설계 D4 를 넓혀 해석', 시험 `test_T_CAL_처리한_구간에_날짜가_끼어들면_D4`). 설계 표에 더하기 |
+| 9 | §2.3-2·§4 D7 | "next_open(t) 를 지났으면", "확정 시각 … 뒤" | 정각이 어느 쪽인지 적기: 봉 시작 `지금 < next_open` 이면 llm(정각은 late), 묻기 직전 `지금 ≥ next_open` 이면 안 물음, D7 은 `지금 ≥ 확정 시각`(정각 포함 — `main.confirmed_bars` 가 정각부터 그 봉을 확정으로 침), start 는 `지금 ≥ next_open(S)` 거절. 정각 시험으로 고정함(G8) |
+| 10 | §2.5 읽을 때 | "backup 이 HEAD 와 맞을 때 되살림, 그 밖은 L24" | 그대로 맞음 — 백업이 있지만 HEAD 와 다르면 L24 임을 시험(T1)으로 고정. 설계 문구 그대로 둬도 됨 |
+| 11 | §3.6 판정 기록 | "재시작해도 지우지 않는다. 새 창의 같은 열쇠는 이 기록을 다시 쓴다" | 옛 창이 늦게 처리해 `late_no_llm` 으로 남긴 열쇠도 새 창이 그대로 다시 쓴다(새 창 S 가 제때여도 LLM 안 부름) → 새 창 ⑧ 폴백 비율에 들어간다(T14c). 의도가 맞는지 §2.2 ⑤ 또는 §3.6 에 한 줄 |
+| 12 | §6 표 | | 새 시험 ID 제안: **T-STATUS**(status·요약 = 보고서 숫자, `test_S1_…`~`test_S4_…`·`test_T5_…`~`test_T7_…`), **T-EXIT1**(종료 코드 1, `test_G2_…`), **T-W**(정상 장면 W 없음, `test_G10_…`), **T-RULES**(⑩ 전부, `test_G11_…`), **T-RESTARTN**(재시작 수 한 규칙). T-HEAD 에 "백업이 있지만 HEAD 와 다름 → L24", T-RETRO 에 "산 날 마감 뒤 분할", T-DELIST 에 "세율 구간이 다른 두 날짜", T-LLMTIME·T-CAL·T-NEWSTART 에 "정각" 경계, T-L 에 "코드 안의 세부 규칙마다 음성 대조" |
+| 13 | §4 끝 "(a) 음성 대조" | 코드마다 | "점검 코드 안의 **규칙마다**"로. 돌연변이에서 코드에는 음성 대조가 있어도 규칙 하나가 비어 있던 곳이 6곳(L5·L10·L19, 검토 3 의 L11 하한·L4 신호일·L17 짝 판정) |
+| 14 | §6 머리 "바꿔 끼우는 곳" | | 시험 환경 점검 도구 `tools/h1_test_guard.py` 와 그 결과·못 막는 길(9절)을 단계 4·7 확인 목록에 넣기. 맥(단계 7)에서는 저장소 `state/h1` 이 이미 있으므로 지킴이가 그 안을 sha256 까지 앞뒤로 견준다는 것도 |

@@ -68,8 +68,8 @@ def _no_net(*a, **k):
 
 @pytest.fixture(autouse=True)
 def guards(monkeypatch):
-    repo_state = ROOT / "state"
-    existed = repo_state.exists()
+    import h1_repo_guard as rg                                   # 저장소 state/·results/ 앞뒤 비교(단계 3 검토 T-3)
+    repo_before = rg.snapshot(ROOT)
     monkeypatch.setattr(analyst, "analyze_logged", _boom)
     monkeypatch.setattr(analyst, "analyze", _boom)
     monkeypatch.setattr(analyst, "claude_cli_version", _boom)
@@ -86,8 +86,8 @@ def guards(monkeypatch):
         raise AssertionError("잠금이 실제로 기다리려 했어요")
     monkeypatch.setattr(h1, "_lock_sleep", no_wait)
     yield
-    if not existed:
-        assert not repo_state.exists(), "시험이 저장소에 state/ 를 만들었어요"
+    moved = rg.changes(repo_before, rg.snapshot(ROOT))
+    assert not moved, "시험이 저장소 state/·results/ 를 건드렸어요(이미 있던 맥 장부 포함): " + "; ".join(moved[:5])
 
 
 # ============================ 장면 (모듈마다 한 번 만들고 복사해 씀) ============================
@@ -1343,7 +1343,7 @@ def _pass_now(root, ch=None, fps=None):
 @pytest.mark.parametrize("same_clock", [False, True])
 def test_R1_실패한_start_뒤_같은_S_로_다시_시작한_창은_깨끗함(tmp_path, monkeypatch, same_clock):
     """S 를 정한 뒤 코드 버그로 실패한 start 의 일지 줄(start_date == S)은 창이 만들어지기 전 것이라 어느 창에도 안 넣는다.
-    고친 뒤 다시 친 start 가 같은 S 를 받아도 그 창의 ②-1 은 깨끗하다. status 의 셈(_window_counts)도 같은 규칙.
+    고친 뒤 다시 친 start 가 같은 S 를 받아도 그 창의 ②-1 은 깨끗하다. status 의 셈(window_counts)도 같은 규칙.
     same_clock: 두 start 가 같은 시각(시계가 거침)이어도 보고서는 실행 순서로 가른다."""
     h = _fin_h(tmp_path, n_days=70)
     _pass_now(h.root)
@@ -1363,7 +1363,7 @@ def test_R1_실패한_start_뒤_같은_S_로_다시_시작한_창은_깨끗함(t
     assert "창 밖 기록 2줄" in R.render(d)
     meta = h.meta()
     if not same_clock:
-        assert h1._window_counts(h.root, "us", hs.S_A, meta["created_at"])[0] == 0     # status 도 같은 규칙(시각)
+        assert h1.window_counts("us", h.root)["l_errors"] == 0                       # status 도 같은 규칙(시각)
         assert h1._in_window(err[0], hs.S_A, meta["created_at"]) is False
     else:
         assert err[0]["at"] == meta["created_at"]                       # 시각으로는 못 가름 → 보고서는 실행 순서로 뺌

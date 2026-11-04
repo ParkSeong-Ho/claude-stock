@@ -580,16 +580,19 @@ def _load(mk, root) -> _Ctx:
     return _context(mk, root, loaded, decisions)
 
 
-def _context(mk, root, loaded, decisions=None, exclude_run_ids=()) -> _Ctx:
+def _context(mk, root, loaded, decisions=None, exclude_run_ids=(), extra_runs=()) -> _Ctx:
     """이미 읽은 장부(loaded: meta·head·states)에 일지(runs/errors/changes/restarts.jsonl·calendar.jsonl)를 붙인 묶음.
-    exclude_run_ids: runs.jsonl 에서 뺄 실행(아직 끝 줄을 쓰지 않은 '지금 이 명령' — status·실행 요약이 자기 시작 줄을
-    '끝 기록 없는 실행'으로 세지 않게. 보고서는 runs.jsonl 에 쓰지 않으므로 늘 빈 값)."""
+    exclude_run_ids: runs.jsonl 에서 뺄 실행(status 의 자기 시작 줄 — '끝 기록 없는 실행'으로 세지 않게).
+    extra_runs: runs.jsonl 뒤에 더해 셀 줄(실행 끝 요약이 곧 쓸 자기 끝 줄 — 종료 코드 7 이면 D7 멈춤도 셈).
+    보고서는 runs.jsonl 에 쓰지 않으므로 둘 다 늘 빈 값."""
     logs, broken = {}, {}
     for name in JOURNALS:
         logs[name], broken[name] = _read_counted(h1.h1_path(root, name))
     if exclude_run_ids:
         gone = set(exclude_run_ids)
         logs["runs.jsonl"] = [r for r in logs["runs.jsonl"] if r.get("run_id") not in gone]
+    if extra_runs:
+        logs["runs.jsonl"] = logs["runs.jsonl"] + [dict(r) for r in extra_runs]
     cal_lines, broken["calendar.jsonl"] = _read_counted(h1.h1_path(root, mk, "calendar.jsonl"))
     return _Ctx(mk, root, loaded, decisions, h1._last_ok_calendar_line(root, mk), logs, broken, cal_lines)
 
@@ -805,33 +808,9 @@ def _l_events(c, J) -> list:
 def _restart_info(c) -> dict:
     """재시작 수(2c 검토 R-7) = 셋 중 가장 큰 값: meta.restart_no(HEAD 로 보호), restarts.jsonl 의 restart_id 중
     'done' 이거나 보관 폴더가 실제로 있는 것, archive/<시장>-* 폴더 수. 셋이 다르면 경고.
-    지금 창을 옮기려던 'moving' 줄(보관 폴더 없음, 시장 폴더 그대로)은 재시작으로 세지 않고 '끝나지 않은 restart 기록'."""
-    groups = {}
-    for r in c.restart_lines:
-        if r.get("market") != c.mk:
-            continue
-        g = groups.setdefault(h1._restart_id(r), {"recs": []})
-        g["recs"].append(r)
-        for k in ("at", "reason", "old_start", "old_last", "restart_no", "archive"):
-            if g.get(k) is None and r.get(k) is not None:
-                g[k] = r.get(k)
-    counted, pending = [], []
-    for g in groups.values():
-        done = any(r.get("status", "done") == "done" for r in g["recs"])
-        try:
-            arch = bool(g.get("archive")) and h1._archive_path(c.root, g).exists()
-        except (h1.H1Refused, ValueError):
-            arch = False
-        g["done"] = done
-        (counted if done or arch else pending).append(g)
-    adir = h1.h1_path(c.root, "archive")
-    n_arch = sum(1 for x in adir.iterdir() if x.is_dir() and x.name.startswith(f"{c.mk}-")) if adir.is_dir() else 0
-    meta_n = c.meta.get("restart_no")
-    meta_n = meta_n if isinstance(meta_n, int) and not isinstance(meta_n, bool) else 0
-    sources = {"meta.restart_no": meta_n, "restarts.jsonl": len(counted), "archive 폴더": n_arch}
-    return {"used": max(sources.values()), "sources": sources, "mismatch": len(set(sources.values())) > 1,
-            "list": [{k: g.get(k) for k in ("at", "reason", "old_start", "old_last", "done")} for g in counted],
-            "pending": [{k: g.get(k) for k in ("at", "reason", "old_start", "old_last")} for g in pending]}
+    지금 창을 옮기려던 'moving' 줄(보관 폴더 없음, 시장 폴더 그대로)은 재시작으로 세지 않고 '끝나지 않은 restart 기록'.
+    h1.restart_info 하나를 status 머리·restart 상한 확인·start 의 restart_no 와 같이 쓴다(단계 3 검토 반영)."""
+    return h1.restart_info(c.mk, c.root, c.meta, c.restart_lines)
 
 
 def _ops(c, bar_upto, B, unknown_in, end_at, allowed, allowed_why):
@@ -1326,6 +1305,7 @@ def _collect_locked(mk, root, month, final, online) -> dict:
     if final:
         data["verdict"] = _verdict(data)
         data["extension"] = _extension(c, s62) if complete and last > s62 else None
+        data["ext_l_errors"] = _ext_l_errors(c, s62) if complete else 0     # 연장 봉이 없어도 S+62 뒤 L 은 보임(T-5)
     return data
 
 
@@ -1430,19 +1410,20 @@ def _ext_l_errors(c, s62) -> int:
     return sum(1 for e in _l_events(c, _journal(c)) if _scope(e, s62, True) == "out" and not e["false_positive"])
 
 
-def window_counts(market, root, loaded, *, decisions=None, exclude_run_ids=()) -> dict:
+def window_counts(market, root, loaded, *, decisions=None, exclude_run_ids=(), extra_runs=()) -> dict:
     """h1.py status·실행 끝 요약이 보여 주는 판정 창 숫자 — **보고서 --final 과 같은 함수·같은 범위**로 센다
     (설계 §10.2e 'status 와 보고서', 단계 3). loaded = h1.load_market 결과(meta·head·states).
     - 범위: 창이 다 찼으면 S ~ S+62(최종 판정 ②와 같음, 그 뒤는 연장), 덜 찼으면 지금까지 전부(어느 봉의 일인지 모르는
       줄도 넣음 = 최종 보고서의 '덜 찬 창'과 같음). 일지 줄은 h1._in_window + 창을 만든 start 보다 먼저 시작한 실행 빼기.
     - L 오류 = errors.jsonl ∪ runs.jsonl 종료 코드 2(run_id 로 한 번), 사전 등록 ④ false_positive 판정은 빼고 따로.
     - decisions(DecisionLog)를 주면 팀장 판정 수(이 창 하루 기록이 가리키는 기록, ⑧ 과 같은 분모)도.
-    - exclude_run_ids: 아직 끝 줄이 없는 '지금 이 명령'의 run_id(자기 자신을 '끝 기록 없는 실행'으로 세지 않게).
-    돌려줌: {"complete", "s62", "cut", "l_errors", "l_false_positive", "l_codes", "l_runs_only", "ext_l_errors",
+    - exclude_run_ids: 아직 끝 줄이 없는 '지금 이 명령'의 run_id(자기 자신을 '끝 기록 없는 실행'으로 세지 않게, status).
+    - extra_runs: 아직 안 쓴 줄을 더해 셈(실행 끝 요약의 곧 쓸 끝 줄 — 종료 코드 7 이면 D7 멈춤도 셈).
+    돌려줌: {"window_bars"(meta.rules), "complete", "s62", "cut", "l_errors", "l_false_positive", "l_codes", "l_runs_only", "ext_l_errors",
             "data_stops", "data_kinds", "gate_refused", "backlog_fail", "batch_max", "lock_timeouts", "no_end",
             "unknown", "outside", "broken", "late"(늦은 봉 날짜 목록), "leader_n", "leader_fallback"}"""
     mk = h1._mkey(market)
-    c = _context(mk, h1._root(root), loaded, decisions, exclude_run_ids)
+    c = _context(mk, h1._root(root), loaded, decisions, exclude_run_ids, extra_runs)
     wb = int(c.rule("window_bars", h1.WINDOW_BARS))
     complete = len(c.dates) >= wb
     s62 = c.dates[wb - 1] if complete else None
@@ -1450,7 +1431,7 @@ def window_counts(market, root, loaded, *, decisions=None, exclude_run_ids=()) -
     jc, _ = _journal_counts(c, s62 if complete else _FAR, True)
     keep = ("l_errors", "l_false_positive", "l_codes", "l_runs_only", "data_stops", "data_kinds", "gate_refused",
             "backlog_fail", "batch_max", "lock_timeouts", "no_end", "unknown", "outside", "broken")
-    out = {"complete": complete, "s62": s62, "cut": cut, **{k: jc[k] for k in keep},
+    out = {"window_bars": wb, "complete": complete, "s62": s62, "cut": cut, **{k: jc[k] for k in keep},
            "ext_l_errors": _ext_l_errors(c, s62) if complete else 0, "late": _late_dates(c, cut),
            "leader_n": None, "leader_fallback": None}
     if decisions is not None and c.dates:
@@ -1923,7 +1904,11 @@ def _render_extension(d):
         return []
     L = ["## 연장 기록 (S+62 뒤 — 판정에 쓰지 않음)", ""]
     if e is None:
-        return L + ["- S+62 뒤에 처리한 봉이 아직 없음.", ""]
+        L.append("- S+62 뒤에 처리한 봉이 아직 없음.")
+        if d.get("ext_l_errors"):
+            L.append(f"- 그 뒤 봉을 처리하다 난 L 오류(errors.jsonl·종료 코드 2) {d['ext_l_errors']}건 — 판정 창 밖이라 "
+                     "판정에는 안 씀(사전 등록 ①), 고칠 일은 그대로")
+        return L + [""]
     mk = d["market"]
     L += [f"- {e['first']} ~ {e['last']} {e['n']}봉 · 늦은 봉 {e['late']} · L 오류(errors.jsonl) {e['l_errors']}",
           f"- A0 {_money(mk, e['A0']['value'])} (S+62 뒤 {_pct(e['A0']['ret_ext'])}) · "

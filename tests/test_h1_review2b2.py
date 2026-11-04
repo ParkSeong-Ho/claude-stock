@@ -52,8 +52,8 @@ class Crash(BaseException):
 
 @pytest.fixture(autouse=True)
 def guards(monkeypatch):
-    repo_state = ROOT / "state"
-    existed = repo_state.exists()
+    import h1_repo_guard as rg                                   # 저장소 state/·results/ 앞뒤 비교(단계 3 검토 T-3)
+    repo_before = rg.snapshot(ROOT)
 
     def boom(*a, **k):
         raise AssertionError("시험이 진짜 claude 를 부르려 했어요")
@@ -72,8 +72,8 @@ def guards(monkeypatch):
         raise AssertionError("잠금이 실제로 기다리려 했어요")
     monkeypatch.setattr(h1, "_lock_sleep", no_wait)
     yield
-    if not existed:
-        assert not repo_state.exists(), "시험이 저장소에 state/ 를 만들었어요"
+    moved = rg.changes(repo_before, rg.snapshot(ROOT))
+    assert not moved, "시험이 저장소 state/·results/ 를 건드렸어요(이미 있던 맥 장부 포함): " + "; ".join(moved[:5])
 
 
 def d_codes(h):
