@@ -20,7 +20,9 @@ kr_halt_check.py - 국내 장부에 '거래정지일 체결'이 남아 있는지
 실행 (프로젝트 폴더에서, 인터넷 필요):
     python kr_halt_check.py
     python kr_halt_check.py --state state/kr --results results     # 폴더를 직접 지정
-종료코드: 0 = 정지일 체결 없음 / 1 = 정지일 체결 있음 / 2 = 확인 못 함(시세를 못 받음 등)
+종료코드: 0 = 체결을 전부 확인했고 정지일 체결 없음
+          1 = 정지일 체결 있음 (확인 못 한 체결이 같이 있어도 1, 둘 다 목록으로 보여 줌)
+          2 = 정지일 체결은 못 찾았지만 확인 못 한 체결이 있음 (시세 못 받음·범위 밖·날짜 못 읽음 등)
 
 찾았을 때: 이 스크립트는 장부를 고치지 않는다. 어떻게 할지는 사람이 정한다
 (예: 그 트레이너 상태 파일을 다른 이름으로 보관하고 새로 시작). docs/kr-fix-s0.md 참고.
@@ -126,43 +128,57 @@ def fdr_raw(code, start):
 
 # ---------------- ③ 맞춰 보기 ----------------
 
+def _valid_day(v):
+    try:
+        date.fromisoformat(v)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def check(fills, loader=fdr_raw):
-    """체결 목록을 종목별 원본 시세와 맞춘다. (정지일 체결, 날짜 없는 체결, 참고 메모, 확인한 종목 수)."""
-    bad, missing, notes = [], [], []
+    """체결 목록을 종목별 원본 시세와 맞춘다. (정지일 체결, 확인 못 한 체결, 참고 메모, 확인한 종목 수).
+
+    '확인 못 한 체결'(why 에 이유)이 하나라도 있으면 '이상 없음'이라고 말하면 안 된다 (I4, 2026-11-04):
+      국내 코드 아님 / 체결 날짜를 못 읽음(그 줄만, M4) / 시세를 못 받음 / 시세가 빔 /
+      받은 시세 범위 밖(네이버는 최근 3,000봉까지만) / 그 날짜 봉이 시세에 없음."""
+    bad, unchecked, notes = [], [], []
     by_code = {}
     for x in fills:
         by_code.setdefault(x["code"], []).append(x)
     checked = 0
     for code, xs in sorted(by_code.items()):
         if not markets.code_ok("kr", code):
-            notes.append(f"{code}: 국내 6자리 종목코드가 아님 — 건너뜀 ({len(xs)}건)")
+            unchecked += [{**x, "why": "국내 6자리 종목코드가 아님"} for x in xs]
             continue
-        days = sorted(x["date"] for x in xs)
-        try:
-            start = (date.fromisoformat(days[0]) - timedelta(days=10)).isoformat()
-        except ValueError:
-            notes.append(f"{code}: 체결 날짜를 읽을 수 없음({days[0]!r}) — 건너뜀")
+        good = [x for x in xs if _valid_day(x["date"])]
+        unchecked += [{**x, "why": "체결 날짜를 읽을 수 없음"} for x in xs if not _valid_day(x["date"])]
+        if not good:
             continue
+        start = (date.fromisoformat(min(x["date"] for x in good)) - timedelta(days=10)).isoformat()
         try:
             df = loader(code, start)
         except BaseException as e:            # 라이브러리 없음(SystemExit 등)·인터넷 오류
             if isinstance(e, KeyboardInterrupt):
                 raise
-            notes.append(f"{code}: 시세를 못 받아 확인 못 함({type(e).__name__}) — {len(xs)}건")
+            unchecked += [{**x, "why": f"시세를 못 받음({type(e).__name__}) — 인터넷·finance-datareader 확인"}
+                          for x in good]
             continue
         if df is None or len(df) == 0:
-            notes.append(f"{code}: 시세가 비어 있어 확인 못 함 — {len(xs)}건")
+            unchecked += [{**x, "why": "받은 시세가 비어 있음"} for x in good]
             continue
         checked += 1
         halts = halt_days(df)
         have = {ts.date().isoformat() for ts in df.index}
         first, last = min(have), max(have)
-        for x in xs:
+        for x in good:
             if x["date"] in halts:
                 bad.append({**x, "why": halts[x["date"]]})
-            elif first <= x["date"] <= last and x["date"] not in have:
-                missing.append(x)
-    return bad, missing, notes, checked
+            elif not first <= x["date"] <= last:
+                unchecked.append({**x, "why": f"받은 시세 범위({first}~{last}) 밖"})
+            elif x["date"] not in have:
+                unchecked.append({**x, "why": "시세에 그 날짜 봉이 없음(데이터가 바뀌었을 수 있음)"})
+    return bad, unchecked, notes, checked
 
 
 def _line(x):
@@ -193,18 +209,19 @@ def main(argv=None, loader=fdr_raw, out=print):
         return 0
     codes = {x["code"] for x in fills}
     out(f"  장부 체결 {len(fills)}건 (종목 {len(codes)}개) — 원본 시세를 받아 맞춰 보는 중...")
-    bad, missing, more, checked = check(fills, loader)
+    bad, unchecked, more, checked = check(fills, loader)
     for n in notes + more:
         out(f"  (참고) {n}")
-    if missing:
-        out(f"  (참고) 시세에 그 날짜 봉이 아예 없는 체결 {len(missing)}건 — 데이터가 바뀌었을 수 있어요:")
-        for x in missing:
+    if unchecked:
+        out(f"  ❓ 확인 못 한 체결 {len(unchecked)}건 — 이 체결들은 정지일인지 아닌지 몰라요:")
+        for x in unchecked:
             out(_line(x))
-    if checked == 0:
-        out("  ❓ 시세를 하나도 못 받아 확인하지 못했어요. 인터넷 연결과 finance-datareader 설치를 확인하세요.")
-        return 2
     if not bad:
-        out(f"  ✅ 거래정지일 체결 없음 (확인한 종목 {checked}개).")
+        if unchecked:
+            head = "하나도 확인하지 못했어요" if checked == 0 else f"일부만 확인했어요 (확인한 종목 {checked}개)"
+            out(f"  ❓ {head}. 위 체결은 확인되지 않았으니 '이상 없음'이 아니에요. 원인을 고친 뒤 다시 돌리세요.")
+            return 2
+        out(f"  ✅ 거래정지일 체결 없음 (확인한 종목 {checked}개, 체결 {len(fills)}건 전부 확인).")
         return 0
     out(f"  ⚠️ 거래정지일 체결 {len(bad)}건 — 실제로는 거래가 없던 날이라 불가능한 체결이에요:")
     for x in bad:

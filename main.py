@@ -132,7 +132,7 @@ def cash_word(m=None):
 
 # ---------------- 데이터: 확정 봉만 (D1) ----------------
 
-def confirmed_bars(df, now=None, market="us"):
+def confirmed_bars(df, now=None, market="us", cutoff=None):
     """'다 끝난(확정된) 봉'만 남긴다. 순수 함수 — 인터넷을 쓰지 않아서 테스트하기 쉽다.
 
     초보자용 설명:
@@ -141,13 +141,18 @@ def confirmed_bars(df, now=None, market="us"):
         네이버는 거래정지일에도 행을 준다. 모양은 'Open=High=Low=0, Close=직전 종가, Volume=0'
         또는 (삼성바이오로직스 2018-11-15~12-10) 'OHLC 전부 직전 종가, Volume=0'.
         이 행이 남으면 ① 거래가 없던 날 주문이 '체결'되고 ② 이동평균·RSI·20일 평균 거래량에
-        거래 없는 날이 섞인다. 그래서 그 종목에는 '없던 날'로 본다 → 신호도 체결도 다음 거래된 봉에서.
+        거래 없는 날이 섞인다. 그래서 그 종목 시세에서는 그날이 '없던 날'이 된다.
+        main·live 는 그 종목의 그날을 아예 처리하지 않는다(신호·체결·보유일수 없음).
+        team 은 기준 날짜(KS200)마다 돌기 때문에, 그 종목의 마지막 봉이 기준 봉보다 앞이면
+        평가만 하고 판단·보유일수를 건너뛴다(team.run_trainer ②). 체결은 다음 거래된 봉 시가.
         거래량이 비어 있는(NaN) 행은 '모름'이라 그대로 둔다. 미국은 예전과 똑같다(이 규칙 없음).
     - 마지막 봉의 날짜가 그 시장 시간으로 '오늘'인데 아직 확정 시각 전이면,
       그 봉은 아직 장중(미완성)이라 버린다.
         미국: 뉴욕 시간 16:15 전 (D1)   국내: 한국 시간 16:00 전 (K-D9)
+        국내 벤치마크 KS200 만: 한국 시간 22:30 전 (cutoff="22:30", markets.py bench_cutoff 설명)
     now: 기준 시각. 없으면 지금. 시간대가 없는 값은 이 컴퓨터의 현지 시각으로 본다.
     market: "us"(기본) | "kr"
+    cutoff: "HH:MM"(그 시장 현지시간)으로 확정 시각을 바꿔 쓸 때만. 없으면 시장 기본값.
     """
     if df is None or len(df) == 0:
         return df
@@ -164,6 +169,9 @@ def confirmed_bars(df, now=None, market="us"):
     else:
         hh, mm = m.close_cutoff.split(":")
         tz, settled = ZoneInfo(m.tz), time(int(hh), int(mm))
+    if cutoff:
+        hh, mm = cutoff.split(":")
+        settled = time(int(hh), int(mm))
     if now is None:
         now_local = datetime.now(tz)
     else:
@@ -179,7 +187,9 @@ def load_prices(code: str, start: str, now=None, market="us", allow_index=False)
     market="kr" 이면 6자리 국내 코드만 받는다(달러 종목이 원화 지갑에 섞이지 않게).
     allow_index: 벤치마크 전용 문(load_benchmark 만 True 로 부른다). True 여도 풀어 주는 건
       '그 시장의 벤치마크 기호 딱 하나'(국내 "KS200" = KOSPI 200 가격지수)뿐이다.
-      그 밖의 값(예: 미국 티커 "AAPL")은 여전히 국내 종목코드가 아니라서 거부한다."""
+      그 밖의 값(예: 미국 티커 "AAPL")은 여전히 국내 종목코드가 아니라서 거부한다.
+    벤치마크 기호(code == 그 시장 benchmark)면 확정 시각은 그 시장 bench_cutoff 를 쓴다
+    (국내 KS200 = 22:30 KST. 미국 SPY 는 bench_cutoff 가 없어 예전 그대로 16:15 ET)."""
     m = mkt(market)
     if m.key == "kr" and not markets.code_ok("kr", code):
         if not (allow_index and code == m.benchmark):
@@ -197,7 +207,8 @@ def load_prices(code: str, start: str, now=None, market="us", allow_index=False)
     # 거래량 칼럼 이름 정리 (파이오니어가 사용)
     if "Volume" not in df.columns and "거래량" in df.columns:
         df = df.rename(columns={"거래량": "Volume"})
-    df = confirmed_bars(df, now, m.key)
+    cutoff = m.bench_cutoff if code == m.benchmark else None
+    df = confirmed_bars(df, now, m.key, cutoff)
     if len(df) == 0:
         raise ValueError(f"'{code}' 확정된 봉이 하나도 없어요.")
     return df

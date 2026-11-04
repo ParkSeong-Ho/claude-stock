@@ -413,7 +413,234 @@ def test_kr_halt_check_시세를_못_받으면_2_장부가_없으면_0(tmp_path,
         raise SystemExit("라이브러리 없음")
     lines = []
     assert kr_halt_check.main(["--state", str(sd), "--results", str(rd)], loader=boom, out=lines.append) == 2
-    assert any("확인 못 함" in x for x in lines)
+    assert any("확인 못 한 체결" in x for x in lines) and any("하나도 확인하지 못했어요" in x for x in lines)
+    assert not any("✅" in x for x in lines)
     empty = tmp_path / "없음"
     assert kr_halt_check.main(["--state", str(empty), "--results", str(empty)],
                               loader=boom, out=lambda *_: None) == 0
+
+
+# ================= 독립 검토 뒤 추가 (2026-11-04, docs/kr-fix-s0.md §7) =================
+
+import analyst        # noqa: E402
+import screener       # noqa: E402
+import order_runner   # noqa: E402
+from datetime import datetime   # noqa: E402
+from zoneinfo import ZoneInfo   # noqa: E402
+
+KST = ZoneInfo("Asia/Seoul")
+ET = ZoneInfo("America/New_York")
+
+
+def _sell_brain(seen):
+    """들고 있으면 늘 '매도' 하는 가짜 두뇌. 판단에 쓴 마지막 봉 날짜를 seen 에 적는다."""
+    class B:
+        def add_indicators(self, df):
+            return df.copy()
+
+        def decide(self, df, position):
+            seen.append(d(df.index[-1]))
+            return ("매도", "가짜 매도") if position is not None else ("관망", "가짜 관망")
+    return B
+
+
+@pytest.mark.parametrize("form", ["zero", "flat"])
+def test_I1_team_정지_중_보유종목은_판단_보유일수_쉬고_live_와_같은_날_판다(monkeypatch, tmp_path, halted, form):
+    """I1: 정지 중에는 '옛 봉'으로 다시 판단하지 않는다. 매일 상태 파일에서 다시 읽는다(저장/로드 포함)."""
+    S, H, R, L = halted["S"], halted["H"], halted["R"], halted["L"]
+    raw = with_halt(halted["base"], halted["s_i"] + 1, 3, form)
+    monkeypatch.setattr(team, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(live, "STATE_DIR", tmp_path / "state_live")
+    cut = [S]
+    fake_fdr(monkeypatch, {CODE: raw}, cut)
+    seen = []
+    monkeypatch.setitem(team.BRAINS, "스프린터", _sell_brain(seen))
+    px = float(raw.loc[S, "Open"])
+    st = team._new_state("스프린터", 3_000_000, S, "kr")
+    st["wallet"].buy(CODE, px, 10, S)
+    st["positions"][CODE] = {"buy_price": px, "days_held": 0, "shares": 10, "buy_date": S}
+    st["last_date"], st["prev_value"] = S, 3_000_000.0
+    team._save("스프린터", st, "kr")
+    br = CircuitBreaker(0.10, 0.07)
+    for day in H:
+        cut[0] = day
+        line, _ = team.run_trainer("스프린터", 3_000_000, 0.2, br, [], day, st=team._load("스프린터", "kr"),
+                                   cache={}, mk="kr")
+        saved = team._load("스프린터", "kr")
+        assert saved["last_date"] == day and saved["pending"] == []          # 정지일 신호로 매도 주문 없음
+        assert saved["positions"][CODE]["days_held"] == 0                    # 보유일수도 안 늘어남
+        assert "판단 쉼" in line
+    assert seen == []                                                        # 옛 봉으로 판단한 적 없음
+    for day in (R, L):
+        cut[0] = day
+        team.run_trainer("스프린터", 3_000_000, 0.2, br, [], day, st=team._load("스프린터", "kr"), cache={}, mk="kr")
+    team_sells = [e["시각"] for e in team._load("스프린터", "kr")["wallet"].log if e["종류"] == "매도"]
+    assert seen == [R] and team_sells == [L]                                 # R 종가로 판단 → L 시가 매도
+    # live 도 같은 데이터·같은 두뇌로 같은 날 판다 (예전 코드는 team 이 정지일 신호로 R 에 팔아 갈렸음)
+    seen.clear()
+    ls = main.new_state("스프린터", 3_000_000, S, "kr")
+    ls["wallet"].buy(CODE, px, 10, S)
+    ls["position"] = {"buy_price": px, "days_held": 0, "shares": 10, "buy_date": S}
+    ls["last_date"], ls["start_date"] = S, S
+    live._save_state("삼성전자", "스프린터", ls, "kr")
+    brain = _sell_brain(seen)()
+    for day in (*H, R, L):
+        cut[0] = day
+        _, ls = live.step_one("스프린터", brain, 0.2, CODE, "삼성전자", 3_000_000, br, mk="kr")
+    assert [e["시각"] for e in ls["wallet"].log if e["종류"] == "매도"] == team_sells
+
+
+def test_M1_screener_는_정지_중_종목을_후보로_내지_않는다(monkeypatch, halted):
+    codes = list(markets.KR_UNIVERSE.values())[:3]
+    base = halted["base"]
+    frames = {codes[0]: base, codes[1]: with_halt(base, len(base) - 3, 3, "zero"), codes[2]: base}
+    fake_fdr(monkeypatch, frames, [halted["L"]])
+
+    class AlwaysBuy:
+        def add_indicators(self, df):
+            return df.copy()
+
+        def decide(self, df, position):
+            return "매수", "가짜 매수"
+    monkeypatch.setattr(screener, "BRAINS", {"마라토너": AlwaysBuy})
+    found, used = screener.scan(3, market="kr")
+    assert used == 3
+    assert [c["code"] for c in found["마라토너"]] == [codes[0], codes[2]]   # 정지 중(마지막 봉 오래됨)인 codes[1] 빠짐
+    assert all(c["date"] == halted["L"] for c in found["마라토너"])
+
+
+def test_M1_team_은_기준_봉보다_오래된_후보로_주문하지_않는다(monkeypatch, tmp_path, halted):
+    monkeypatch.setattr(team, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(analyst, "analyze", lambda *a, **k: None)
+    fake_fdr(monkeypatch, {CODE: halted["base"], "000660": halted["base"]}, [halted["R"]])
+    cands = [{"code": "000660", "price": 1.0, "rsi": 30.0, "reason": "옛 신호", "date": halted["S"]},
+             {"code": CODE, "price": 1.0, "rsi": 30.0, "reason": "오늘 신호", "date": halted["R"]}]
+    line, st = team.run_trainer("마라토너", 6_000_000, 0.3, CircuitBreaker(), cands, halted["R"], cache={}, mk="kr")
+    assert [o["code"] for o in st["pending"]] == [CODE]
+    assert "후보 제외 000660" in line
+
+
+def test_I2_KS200_은_22시30분_전에는_오늘_봉을_버린다(monkeypatch):
+    kr, us = markets.get_market("kr"), markets.get_market("us")
+    assert kr.bench_cutoff == "22:30" and us.bench_cutoff is None
+    idx = pd.bdate_range(end="2026-11-03", periods=5)
+    ks = pd.DataFrame({"Open": 900.0, "High": 910.0, "Low": 890.0, "Close": [900.0, 901, 902, 903, 884.08],
+                       "Volume": 1e8}, index=idx)
+    fake_fdr(monkeypatch, {"KS200": ks, CODE: ks * 100}, ["2026-11-03"])
+    at = lambda hh, mm: datetime(2026, 11, 3, hh, mm, tzinfo=KST)   # noqa: E731
+    bench = lambda now: main.load_prices("KS200", "2026-10-01", now=now, market="kr", allow_index=True)  # noqa: E731
+    assert d(bench(at(16, 30)).index[-1]) == "2026-11-02"          # 장중 미완성 값(884.08)은 아직 안 씀
+    assert d(bench(at(22, 29)).index[-1]) == "2026-11-02"
+    assert d(bench(at(22, 31)).index[-1]) == "2026-11-03"
+    assert d(bench(datetime(2026, 11, 4, 8, 0, tzinfo=KST)).index[-1]) == "2026-11-03"   # 다음날 아침
+    # 종목은 예전처럼 16:00 KST 기준
+    assert d(main.load_prices(CODE, "2026-10-01", now=at(16, 30), market="kr").index[-1]) == "2026-11-03"
+    # confirmed_bars 자체: cutoff 를 주면 그 시각
+    assert d(main.confirmed_bars(ks, now=at(16, 30), market="kr", cutoff="22:30").index[-1]) == "2026-11-02"
+    # 미국 SPY 는 예전 그대로 16:15 ET
+    spy = ks.copy()
+    fake_fdr(monkeypatch, {"SPY": spy}, ["2026-11-03"])
+    assert d(main.load_prices("SPY", "2026-10-01", now=datetime(2026, 11, 3, 16, 20, tzinfo=ET)).index[-1]) \
+        == "2026-11-03"
+
+
+@pytest.mark.parametrize("hh,mm,want", [(16, 30, "2026-10-29"), (22, 31, "2026-10-30")])
+def test_I2_team_국내_기준_날짜는_KS200_확정_뒤에야_오늘(monkeypatch, tmp_path, capsys, hh, mm, want):
+    fix = datetime(2026, 10, 30, hh, mm, tzinfo=KST)
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fix.astimezone(tz) if tz else fix.replace(tzinfo=None)
+    monkeypatch.setattr(main, "datetime", Frozen)
+    monkeypatch.setattr(team, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(screener, "scan", lambda n, market="us": ({t: [] for t in team.BRAINS}, 0))
+    base = synth()                                     # 마지막 봉 2026-10-30
+    fake_fdr(monkeypatch, {"KS200": base / 80, CODE: base}, ["2026-10-30"])
+    team.run(3, market="kr")
+    assert f"기준 확정 봉 {want}" in capsys.readouterr().out
+
+
+def _halt_ledger(tmp_path, rows):
+    sd = tmp_path / "state" / "kr"; sd.mkdir(parents=True)
+    log = [{"시각": t, "종류": k, "종목": c, "수량": 1, "금액": 1.0, "통화": "KRW"} for t, k, c in rows]
+    (sd / "team_마라토너.json").write_text(json.dumps({"wallet": {"name": "마라토너", "log": log}}, ensure_ascii=False),
+                                         encoding="utf-8")
+    return ["--state", str(sd), "--results", str(tmp_path / "없음")]
+
+
+def test_I4_halt_check_일부_종목_시세를_못_받으면_종료코드_2(tmp_path, halted):
+    args = _halt_ledger(tmp_path, [(halted["R"], "매수", CODE), (halted["R"], "매수", "000660")])
+
+    def flaky(code, start):
+        if code == "000660":
+            raise ConnectionError("timeout")
+        return halted["base"].loc[start:]
+    lines = []
+    assert kr_halt_check.main(args, loader=flaky, out=lines.append) == 2
+    text = "\n".join(lines)
+    assert "✅" not in text and "일부만 확인" in text and "확인 못 한 체결 1건" in text
+    assert "000660" in text and "ConnectionError" in text
+
+
+def test_I4_halt_check_시세_범위_밖_체결도_확인_못_함(tmp_path, halted):
+    args = _halt_ledger(tmp_path, [("2010-01-04", "매수", CODE), (halted["R"], "매도", CODE)])
+    lines = []
+    rc = kr_halt_check.main(args, loader=lambda code, start: halted["base"], out=lines.append)
+    assert rc == 2 and any("범위" in x and "2010-01-04" in x for x in lines)
+
+
+def test_M4_halt_check_날짜_못_읽는_줄은_그_줄만_빼고_나머지는_확인(tmp_path, halted):
+    raw = with_halt(halted["base"], halted["s_i"] + 1, 3, "zero")
+    args = _halt_ledger(tmp_path, [(None, "매수", CODE), (halted["H"][1], "매도", CODE)])
+    lines = []
+    rc = kr_halt_check.main(args, loader=lambda code, start: raw.loc[start:], out=lines.append)
+    text = "\n".join(lines)
+    assert rc == 1 and "거래정지일 체결 1건" in text and halted["H"][1] in text
+    assert "체결 날짜를 읽을 수 없음" in text and "인터넷" not in text
+
+
+@pytest.mark.parametrize("form", ["zero", "flat"])
+def test_I5_order_runner_국내_지정가는_신호일_이하_마지막_거래된_종가(monkeypatch, halted, form):
+    raw = with_halt(halted["base"], halted["s_i"] + 1, 3, form)
+    raw.loc[halted["H"][1], "Close"] = 1.0                 # 정지 행의 종가를 일부러 다르게 → 정지 행을 안 쓰는지 확인
+    calls = []
+    real = main.load_prices
+
+    def spy_load(code, start, now=None, market="us", allow_index=False):
+        calls.append(market)
+        return real(code, start, now=now, market=market, allow_index=allow_index)
+    monkeypatch.setattr(main, "load_prices", spy_load)
+    fake_fdr(monkeypatch, {CODE: raw}, [halted["L"]])
+    s_close = float(raw.loc[halted["S"], "Close"])
+    assert order_runner.signal_close("kr", CODE, halted["H"][1]) == s_close      # 정지일 신호 → 정지 직전 종가
+    assert order_runner.signal_close("kr", CODE, halted["R"]) == float(raw.loc[halted["R"], "Close"])
+    assert order_runner.signal_close("kr", CODE, "2020-01-01") is None           # 그 전 봉이 없음 → None(보류)
+    assert calls and set(calls) == {"kr"}                                       # 국내 규칙으로 받음
+    assert order_runner.limit_price("kr", s_close, "sell") == markets.round_to_tick("kr", s_close * 0.995, "sell")
+
+
+def test_미국_시가_없는_봉은_주문을_남겼다가_다음_봉_시가에_한_번만_체결(monkeypatch, tmp_path):
+    df = synth(seed=2, base=100.0)
+    days = [d(x) for x in df.index]
+    df.loc[df.index[31], "Open"] = np.nan
+    # main 백테스트(fill_pending)
+    r = main.run_one_trainer("스프린터", FakeBrain(buy_on=[days[30]]), df, 3_000, 0.2, "X")
+    buys = _buys(r["log"])
+    assert len(buys) == 1 and buys[0]["시각"] == days[32] and r["buys"] == 1
+    n = buys[0]["수량"]
+    assert buys[0]["금액"] == pytest.approx(float(df["Open"].iloc[32]) * 1.0005 * n * 1.001, abs=0.01)
+    # team(run_trainer) — 미국 경로, 상태 파일 저장/로드 포함
+    monkeypatch.setattr(team, "STATE_DIR", tmp_path / "state")
+    st = team._new_state("스프린터", 3_000, days[30])
+    st["pending"] = [{"code": "X", "action": "매수", "signal_date": days[30], "reason": "신호"}]
+    st["last_date"] = days[30]
+    team._save("스프린터", st)
+    for i in (31, 32, 33):
+        cache = {"X": df.iloc[: i + 1]}
+        st = team._load("스프린터") or st
+        _, st = team.run_trainer("스프린터", 3_000, 0.2, CircuitBreaker(), [], days[i], st=st, cache=cache)
+        if i == 31:
+            assert not _buys(st["wallet"].log) and [o["code"] for o in st["pending"]] == ["X"]
+    buys = _buys(st["wallet"].log)
+    assert len(buys) == 1 and buys[0]["시각"] == days[32] and buys[0]["통화"] == "USD"

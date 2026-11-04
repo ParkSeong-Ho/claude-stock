@@ -19,8 +19,11 @@ v1 규칙 (docs/v1-design.md):
   국내(--market kr, docs/kr-broker-design.md K-D7~K-D11):
   - 종목군은 markets.KR_UNIVERSE (KOSPI 대형주 약 30개 고정), 기준 날짜·비교는 KOSPI 200 가격지수(KS200)
     (2026-11-04 까지는 KODEX 200(069500). 네이버 069500 시세는 분배금 반영이라 배당 빠진 주식과 기준이 달라 바꿈)
-  - 거래정지일(거래량 0) 봉은 시세에서 빠진다 → 그동안 주문은 체결되지 않고 다음 거래된 봉 시가에 체결
-  - 확정 봉은 한국 시간 16:00 기준, 비용 수수료 0.015%·매도세 0.20%·슬리피지 0.05%, 가상자금 1,000만원
+  - 거래정지일(거래량 0) 봉은 시세에서 빠진다 → 그동안 주문은 체결되지 않고 다음 거래된 봉 시가에 체결.
+    정지 중인 보유 종목은 평가만 하고 판단·보유일수는 쉰다. 정지 중인 종목은 새 매수 후보에서 빠진다.
+  - 확정 봉은 한국 시간 16:00 기준(종목), 벤치마크 KS200 만 22:30 기준(장중에 미완성 값이 올라와서).
+    그래서 기준 날짜는 22:30 KST 전에는 하루 전 봉 → 국내는 22:30 KST 이후나 다음날 아침(09:00 전)에 돌리기를 권장
+  - 비용 수수료 0.015%·매도세 0.20%·슬리피지 0.05%, 가상자금 1,000만원
   - 상태 파일은 state/kr/team_<트레이너>.json (미국 state/team_<트레이너>.json 과 섞이지 않음)
 """
 
@@ -187,6 +190,10 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
     st["pending"] = still
 
     # ② 보유 종목: 오늘 종가로 평가하고 매도 판단 → 내일 시가 주문
+    #    그 종목의 마지막 봉이 기준 봉(bar_date)보다 앞이면(= 그 종목은 기준 봉 날 거래가 없음: 거래정지 등)
+    #    평가(직전 종가)만 하고 보유일수·매도 판단은 건너뛴다 (I1, 2026-11-04).
+    #    예전처럼 같은 '옛 봉'으로 매일 다시 판단하면, 거래 없는 날을 신호일로 한 매도 주문이 생기고
+    #    live·main(그 종목이 거래된 봉에서만 판단)과 결과가 갈린다.
     pending_codes = {o["code"] for o in st["pending"]}
     for code, pos in positions.items():
         df = _prices(code, cache, m)
@@ -198,6 +205,10 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
             continue
         prices[code] = float(d["Close"].iloc[-1])
         changed = True
+        last_bar = _dates(d)[-1]
+        if last_bar < bar_date:
+            logs.append(f"판단 쉼 {code}(마지막 봉 {last_bar}, 거래정지?)")
+            continue
         if code in held_before:
             pos["days_held"] = pos.get("days_held", 0) + 1
         if code in pending_codes:
@@ -220,7 +231,12 @@ def run_trainer(tname, cash, cap, breaker, screened, bar_date, st=None, cache=No
     pending_buys = [o for o in st["pending"] if o["action"] == "매수"]
     if not st["stopped"] and len(positions) + len(pending_buys) < MAX_POSITIONS:
         busy = set(positions) | {o["code"] for o in st["pending"]}
-        cands = [c for c in screened if c["code"] not in busy]
+        # 신호 봉이 기준 봉보다 앞인 후보(= 그 종목은 기준 봉 날 거래가 없음: 거래정지 등)는 뺀다 (M1, 2026-11-04).
+        # 오래된 봉의 신호로 새 주문을 내지 않는다 — ② 의 보유 종목 규칙과 같은 원칙.
+        stale = [c["code"] for c in screened if c.get("date") and c["date"] < bar_date]
+        if stale:
+            logs.append("후보 제외 " + ",".join(stale) + "(기준 봉에 거래 없음)")
+        cands = [c for c in screened if c["code"] not in busy and c["code"] not in stale]
         if cands:
             analysis = analyst.analyze(tname, cands)          # 팀장 분석; 부재 시 None → 규칙 폴백
             verdicts = {k: (v or {}).get("verdict") for k, v in (analysis or {}).items()}

@@ -1,6 +1,6 @@
 # claude-stock 의존성 (하한만 고정; 설치: python -m pip install -r requirements.txt)
 pandas>=2.0
 ta>=0.11
-finance-datareader>=0.9.50
+finance-datareader>=0.9.110   # 0.9.110 부터 KS200(국내 벤치마크)을 GitHub KRX 캐시에서 받음. 그 전 버전은 KRX 직접 호출 → 지금은 거절됨
 backtesting>=0.3.3
 pytest>=7.0

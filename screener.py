@@ -11,6 +11,11 @@ screener.py - 부하(트레이너)가 넓은 종목군에서 자기 스타일 '�
 국내(kr): markets.KR_UNIVERSE (KOSPI 시가총액 상위 약 30개, 코드에 고정) 앞에서부터 N종목.
           KRX 전체 목록 조회(fdr.StockListing("KRX"))는 자주 멈춰서 쓰지 않는다(K-D7). main.load_prices 가 '확정 봉'만 주므로(D1)
 후보의 가격·날짜는 마지막 확정 봉 기준이다. 실제 체결은 team.py 가 다음 거래일 시가로 한다(D3).
+
+오래된 봉 후보 빼기 (M1, 2026-11-04): 마지막 봉이 '이번 스캔에서 가장 최근 봉 날짜'보다 앞인 종목
+(= 그날 거래가 없음: 국내 거래정지일은 시세에서 빠지므로 정지 중 종목이 여기 걸림, 미국은 상장폐지·자료 지연)
+은 후보로 내지 않는다. 정지 전 마지막 봉의 신호로 매일 새 주문을 내지 않으려고. team.py 도 기준 봉보다
+오래된 후보는 한 번 더 뺀다.
 """
 
 import sys
@@ -45,6 +50,7 @@ def scan(n=50, market="us"):
     m = main.mkt(market)
     found = {t: [] for t in BRAINS}
     used = 0
+    latest = None                 # 이번 스캔에서 본 가장 최근 봉 날짜 (오래된 봉 후보를 빼는 기준)
     for code in (universe(n) if m.key == "us" else universe(n, m.key)):
         try:
             df = main.prices_for(m, code, START)
@@ -53,6 +59,8 @@ def scan(n=50, market="us"):
         if len(df) < 70:          # 지표 워밍업 부족 종목 제외
             continue
         used += 1
+        last = df.index[-1].date().isoformat()
+        latest = last if latest is None or last > latest else latest
         for tname, cls in BRAINS.items():
             d = cls().add_indicators(df)
             action, reason = cls().decide(d, None)   # 보유 없음 기준 → 매수 신호만 본다
@@ -65,6 +73,8 @@ def scan(n=50, market="us"):
                     "rsi": round(float(row["RSI"]), 1) if "RSI" in d.columns else None,
                     "reason": reason,
                 })
+    if latest:                    # 마지막 봉이 가장 최근 봉보다 앞인 종목(거래정지 등)의 후보는 뺀다
+        found = {t: [c for c in cs if c["date"] >= latest] for t, cs in found.items()}
     return found, used
 
 
