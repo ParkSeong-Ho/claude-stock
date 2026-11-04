@@ -4,7 +4,7 @@
 >
 > 먼저 읽은 것: `AI트레이너_주식자동매매_기획서.md`, `docs/v1-design.md`, `docs/kr-broker-design.md`, `research-2026-11-04` 브랜치의 `reports/research-2026-11-04/REPORT.md`(이하 **R0 조사**), `audit-2026-11-04` 브랜치의 `reports/audit-2026-11-04.md`(이하 **감사**), 그리고 `team.py`·`analyst.py`(팀장 veto/hold 흐름 확인용).
 >
-> 조사 방법: GitHub 검색 API(`gh api search/repositories`)로 저장소를 찾고 별 수·마지막 push·라이선스를 받았다(값은 **2026-11-04 06:23 UTC 기준**). README는 `raw.githubusercontent.com`으로 읽었고, 핵심 코드는 얕은 복제(`git clone --depth 1`)로 직접 열어 봤다(bt, ai-hedge-fund, QuantConnect Lean, pykrx, FinRL 일부 파일). 논문·블로그는 웹 검색으로 1차 출처를 확인했다. 확인하지 못한 값은 **(미확인)**이라고 적었다.
+> 조사 방법: GitHub 검색 API(`gh api search/repositories`)로 저장소를 찾고 별 수·마지막 push·라이선스를 받았다(값은 **2026-11-04 06:23 UTC 기준**). README는 `raw.githubusercontent.com`으로 읽었고, 핵심 코드는 얕은 복제(`git clone --depth 1`)로 직접 열어 봤다(bt, ai-hedge-fund, QuantConnect Lean, pykrx, FinRL 일부 파일). 논문·블로그는 웹에서 1차 출처(arXiv·저자 PDF·저자 블로그·학술지 색인)를 우선 읽었다. SSRN·출판사 페이지가 막힌 경우에는 2차 요약(CXO Advisory 등)을 쓰고 그렇다고 표시했다(§9). 확인하지 못한 값은 **(미확인)**이라고 적었다.
 
 ---
 
@@ -74,7 +74,18 @@
 
 **논문·기관 자료 (웹에서 1차 출처 확인)**
 
-<!-- LIT-A -->
+| 자료 | 규칙 | 기간·대상 | 주장(원문 수치) | 스스로 밝힌 한계 / 반론 | 근거 수준 |
+|---|---|---|---|---|---|
+| Antonacci, "Risk Premia Harvesting Through (Dual) Momentum", SSRN 2042750 (2012-04판 읽음) | 12개월 수익이 단기 국채보다 낮으면 국채, 높으면 짝 자산 중 강한 쪽 | 1974-01 ~ 2011-12, 월별, 지수 | 주식 모듈 연 15.79%, Sharpe 0.73, MDD -23.01% (미국 지수 연 11.49%, Sharpe 0.35, MDD -50.65%). 4개 모듈 합성 연 14.90%, MDD -10.92% | 원문: "거래비용을 빼지 않았다". 지수 데이터. 모듈당 연 1.2~1.6회 전환 | 저자 백테스트 |
+| Faber, "A Quantitative Approach to Tactical Asset Allocation", J. Wealth Mgmt 2007 (2013 개정) | 5개 자산 각각 월말 종가 > 10개월 평균이면 보유, 아니면 단기 국채 | 1973 ~ 2012 | 연 10.5% vs B&H 9.9%, MDD -9.5% vs -46.0%, Sharpe 0.73 vs 0.44 (CXO Advisory 요약 경유. SSRN 원문은 접근 실패) | 비용 전, 지수 데이터, 10개월 선택 자체가 데이터 맞추기일 수 있음, 이득이 2008 회피에 크게 의존(CXO) | 저자 백테스트 |
+| Keller & Keuning, VAA(SSRN 3002624, 2017)·DAA(SSRN 3212862, 2018) | 여러 기간 가중 모멘텀 점수, 음수인 자산 수(넓이)로 현금 비율. DAA는 카나리아(VWO·BND)로 판단 | 시뮬레이션 | 저자 블로그: VAA 평균 현금 약 60%, DAA는 30% 미만. CXO: DAA 연수익은 4개 종목군 중 3개에서 VAA보다 높았으나 MDD는 4개 모두 더 나빴음 | "순수 가상", 비용·세금 무시, 표본 외 기간 짧음 | 저자 백테스트 |
+| Moreira & Muir, "Volatility-Managed Portfolios", J. Finance 72(4), 2017 | 최근 변동성이 높으면 노출을 줄임 | 미국 요인 포트폴리오 | 시장 포트폴리오에서 알파 4.9%, Sharpe 25% 증가(NBER 워킹페이퍼 문구) | **반론**: Cederburg·O'Doherty·Wang·Yan, JFE 2020 — 103개 전략에서 실제로 실행 가능한 표본 외 버전은 대체로 Sharpe가 더 낮았다 | 학술 논문 + 반박 논문 |
+| Moskowitz·Ooi·Pedersen, "Time Series Momentum", JFE 2012 | 12개월 자기 수익이 양수면 매수 | 선물 58개, 1965 ~ 2009 | 12개월 시계열 모멘텀이 "조사한 모든 계약에서" 양수, 분산 포트폴리오 Sharpe 1 초과 | 선물·레버리지·여러 자산군. 개별 대형주 일봉 매매와 다르다 | 학술 논문 |
+| Russell Investments, "Confessions of an overlay manager" 블로그 · "Why Overlays Matter Right Now"(2025-09) | 현금을 선물로 지수에 담그는 오버레이 | 1982-12 ~ 2022-12 / 45년 | 기관 포트폴리오가 현금 2.5%만 들고 있어도 연 **0.153%p**를 놓침($5bn이면 연 $7.7m). 현금 오버레이가 연 약 0.16%p 보탬, 10년 중 약 7년 현금보다 나음 | 오버레이를 파는 회사의 자료. 수수료 전후 여부 불명 | 업계 자료 |
+| Wermers, J. Finance 55(4), 2000 | (분석) 뮤추얼펀드 성과 분해 | 미국 주식형 펀드 | 펀드가 산 주식은 시장보다 연 1.3% 나았지만 순수익은 시장보다 1% 낮음. 그 2.3%p 차이 중 **0.7%p가 현금·채권 등 비주식 보유의 부진** | (반대 연구: Simutin 2014 — 현금이 비정상적으로 많은 펀드가 더 나았다는 결과, 보도자료로만 확인 (미확인)) | 학술 논문 |
+| Zakamulin, "The Real-Life Performance of Market Timing with Moving Average and Time-Series Momentum Rules", J. Asset Mgmt 2014 | 이동평균·시계열 모멘텀 타이밍 | 1926 ~ 2012(표본 외 1930 ~ 2012), 편도 비용 0.5% | 표본 외 8개 조합 중 **3개만** 순 Sharpe로 B&H를 이김. 이득은 1930-31·1973-74·2001-02·2007-08 하락장에서 나왔고, **1975 ~ 1999 상승기 내내 부진**. 빠졌다가 다시 들어가는 구간의 약 80%에서 B&H보다 못함 (CXO 요약 경유, 원문 접근 실패) | 세금 무시(타이밍에 유리) | 학술 논문(2차 요약) |
+
+**우리 규모로 다시 보면.** 기관은 현금 2.5%만으로도 연 0.15%p를 아까워해서 지수 선물로 메운다. 우리는 평균 **약 67%**가 현금이었다(§0). 같은 문제가 기관의 약 27배 크기로 있는 셈이다. 그리고 추세 필터 문헌(Faber·Zakamulin)이 공통으로 말하는 것은 "필터는 큰 하락장에서만 벌고, 긴 상승장에서는 진다"는 것이다. R0에서 세 트레이너가 이긴 곳이 2022 하나뿐이었던 것과 같은 모양이다. 그래서 추세 필터는 **전체 돈이 아니라 대기 자금에만**, 그리고 **사전 등록한 10개월 하나만** 시험한다.
 
 **정리 — 다른 사람들은 쉬는 돈을 어떻게 하나**
 - **TAA(듀얼 모멘텀·10개월선·DAA·VAA)는 "종목을 고르는" 전략이 아니라 "지금 주식에 있을지 말지"를 월 1회 정하는 전략이다.** 우리는 종목 고르기를 트레이너가 하므로, 이 규칙을 **트레이너가 안 쓰는 돈(대기 자금)에만** 붙이는 것이 구조를 지키는 방법이다.
@@ -99,7 +110,19 @@
 
 **논문 속 주장과 그 한계 (웹에서 1차 출처 확인)**
 
-<!-- LIT-C -->
+| 자료 | 무엇을 쟀나 | 기간·대상 | 주장(원문 수치) | 스스로 밝힌 한계 |
+|---|---|---|---|---|
+| TradingAgents, arXiv 2412.20138 (Xiao·Sun·Luo·Wang) | 백테스트 | **2024-01-01 ~ 2024-03-29(약 3개월)**, 본표 종목 **AAPL·GOOGL·AMZN 3개** | 누적 +26.62% / +24.36% / +23.21% (B&H -5.23% / +7.78% / +17.10%), Sharpe 8.21 / 6.39 / 5.60 | 각주: 예측 1번에 LLM 호출 11번·도구 호출 20번 이상이라 3개월만 시험. "가장 높은 Sharpe는 우리가 예상한 경험적 범위를 넘는다". 거래비용 포함 여부는 본문에서 확인 못 함 (미확인) |
+| FinMem, arXiv 2311.13743 | 백테스트 | 학습 2021-08-17 ~ 2022-10-05, 시험 **2022-10-06 ~ 2023-04-10**, TSLA·NFLX·AMZN·MSFT·COIN | 예: TSLA 누적 +61.78% vs B&H -18.63% | 데이터·뉴스가 적음, 범용 LLM 사용 |
+| FinCon, NeurIPS 2024 (arXiv 2407.06567) | 백테스트 | 학습 2022-01-03 ~ 2022-10-04, 시험 **2022-10-05 ~ 2023-06-10**, 단일 종목 8개 + 3종목 포트폴리오 2개 | 예: TSLA 누적 +82.87% vs B&H +6.43% | 환각, "수십 종목"으로 넓히기는 향후 과제, 백본 모델 1개 |
+| **FINSABER**, "Can LLM-based Financial Investing Strategies Outperform the Market in Long Run?", arXiv 2505.07078 (KDD 2026) | 위 에이전트들을 **길고 넓게** 재시험 | 2004 ~ 2024, 상장폐지 포함 과거 S&P500 구성종목, 100개 이상 종목 | 초록: 이전에 보고된 LLM 우위가 "넓은 종목·긴 기간에서 크게 약해진다". 상승장에서는 "지나치게 보수적"이라 수동 벤치마크에 지고, 하락장에서는 "지나치게 공격적"이라 크게 잃는다. 본문(에이전트 확인): B&H가 FinMem·FinAgent를 통계적으로 유의하게 이김, 상승/하락 해 평균 Sharpe B&H 0.61 / -0.28, FinAgent 0.12 / -0.38, FinMem -0.19 / -0.97 | 사전학습을 통한 미리보기 편향을 "완전히 없애지 못함". 매수만 |
+| Glasserman & Lin, arXiv 2309.17322 (2023) | GPT 감성 점수의 미리보기 편향 | 뉴스 헤드라인 | 학습 기간과 백테스트 기간이 겹치면 결과가 편향된다. 회사 이름을 가리면 오히려 나아짐("주의 분산" 효과) — 대형주에서 가장 강함 | — |
+| Lopez-Lira·Tang·Zhu, "The Memorization Problem", arXiv 2504.14765 | LLM이 과거 시장 값을 외우는지 | GPT-4o(학습 마감 2023-10) | 마감 **전** S&P500 지수 수준을 오차 0.61%, 방향 80.58%로 "맞힘", 마감 **후**에는 오차 16.87%, 방향 45.70%. "미래 데이터 쓰지 마"라는 지시도, 이름 가리기도 효과 없음(가린 실적발표에서 85% 넘게 회사 식별) | 저자 권고: **모델 학습 마감 이후 기간에서만 평가** |
+| StockBench, arXiv 2510.02209 | 포워드형 벤치마크 | 2025-03-03 ~ 06-30(82거래일), 다우 상위 20종목, $100k | 동일비중 B&H +0.4%(MDD -15.2%). 최고 모델 +2.5%, GPT-5 +0.3%. 초록: "대부분의 모델이 단순 B&H를 이기지 못한다" | 기간 4개월. 비용 반영 여부 (미확인) |
+| AI-Trader, arXiv 2512.10971 (HKUDS) | 실시간 모의 | 미국 나스닥100 2025-10-01 ~ 11-07(시간봉), A주 SSE-50(일봉), 코인 11-01 ~ 11-14 | 미국: QQQ +1.87%, 최고 에이전트 +9.56%. **A주: 지수를 이긴 에이전트 없음.** 코인: 벤치마크 -14.30%, 이긴 것 1개(-12.18%) | 2~6주, 1회 실행 |
+| nof1 "Alpha Arena" 시즌 1 | 실제 돈 대회 | 2025-10-18 ~ 11-03, 모델 6개 × $10,000, 코인 선물 | 최종 잔고(ForkLog 보도): 1등 $12,231(+22.3%), 6개 중 4개 손실(최하위 $4,126) | 공식 페이지 접근 실패(404), 보도마다 수치가 다름 (미확인). 약 2주, 레버리지 |
+
+**읽는 법.** 논문 속 "LLM 에이전트가 B&H를 크게 이겼다"는 결과는 모두 **3~8개월, 3~10개 종목**이었고, 그중 상당수가 모델 학습 기간과 겹친다. 같은 에이전트를 20년·100종목 이상으로 다시 재면(FINSABER) 우위가 사라졌다. 포워드·실시간 시험(StockBench·AI-Trader·Alpha Arena)은 기간이 몇 주~몇 달이라 운과 실력을 가르기 어렵다. 그 짧은 기간에서도 대부분 B&H와 비슷하거나 못했다. **특히 FINSABER의 "상승장에서 지나치게 보수적" 결과는 우리 R0의 "상승장에서 현금이 많아 진다"와 같은 모양이다.** 팀장 veto/hold가 이 경향을 더 키울 수 있다.
 
 **정리 — LLM은 어디까지 맡기나**
 - 조사한 프로젝트 대부분은 **LLM에게 결정을 맡긴다.** 우리처럼 "규칙이 후보를 내고 LLM은 veto/hold만"인 구조는 TradingAgents의 "포트폴리오 매니저 승인/거부"와 ai-hedge-fund의 "LLM이 못 넘는 위험 한도"가 가장 가깝다. **결정권을 LLM에 주지 않은 지금 설계가 더 보수적이고, 그게 맞다.**
@@ -125,7 +148,13 @@
 
 **논문 (웹에서 1차 출처 확인)**
 
-<!-- LIT-B -->
+| 자료 | 핵심 | 우리에게 |
+|---|---|---|
+| Bailey & López de Prado, "The Deflated Sharpe Ratio", J. Portfolio Mgmt 2014 | 여러 번 시험하면 진짜 Sharpe가 0이어도 "최고 Sharpe"는 시험 횟수 N에 따라 커진다 → 합격선을 N에 맞춰 올려야 한다. 수익 분포가 정규가 아닌 것도 보정 | `tune.py` 격자(스프린터 32개)에서 1등을 고를 때 합격선을 올려야 한다는 근거 |
+| Bailey·Borwein·López de Prado·Zhu, "The Probability of Backtest Overfitting", J. Computational Finance 2017 | PBO = 표본 내 1등 설정이 표본 외에서 중앙값보다 못할 확률. CSCV(성과표를 S개 블록으로 나눠 모든 조합으로 학습/시험)로 추정. 한 번 나눈 홀드아웃은 "믿기 어렵다"고 지적 | R0의 음수 순위상관은 PBO가 높다는 신호. 홀드아웃을 쓰되 **한 번만, 결과 보고 기준을 바꾸지 않는다**(§7) |
+| Harvey·Liu·Zhu, RFS 2016 | 이미 316개 이상의 요인이 시험됐으니 새 요인은 t > 3.0이 필요. "금융경제학 연구 결과 대부분은 아마 거짓" | 국면 15칸 중 1칸(파이오니어 2022)은 이 기준에 한참 못 미친다 |
+| Harvey & Liu, "Backtesting", JPM 2015 | 백테스트 Sharpe를 "절반으로 깎기"는 잘못이다. 깎는 폭은 비선형이라 Sharpe < 0.4면 거의 항상 50% 넘게, Sharpe > 1.0이면 최대 25% 깎인다 | 낮은 Sharpe의 작은 우위는 거의 다 사라진다고 본다 |
+| Carver 블로그 "Portfolio construction through handcrafting: The method"(2018-12) · "Fit forecast weights by instrument, by group or... all three?"(2021-05) · "Fitting with: exponential weighting, alpha and the kitchen sink"(2024-03) | 동일비중에서 출발해 상관으로 묶고 위에서 아래로 나눈다. Sharpe 추정은 불확실성이 커서 Sharpe 기반 조정을 더는 쓰지 않는다고 적음. 종목별로 따로 맞추기가 가장 나빴다(Sharpe 0.602 vs 묶어서 0.651~0.656, 비용 걸러낸 동일비중 0.726 — 표본 내 수치). 2024 글에선 성과를 쓴 가중이 일부 도움이 됐다고도 적음(0.983→1.173) | "트레이너별로 따로 튜닝"보다 "묶어서·고정 비율"이 낫다는 실무자 근거. 다만 결론이 한쪽으로만 나오지는 않는다 |
 
 **정리 — 우리 검증에 더할 것**
 - **이미 잘하고 있는 것**: 다음 날 시가 체결(D3), 비용 포함, 무작위 타이밍 대조, walk-forward. R0는 오픈소스 평균보다 엄격하다.
@@ -288,10 +317,42 @@
 
 ### 논문·기관 자료
 
-<!-- LIT-SRC -->
+| 자료 | 읽은 곳 (2026-11-04 접근) |
+|---|---|
+| Antonacci 2012 (SSRN 2042750) | https://www.trendfollowing.com/whitepaper/SSRN-id2042750.pdf (2012-04-23판 PDF) |
+| Faber 2007/2013 (SSRN 962461) | https://www.cxoadvisory.com/?p=1115 (2차 요약) |
+| Keller & Keuning VAA·DAA | https://indexswingtrader.blogspot.com/2017/07/breadth-momentum-and-vigilant-asset.html · https://indexswingtrader.blogspot.com/2018/07/announcing-defensive-asset-allocation.html · https://cxoadvisory.com/?p=30082 · https://www.cxoadvisory.com/?p=31391 |
+| Moreira & Muir 2017 | https://www.nber.org/papers/w22208 |
+| Cederburg et al. 2020 (반론) | https://econpapers.repec.org/RePEc:eee:jfinec:v:138:y:2020:i:1:p:95-117 |
+| Moskowitz·Ooi·Pedersen 2012 | https://fairmodel.econ.yale.edu/ec439/jpde.pdf |
+| Russell Investments | https://russellinvestments.com/us/blog/confessions-overlay-manager · https://russellinvestments.com/content/ri/us/en/insights/russell-research/2025/09/overlays-high-demand |
+| iShares(cash drag 정의, 2011) | https://advisoranalyst.com/?p=16421 |
+| Wermers 2000 | https://econpapers.repec.org/RePEc:bla:jfinan:v:55:y:2000:i:4:p:1655-1695 |
+| Zakamulin 2014 | https://www.cxoadvisory.com/technical-trading/net-performance-of-sma-and-intrinsic-momentum-timing-strategies (2차 요약) |
+| Deflated Sharpe Ratio | https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf |
+| Probability of Backtest Overfitting | https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf |
+| Harvey·Liu·Zhu 2016 | https://econpapers.repec.org/RePEc:nbr:nberwo:20592 |
+| Harvey & Liu 2015 | https://people.duke.edu/~charvey/Research/Published_Papers/P120_Backtesting.PDF |
+| Carver 블로그 | https://qoppac.blogspot.com/2018/12/portfolio-construction-through_7.html · https://qoppac.blogspot.com/2021/05/fit-forecast-weights-by-instrument-by.html · https://qoppac.blogspot.com/2024/03/fitting-with-exponential-weighting.html |
+| TradingAgents | https://arxiv.org/abs/2412.20138 · https://arxiv.org/html/2412.20138 (본문 표·각주 직접 확인) |
+| FinMem | https://arxiv.org/abs/2311.13743 |
+| FinCon | https://arxiv.org/html/2407.06567 · https://proceedings.neurips.cc/paper/2024/hash/f7ae4fe91d96f50abc2211f09b6a7e49-Abstract-Conference.html |
+| FINSABER | https://arxiv.org/abs/2505.07078 (초록 직접 확인) |
+| Glasserman & Lin | https://arxiv.org/abs/2309.17322 |
+| Lopez-Lira·Tang·Zhu | https://arxiv.org/html/2504.14765v2 |
+| StockBench | https://arxiv.org/abs/2510.02209 |
+| AI-Trader | https://arxiv.org/html/2512.10971v1 |
+| Alpha Arena 시즌 1 | https://forklog.com/en/four-out-of-six-ai-models-suffer-losses-in-trading-tournament/ (보도, 공식 아님) |
+
+논문 수치 중 TradingAgents(기간·종목·표·각주)와 FINSABER(초록), Antonacci(PDF 본문)는 직접 다시 확인했다. 나머지는 별도 조사 에이전트가 위 주소에서 읽은 값이다.
 
 ### 접근하지 못한 곳 (추측하지 않음)
 
-<!-- LIT-FAIL -->
+- SSRN 초록 페이지(403): 2042750(Antonacci), 962461(Faber), 3002624(VAA), 3212862(DAA) → 위의 PDF 사본·저자 블로그·CXO 요약으로 대신했다.
+- 403 거부: optimalmomentum.com, alphaarchitect.com, onlinelibrary.wiley.com(Moreira & Muir 출판본), parametricportfolio.com(현금 증권화 백서), etf.com, core.ac.uk.
+- CME Group cash drag·equitization 글 2개와 강의 페이지: 503 → CME의 "40년 연 약 10bp" 사례는 (미확인).
+- link.springer.com(Zakamulin 원문): 로그인 필요 → CXO 요약만 사용.
+- nof1.ai/blog(404), alphaarena.ai(429): Alpha Arena 공식 결과 확인 못 함.
+- mebfaber.com 2013 개정 글(404), qoppac.blogspot.com/2019/02/...(404), scribd.com 사본(로드 실패), gnanaganga.inflibnet.ac.in(연결 거부).
 - `api.github.com/repos/<owner>/<repo>` 직접 조회: 이 세션 범위 밖 저장소라 403. → 같은 값을 검색 API(`search/repositories?q=repo:...`)로 받았다.
 - 저장소들의 실운용 성과 기록: 조사한 저장소 어디에도 감사받은 실운용 기록은 없었다(없다는 것을 확인한 것이지, 접근 실패는 아님).
