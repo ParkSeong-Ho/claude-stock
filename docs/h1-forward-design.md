@@ -1333,6 +1333,12 @@ which claude                                       # launchd PATH 에 넣을 경
 | 일정 | 월요일 아침 보조 실행 추가(국내 07:40, 미국 08:40), 껐다 켠 경우 설명, `caffeinate -i` | F-6 |
 | 잠금·판정 기록 | 시장별 잠금·시장별 판정 기록, 공용 일지는 O_APPEND 한 번 쓰기, 전역 잠금은 replay_pass 만 | F-7 |
 | 팀장 작업 폴더 | `claude -p` 는 빈 전용 폴더에서(`claude_cwd/`) | F-8 |
+| (구현 세부) ⑥ 허용 목록 | `h1_data.py` / `h1.py` 는 세율 표 값만(+ amend-rules 기록) / `h1_check.py` 는 ④ `false_positive` 기록이 있을 때만 / 환경은 파이썬 그대로 `ENV_PACKAGES` 버전만. 확인 함수 `h1.freeze_transition`·`freeze_window`. 관문 run 은 지금 코드가 창 마지막 봉과 다르고 허용 밖이면 3. 보고서 `--final` 에 "⑥ 코드 동결·⑩ 사전 등록 숫자" 칸, 끝나지 않은 창도 ⑥ 위반이면 fail_window. 보고서 머리에 만든 코드의 지문 | 단계 4 고침 |
+| (구현 세부) 재현 통과 줄 | 필수 `code_hash`·`files`·`env`·`data_golden_sha256`, 선택 `h1_without_tax_table_sha256`·`ledger_fingerprints`·`fingerprint_version`. 단계 5 는 `h1.replay_entry(ledger_fingerprints)` → `record_replay_pass` 순서. **`h1_replay.py` 를 더하면 CODE_FILES 지문이 바뀌므로, 그 코드로 재현 통과를 기록한 뒤에 첫 start**(prereg 도 그때 고정) | 단계 4 고침 |
+| (구현 세부) prereg | `prereg_<m>.json` = 처음 `rule_constants`·설계 문서 sha256·시각·run_id·`amendments: []`. 효력 규칙 = 처음 값 + 마지막 추가 기록의 세율 표. meta.rules 는 세율 표 말고 처음 값과 같고, 세율 표는 처음 표 ⊑ meta 표 ⊑ 효력 표 | 단계 4 고침 |
+| (구현 세부) 상장폐지 증거 | ① 대기 자산 확정 시세에 `--last-date` 뒤 거래일이 있고 ② 그 종목은 시세를 못 받거나(D2) `--last-date` 뒤 행이 없음. 그날 저녁에는 모든 종목의 마지막 봉이 그날이라 ②만으로는 늘 참이 되므로 ①을 더함. 실제 흐름: 다음 거래일 run 이 D2·D3 로 멈춤 → 등록 → 다음 run 이 정리 | 단계 4 고침 |
+| (구현 세부) restart 근거 | `rule-change` 근거에 D6·D4·D5 자료 멈춤(⑦-3 기업 행위·달력 문제가 풀리지 않을 때)도 넣음. 재시작 기록에 reason 코드·note·evidence·bars | 단계 4 고침 |
+| (구현 세부) 잠금 순서 | 시장 잠금 → 전역 잠금. 금리 받기도 전역. 공용 일지의 줄바꿈 없이 끝난 마지막 줄은 "쓰는 중일 수 있는 줄"로 따로 셈 | 단계 4 고침 |
 
 ### 10.2f 단계 3(시험 보강) 반영으로 정한 것
 
