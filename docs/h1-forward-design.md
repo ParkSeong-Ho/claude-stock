@@ -199,7 +199,7 @@
   - (가) 고친 코드로 돌린 재현 장부의 **내용 지문**(필수 창 W1·W2 의 장부 전부)이 직전 통과 때 `replay_pass.json` 에 적은 값과 같다. 즉 점검만 바뀌고 장부 계산은 안 바뀌었다.
   - (나) 멈췄던 봉을 고친 코드로 처리해 나온 장부 6개의 **내용 지문**이 `errors.jsonl` 에 남긴 "저장하려던 내용 지문"과 같다. 내용 지문은 `late`·`mode`·`run_at`·`code_hash`·`env` 를 빼고 계산하므로 늦게 다시 처리한 차이는 걸리지 않는다. 판정 기록 줄은 그때 이미 써 두었으므로 같은 판정을 다시 쓴다.
   - 그동안 처리하지 못한 봉은 늦은 봉으로 센다. 둘 중 하나라도 아니면 재시작한다.
-  - **기록은 프로그램이 자동으로 한다**(사람이 판단하지 않음, 2c 검토 R-4): 고친 코드의 `h1.py run` 이 errors.jsonl 에 L 기록이 있는 봉을 다시 처리할 때 (가)(나)를 확인한다. (가) = `replay_pass.json` 에서 옛 code_hash 와 지금 code_hash 의 통과 줄이 모두 있고 `ledger_fingerprints` 가 같음. (나) = 그 봉 결과 내용 지문 == errors.jsonl 의 지문. 둘 다 맞으면 커밋 전에 `changes.jsonl` 에 `kind: "false_positive"` 를 남기고, 보고서 ②-1 은 그 L 오류를 빼고 센다(뺀 건수는 따로 보임). 안 맞으면 기록하지 않고 그 L 오류는 그대로 남는다.
+  - **기록은 프로그램이 자동으로 한다**(사람이 판단하지 않음, 2c 검토 R-4). 단 옛 code_hash ≠ 지금 code_hash 일 때만(같은 코드로 다시 돌려 L 이 사라지면 비결정이라 L 그대로, 단계 4 F-5): 고친 코드의 `h1.py run` 이 errors.jsonl 에 L 기록이 있는 봉을 다시 처리할 때 (가)(나)를 확인한다. (가) = `replay_pass.json` 에서 옛 code_hash 와 지금 code_hash 의 통과 줄이 모두 있고 `ledger_fingerprints` 가 같음. (나) = 그 봉 결과 내용 지문 == errors.jsonl 의 지문. 둘 다 맞으면 커밋 전에 `changes.jsonl` 에 `kind: "false_positive"` 를 남기고, 보고서 ②-1 은 그 L 오류를 빼고 센다(뺀 건수는 따로 보임). 안 맞으면 기록하지 않고 그 L 오류는 그대로 남는다.
 
 **⑤ 재시작**
 - 재시작하는 경우는 셋뿐이다.
@@ -208,6 +208,7 @@
   - (c) 커밋된 규칙 변경: ⑥ 이 허용하지 않는 코드·환경 변경, 그리고 ⑦-3 의 기업 행위
 - 수익률·MDD·A1−A0·그림자 서킷은 재시작 사유가 아니다.
 - 방법: `python h1.py restart --market m --reason "..."` → 그 시장 폴더를 보관 폴더로 옮김 → `python h1.py start --market m` 으로 새 S.
+  - (단계 4 F-4) 실제 명령은 `python h1.py restart --market m --confirm m --reason L|backlog|rule-change [--note "..."]`. 사유 코드의 근거(창 안의 ④ 로 빠지지 않은 L 오류 / 종료 코드 6·늦은 봉 상한 초과 / 허용 밖 코드·규칙 변경)가 일지에 없으면 거절(9). 실행 전에 S·처리 봉 수·남은 재시작을 보여 준다.
   - 63봉은 새 S 부터 다시 센다.
   - 판정 기록과 고정 종목군 파일(첫 S 의 목록)은 그대로 쓴다. 재시작으로 종목군을 다시 고를 수 없다.
 - **상한: 시장마다 재시작은 최대 2번**(판정 창 최대 3개).
@@ -215,7 +216,7 @@
 - **마감: 2027-06-30.** 그때까지 깨끗한 창(②를 다 지킨 63봉)이 끝나지 않았거나, 재시작이 2번을 넘게 필요하면 그 시장은 **"H1 포워드 실패(운영 기준 미충족)"** 로 보고하고 멈춘다.
 
 **⑥ 코드 동결** — 판정 창 동안 `CODE_FILES`(§3.3, `prompts/*.md`·`h1_replay.py`·`h1_report.py` 포함)와 라이브러리 버전(`meta.env`)을 바꾸지 않는다. 허용하는 것은 아래 둘뿐이다(각각 `state/h1/changes.jsonl` 에 적고, 커밋하고, 재현을 다시 통과해야 함).
-- (i) **자료 문제 고침과 라이브러리 올림**: 시세 받기·형식 읽기·재시도 같은 코드 고침, 그리고 `ENV_PACKAGES` 버전 올림(예: FinanceDataReader 출처가 깨졌을 때). 조건: 고친 코드·환경으로 돌린 재현 장부의 **내용 지문**(필수 창 W1·W2 의 장부 전부)이 직전 통과 때 `replay_pass.json` 값과 **같아야** 한다 = 장부 계산이 안 바뀐 것이 객관적으로 확인된 것만. `code_hash`·`env` 는 당연히 바뀌므로 비교하지 않는다. 라이브러리 올림이 지난 시세를 바꾸면 D6 이 잡는다.
+- (i) **자료 문제 고침과 라이브러리 올림**: 시세 받기·형식 읽기·재시도 같은 코드 고침(**`h1_data.py` 안에서만**, 단계 4 F-1·F-9 — 다른 파일을 고치면 ⑤-c. 자료 받기 골든 `tests/golden_data/` 도 그대로여야 함), 그리고 `ENV_PACKAGES` 버전 올림(예: FinanceDataReader 출처가 깨졌을 때). 조건: 고친 코드·환경으로 돌린 재현 장부의 **내용 지문**(필수 창 W1·W2 의 장부 전부)이 직전 통과 때 `replay_pass.json` 값과 **같아야** 한다 = 장부 계산이 안 바뀐 것이 객관적으로 확인된 것만. `code_hash`·`env` 는 당연히 바뀌므로 비교하지 않는다. 라이브러리 올림이 지난 시세를 바꾸면 D6 이 잡는다.
 - (ii) **국내 매도세 표에 줄 추가**: 법령 1차 출처로 확인한 새 세율로, 시행일이 마지막 처리 봉보다 뒤인 것. 지난 체결은 그대로다. 순서: 표 상수에 줄을 더한 코드를 커밋 → 재현 통과((i) 과 같은 조건: 재현 창은 2018·2026 이라 새 줄이 쓰이지 않아 **내용 지문**이 같아야 한다) → `python h1.py amend-rules --market kr --source URL` 이 잠금 아래에서 "앞줄은 그대로이고 뒤에 줄만 더해졌는지"를 확인한 뒤 `meta.rules` 를 고치고 `changes.jsonl` 에 적는다. 그 전까지 `run` 은 종료 코드 3(규칙 다름)으로 아무것도 저장하지 않는다.
 - 그 밖의 변경은 규칙 변경 → ⑤-c 재시작.
 
@@ -231,7 +232,8 @@
      - r 을 곱한 주식 수가 정수가 아니면 3번으로 간다.
      - 평가액은 그 순간 그대로다. D6 는 **분할을 장부에 적용하기 전(`applied_after` 이하)에 쓴 기록 가격**을 ÷ r 해서 비교한다(효력일 기준으로 나누면 밀린 봉을 따라잡을 때 거짓 D6 이 남, 2b-2 구현).
   3. **그 밖**(인적분할·주식 교환·현금 인수 등 1·2·4 로 안 되는 것): 규칙 변경 → ⑤-c 재시작.
-  4. **상장폐지**(더 거래되지 않음): `python h1.py corp-action --market m --code X --delist --last-date D --last-close P --source URL`
+  4. **상장폐지**(더 거래되지 않음): `python h1.py corp-action --market m --code X --delist --last-date D --last-close P --source URL --confirm X`
+     - (단계 4 F-3) 그 종목 시세를 지금 받을 수 없거나(D2), 받은 시세에 D 뒤 거래 행이 없을 때만 받는다(아직 거래 중이면 거절). 정리 체결 전이면 `--cancel-delist --code X --confirm X` 로 취소할 수 있다.
      - `--last-date`·`--last-close` 는 1차 출처의 마지막 거래일·종가다. `--last-close` 를 비우면 장부의 그 종목 마지막 `marks` 값을 쓴다. 둘 다 `corp_actions` 에 적는다.
      - 등록한 뒤에는 그 종목을 준비 7 의 시세 받기(D2)·준비 8 의 소급 수정(D6)·봉 0 의 자료 준비(D3) 대상에서 **뺀다**(시세를 못 받아도 멈추지 않게).
      - D 보다 뒤인 다음 처리 봉의 시가 단계 맨 앞(a′)에서 두 장부 모두 그 종목 전부를 P 로 판 것으로 적는다. 매도 비용(그 봉 날짜의 세율)을 뺀다. 그 종목의 대기 주문은 `dropped`(why `"delist"`)로 지운다. 체결 기록 `purpose="delist"`, `order_id=None`.
@@ -717,7 +719,7 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
  "ledger_breaker": "off", "shadow_breaker": [0.10, 0.07]}
 ```
 
-### 3.6 판정 기록 `state/h1/analyst_cache.jsonl` (F5 + 할 일 2번, 검토 I7)
+### 3.6 판정 기록 `state/h1/analyst_cache_<market>.jsonl` (F5 + 할 일 2번, 검토 I7, 단계 4 F-7 로 시장별 파일)
 
 한 줄 = 기록 하나. 추가만 한다(덮어쓰기·지우기 없음). 팀장에게 물은 직후 **장부보다 먼저** fsync 한다.
 
@@ -746,8 +748,10 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
 
 | 파일 | 내용 |
 |---|---|
-| `h1.lock` | 잠금(fcntl). 모든 명령. 최대 30분 기다린 뒤 종료 코드 5 |
-| `analyst_cache.jsonl` | 판정 기록(§3.6) |
+| `h1-<market>.lock`, `h1-global.lock` | 잠금(fcntl). 시장 명령은 그 시장 잠금만, `replay_pass.json`·seal 쓰기는 전역 잠금(단계 4 F-7). 최대 30분 기다린 뒤 종료 코드 5 |
+| `analyst_cache_<market>.jsonl` | 판정 기록(§3.6), 시장별. 두 시장이 같이 쓰는 일지(runs/errors/restarts/changes.jsonl)는 한 줄을 `O_APPEND` 한 번 쓰기로, 읽는 쪽은 반쯤 쓴 마지막 줄을 자르지 않고 건너뜀 |
+| `prereg_<market>.json` | 사전 등록 숫자(`rule_constants`)를 그 시장 첫 start 때 한 번 적음. 그 뒤 바꾸지 않음(세율 줄 추가만 덧붙임). start·run·restart·보고서 판정이 모두 이 값을 씀(단계 4 F-2) |
+| `claude_cwd/` | `claude -p` 를 부를 때 쓰는 빈 작업 폴더(전역·폴더별 Claude 설정이 팀장 입력에 섞이지 않게, 단계 4 F-8) |
 | `runs.jsonl` | 명령 한 번 = 시작 줄 + 끝 줄: 명령·시장·시각·코드 지문·env·`mode`·처리한 봉·종료 코드·메시지(관문 거절·자료 멈춤 포함), `start_date`(모르면 `unknown`), `d7_checked`·`journal_recovered`·`bar_modes`. **창 세기**: `start_date == S` 이거나 `unknown`·None 이면서 `at ≥ meta.created_at` 인 줄(보고서도 `h1._in_window` 를 그대로 씀) |
 | `errors.jsonl` | L 오류: 시장·봉·문제 목록·**저장하려던 장부 6개의 내용 지문**(`ledger_fingerprint`, §2.2 ④). 시장 폴더 밖이라 재시작 뒤에도 남음 |
 | `restarts.jsonl` | 재시작: `{at, market, restart_id, status: "moving"\|"done", old_start, old_last, reason, archive}`. 의도 줄 → 폴더 이동 → 끝 줄. 횟수는 `restart_id` 로 한 번 |
@@ -1167,8 +1171,8 @@ which claude                                       # launchd PATH 에 넣을 경
 
 | 시장 | 명령(WorkingDirectory = H1 폴더) | 시각 | 메모 |
 |---|---|---|---|
-| 국내 | `.venv-h1/bin/python h1.py run --market kr` | **월~금 23:05** + 보조 **화~토 07:40** | 보조는 23:05 실패·KS200 늦은 날(종료 코드 7)을 챙긴다. 07:40 은 09:00 전이라 늦은 봉이 아니다 |
-| 미국 | `.venv-h1/bin/python h1.py run --market us` | **화~토 07:10** + 보조 **화~토 08:40** | 07:10 KST = 겨울 17:10 ET / 여름 18:10 ET → 사계절 모두 16:30 ET 뒤이고 다음 장 09:30 ET 전. 서머타임 때 시각을 안 바꿔도 된다 |
+| 국내 | `.venv-h1/bin/python h1.py run --market kr` | **월~금 23:05** + 보조 **월~토 07:40** | 보조는 23:05 실패·KS200 늦은 날(종료 코드 7)을 챙긴다. 07:40 은 09:00 전이라 늦은 봉이 아니다. **월요일 07:40** 은 금요일 봉의 세 번째 기회(단계 4 F-6) |
+| 미국 | `.venv-h1/bin/python h1.py run --market us` | **화~토 07:10** + 보조 **월~토 08:40** | 07:10 KST = 겨울 17:10 ET / 여름 18:10 ET → 사계절 모두 16:30 ET 뒤이고 다음 장 09:30 ET 전. **월요일 08:40** 은 금요일 봉의 세 번째 기회(다음 장 = 월 09:30 ET 라 늦은 봉 아님, 단계 4 F-6) |
 | 둘 다 | `python h1_report.py --market us` / `--market kr` | 매달 첫 평일 아침 + 아무 때나. S+62 뒤 `--final` | 인터넷이 있으면 금리도 받음. 결과는 `state/h1/reports/` |
 | 상태 | `python h1.py status --market us` | 아무 때나 | S, 판정 창 진행, 마지막 봉, L·D·늦은 봉 수, 남은 재시작·마감 |
 
@@ -1198,6 +1202,7 @@ which claude                                       # launchd PATH 에 넣을 경
 ```
 - launchd PATH 에 `claude` 가 없으면 팀장은 매일 폴백(`no_claude`)이 된다 → 보고서 폴백 비율 20% 표시로 드러난다.
 - 잠자기 중에는 안 돈다: `sudo pmset repeat wakeorpoweron MTWRFS 07:00:00`.
+  - (단계 4 F-6·F-8) launchd 는 **잠자기**에서 깨어난 뒤에는 놓친 작업을 한 번 돌리지만, **꺼졌다 켜진 경우**에는 돌리지 않는다. 맥을 껐다 켰으면 다음 예정 실행이 밀린 봉을 따라잡는다(5봉까지). 실행 중 잠들지 않게 명령 앞에 `caffeinate -i` 를 붙인다. 전역 Claude Code 설정·훅이 팀장 호출에 끼지 않는지 launchd 와 같은 환경에서 `claude -p` 를 한 번 시험한다(단계 7).
   - `pmset repeat` 는 깨우는 시각을 하나만 둘 수 있다. 국내 23:05 에 자고 있으면 보조 07:40 이 처리한다(09:00 전이라 늦은 봉 아님).
   - 깨어난 뒤 launchd 가 놓친 작업을 한 번 돌리고, H1 은 밀린 봉을 따라잡는다(5봉까지).
 
@@ -1314,6 +1319,20 @@ which claude                                       # launchd PATH 에 넣을 경
 | 폴백 비율 분모 | 두 장부 하루 기록 `leader` 가 가리키는 판정 기록(이 창이 실제로 쓴 것). 늦은 봉 폴백 포함 | 2c 구현 |
 | status 와 보고서 | `h1.py status`·실행 끝 요약의 일지 숫자(L 오류 = errors.jsonl ∪ runs.jsonl 종료 코드 2, ④ 거짓 양성은 빼고 따로, 자료 멈춤(D7 포함)·관문 거절·늦은 봉·팀장 폴백)는 보고서와 **같은 함수**(`h1_report.window_counts`)로 센다. 범위는 보고서 `--final` 과 같다(창이 다 차면 S~S+62, 그 뒤는 연장 구간 따로). 다시 점검한 L·빠진 날·지문 확인은 보고서에만 있다. 재시작 수도 세 출처 중 가장 큰 값으로 같은 함수 | 단계 3·검토 3 |
 | 마감 전 실패 | 남은 평일로 63봉 창을 마감까지 끝낼 수 없음이 확실하면 마감 전이라도 "H1 포워드 실패" | 2c 구현 |
+
+### 10.2g 단계 4(구현 전체 독립 검토) 반영으로 정한 것
+
+| 항목 | 결정 | 근거 |
+|---|---|---|
+| 실행기 전체 R2 대조 | start → 매일 run(저장·엄격 읽기·HEAD·달력·D 점검 포함)이 W1 미·국·W2 국내 6조합에서 R2 와 같음(K1 제외), 따라잡기·같은 날 두 번 실행·지수 B&H 도 같음 | 검토 4 |
+| ⑥ 코드 동결의 실제 적용 | 자료 받기 층을 `h1_data.py` 로 분리. ⑥-i 허용은 **`h1_data.py` 와 라이브러리 버전만**(+ 자료 받기 골든 `tests/golden_data/` 그대로). 프롬프트·`analyst.py`·브레인·점검 등 그 밖의 변경은 ⑤-c. `--final`·status 는 창 안 지문이 바뀐 지점마다 파일별 sha256·재현 지문·자료 골든·changes 기록을 확인, 아니면 ⑥ 위반 실패. 보고서는 자기 코드 지문을 찍는다 | F-1·F-9 |
+| 사전 등록 숫자 고정 | 첫 start 때 `prereg_<m>.json` 에 적고 이후 모든 판단이 그 값. 재시작 창의 `meta.rules` 도 같아야 함. restart 도 규칙 확인 | F-2 |
+| 상장폐지 오타 방지 | `--confirm <코드>`, 시세가 정말 거래 없음을 보일 때만(D2 이거나 `--last-date` 뒤 거래 행 없음), 정리 전이면 `--cancel-delist` 로 취소 | F-3 |
+| restart 안전 | `--confirm <시장>`, `--reason L\|backlog\|rule-change` 와 일지 근거 필수, `--note` 설명 | F-4 |
+| ④ 자동 기록 | `code_hash_old != code_hash_new` 일 때만(같은 코드에서 L 이 사라지면 비결정 → L 그대로) | F-5 |
+| 일정 | 월요일 아침 보조 실행 추가(국내 07:40, 미국 08:40), 껐다 켠 경우 설명, `caffeinate -i` | F-6 |
+| 잠금·판정 기록 | 시장별 잠금·시장별 판정 기록, 공용 일지는 O_APPEND 한 번 쓰기, 전역 잠금은 replay_pass 만 | F-7 |
+| 팀장 작업 폴더 | `claude -p` 는 빈 전용 폴더에서(`claude_cwd/`) | F-8 |
 
 ### 10.2f 단계 3(시험 보강) 반영으로 정한 것
 
