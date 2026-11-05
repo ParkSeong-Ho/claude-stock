@@ -1152,10 +1152,12 @@ git fetch origin
 git worktree add /Users/나/claude-stock-h1 <H1 태그, 예: h1-forward-v1>   # H1 전용 폴더, 태그에 고정
 cd /Users/나/claude-stock-h1
 python3 -m venv /Users/나/.venv-h1                # H1 전용 파이썬(라이브러리 동결, §2.2 ⑥)
-/Users/나/.venv-h1/bin/python -m pip install -r requirements.txt
+/Users/나/.venv-h1/bin/python -m pip install -r requirements-h1.txt   # 정확한 버전(파이썬 3.13.18 기준, 단계 2a A-11)
 /Users/나/.venv-h1/bin/python -m pytest -q        # 전부 통과
 git fetch origin research-r2-2026-11-04           # 재현 기준값 데이터
-/Users/나/.venv-h1/bin/python h1_replay.py        # 단계 5. "통과" + state/h1/replay_pass.json (이 폴더 안의 state/)
+/Users/나/.venv-h1/bin/python tools/h1_test_guard.py --quick   # 인터넷·claude 0, 결정성(맥에는 --netns 없음)
+/Users/나/.venv-h1/bin/python h1_replay.py        # 단계 5(약 8분). 종료 코드 0 "통과" + state/h1/replay_pass.json 1줄 + reports/replay-<날짜>.md + rates/ 금리 파일 2개 (이 폴더 안의 state/)
+/Users/나/.venv-h1/bin/python -c "import h1; print(h1.code_hash()[0])"   # replay_pass.json 의 code_hash 와 같아야 함
 mkdir -p logs
 which claude                                       # launchd PATH 에 넣을 경로 확인
 ```
@@ -1319,6 +1321,17 @@ which claude                                       # launchd PATH 에 넣을 경
 | 폴백 비율 분모 | 두 장부 하루 기록 `leader` 가 가리키는 판정 기록(이 창이 실제로 쓴 것). 늦은 봉 폴백 포함 | 2c 구현 |
 | status 와 보고서 | `h1.py status`·실행 끝 요약의 일지 숫자(L 오류 = errors.jsonl ∪ runs.jsonl 종료 코드 2, ④ 거짓 양성은 빼고 따로, 자료 멈춤(D7 포함)·관문 거절·늦은 봉·팀장 폴백)는 보고서와 **같은 함수**(`h1_report.window_counts`)로 센다. 범위는 보고서 `--final` 과 같다(창이 다 차면 S~S+62, 그 뒤는 연장 구간 따로). 다시 점검한 L·빠진 날·지문 확인은 보고서에만 있다. 재시작 수도 세 출처 중 가장 큰 값으로 같은 함수 | 단계 3·검토 3 |
 | 마감 전 실패 | 남은 평일로 63봉 창을 마감까지 끝낼 수 없음이 확실하면 마감 전이라도 "H1 포워드 실패" | 2c 구현 |
+
+### 10.2h 단계 5(재현) 구현에서 정한 것
+
+| 항목 | 결정 | 근거 |
+|---|---|---|
+| 명령 | `python h1_replay.py [--root state/h1] [--r2-ref origin/research-r2-2026-11-04] [--windows W1,W2,W3] [--keep-temp]`. 종료 코드 0 통과 · 2 차이 · 4 환경(git·파일·잠금·하네스 모듈 경로·재현 도중 코드 바뀜) · 9 인자 · 130 | 단계 5 |
+| 새 코드 쪽 시세 | 그날까지 자른 원본을 운영 받기 층(`h1_data.fetch`·`load_idle`) 그대로 거친다(FinanceDataReader 만 가짜) | 단계 5 |
+| W3 | 합성 국내 시세(S=2019-04-22, 45봉)와 가짜 브레인 파일 하나를 두 쪽이 함께 읽음(sha 확인). 세율 경계는 2019-06-03 하나(2021-01-01 은 넣지 않음 — 세율 표 자체는 T-A1-6 이 봄). W3 는 M1~M5′ 에 더해 M8·M9·K·장면 확인(S)까지 필수 | 단계 5, 진행 담당 결정 |
+| M9 | 날마다 같은 날 두 번째 run 이 파일을 안 바꿈(W1·W2·W3), 전체를 두 번 돌려 지문이 같음은 W3 만 자동(W1·W2 두 번은 선택) | 단계 5, 진행 담당 결정 |
+| 통과 기록 전 확인 | 자료 받기 골든이 바이트까지 같음, 재현 시작 때와 기록 직전의 코드·환경 지문이 같음(재현 도중 CODE_FILES 를 고치면 4). 일부 창만 돌리면 기록 안 함 | 단계 5 |
+| 통과 기록 줄 | §10.2g 필수·선택 칸 + `r2_ref`·`r2_commit`·`windows`·`passed_at`·`report`. 실패해도 보고서는 씀(같은 날이면 `-2` 붙임). 예상 밖 예외는 2(기록 없음) | 단계 5 |
 
 ### 10.2g 단계 4(구현 전체 독립 검토) 반영으로 정한 것
 
