@@ -324,6 +324,8 @@ def test_P4_거래_중인_보유_종목_delist_는_9_시세가_없을_때만_받
     h = tr.us_h(tmp_path, upto=4)
     code = _held(h)[0]
     snap = h.snap()
+    assert h.corp(code, delist=True, last_date=h.D[4]) == 9           # 검토자 P4 그대로: 그날 저녁, 마지막 처리 봉으로
+    assert "거래일이 아직 없어요" in h.ends()[-1]["message"]          # (모든 종목의 마지막 봉이 그날이라 확인 불가)
     assert h.corp(code, delist=True, last_date=h.D[2], confirm=None) == 9
     assert "--confirm" in h.ends()[-1]["message"]
     assert h.corp(code, delist=True, last_date=h.D[2], confirm="AAB") == 9
@@ -348,9 +350,12 @@ def test_P4_거래_중인_보유_종목_delist_는_9_시세가_없을_때만_받
     ops = R.collect("us", root=h.root, online=False)["ops"]
     assert len(ops["corp"]["delist"]) == 1 and len(ops["corp"]["delist_cancel"]) == 1
     assert "(그중 취소 1건)" in R.build("us", root=h.root, online=False)
-    # 다시 등록(마지막 거래일 = 마지막 처리 봉, 받은 시세에 그 뒤 거래 없음) → 다음 봉 정리 → 취소 불가
+    # 다시 등록(마지막 거래일 = 마지막 처리 봉 D5, 다음 거래일 D6 에 그 종목만 행이 없음) → 다음 봉 정리 → 취소 불가
+    h.at(h.D[6]).src.drop = {code: {h.D[6]}}
     assert h.corp(code, delist=True, last_date=h.D[5]) == 0
-    assert "마지막 거래일" in h.states()["A0"]["마라토너"]["corp_actions"][-1]["evidence"]
+    ev = h.states()["A0"]["마라토너"]["corp_actions"][-1]["evidence"]
+    assert f"시장은 그 뒤 1거래일({h.D[6]}~{h.D[6]}) 거래함" in ev and f"마지막 거래일 {h.D[5]}" in ev
+    h.src.drop = {}
     h.src.missing.add(code)
     assert h.run(h.D[6]) == 0
     st = h.states()
@@ -362,7 +367,7 @@ def test_P4_거래_중인_보유_종목_delist_는_9_시세가_없을_때만_받
 def test_F3_보유하지_않은_종목도_봉을_처리한_뒤면_취소_9(tmp_path):
     h = tr.us_h(tmp_path, upto=3)
     code = next(c for c in ("JJJ", "III", "HHH", "FFF") if c not in _held(h))
-    h.src.missing.add(code)
+    h.at(h.D[4]).src.missing.add(code)
     assert h.corp(code, delist=True, last_date=h.D[3], last_close=50.0) == 0
     assert h.run(h.D[4]) == 0
     assert h.corp(code, cancel_delist=True) == 9 and "이미 처리" in h.ends()[-1]["message"]

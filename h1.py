@@ -4009,9 +4009,10 @@ def corp_action(market, code, *, split=None, date=None, delist=False, last_date=
     """기업 행위 적용(설계 §2.2 ⑦). 넷 중 하나만: split(⑦-2) / delist(⑦-4) / accept_correction(⑦-5) /
     cancel_delist(상장폐지 등록 취소, 단계 4 F-3).
     delist·cancel_delist 는 confirm == code(같은 종목코드를 --confirm 으로 다시 침)여야 한다(아니면 9, 오타 방지).
-    delist 는 그 종목이 정말 거래되지 않을 때만 받는다(단계 4 F-3): 지금 시세를 받을 수 없거나(D2), 받은 확정 시세의
-    마지막 거래일이 --last-date 이하(그 뒤 거래 행 없음 — 국내 거래량 0 정지 행은 확정 시세에서 이미 빠짐). 그 뒤에 거래한
-    행이 있으면 "아직 거래 중"으로 거절(9). 등록에 registered_after(그때 장부 마지막 처리 봉)를 같이 적는다.
+    delist 는 그 종목이 정말 거래되지 않을 때만 받는다(단계 4 F-3): 대기 자산 확정 시세에 --last-date 뒤 거래일이 있고(시장은
+    거래함 — 그날 저녁에는 확인할 수 없음), 그 종목은 지금 시세를 받을 수 없거나(D2) 받은 확정 시세의 마지막 거래일이
+    --last-date 이하(그 뒤 거래 행 없음 — 국내 거래량 0 정지 행은 확정 시세에서 이미 빠짐). 그 뒤에 거래한 행이 있으면
+    "아직 거래 중"으로 거절(9). 등록에 registered_after(그때 장부 마지막 처리 봉)·evidence(증거 글)를 같이 적는다.
     cancel_delist 는 아직 정리하지 않은 등록만(등록 뒤 봉을 처리하지 않았고 정리 체결이 없음) 취소한다: 장부 corp_actions 에
     {"kind": "delist_cancel"} 줄을 더하고(엔진·L23 은 취소된 등록을 보지 않음) 일지에도 남긴다.
     source = 1차 출처(URL 등 글자), source_data = 지금 시세를 받는 DataSource(기본 live_source, 시험·재현은 가짜 —
@@ -4221,25 +4222,37 @@ def _corp_split(mk, root, states, head, code, split, date, source, at, source_da
 
 
 def _delist_evidence(mk, code, last_date, source_data):
-    """상장폐지 증거(단계 4 F-3): 지금 그 종목 시세를 받아 본다. 못 받음(None·예외 = D2) → 받음.
-    받은 확정 시세(국내 거래량 0 정지 행은 확정 시세에서 이미 빠짐)에 --last-date 뒤 행이 있으면 "아직 거래 중" → H1Refused(9).
+    """상장폐지 증거(단계 4 F-3). 둘 다여야 받는다(아니면 H1Refused(9), 아무것도 안 바뀜):
+    1 시장은 --last-date 뒤에도 거래했다: 대기 자산(SPY/KS200) 확정 시세에 --last-date 뒤 거래일이 하나 이상 있음.
+      (그날 저녁에는 모든 종목의 마지막 확정 봉이 그날이라 '그 뒤 거래 없음'이 늘 참 — 검토자 P4 가 이 길로 통과했음)
+      대기 자산 시세를 못 받으면 D1(종료 코드 4).
+    2 그 종목은 거래하지 않았다: 지금 시세를 받을 수 없거나(None·예외 = D2), 받은 확정 시세(국내 거래량 0 정지 행은 확정
+      시세에서 이미 빠짐)에 --last-date 뒤 행이 없음. 있으면 "아직 거래 중".
     돌려줌: 증거 설명 글."""
     sd = source_data if source_data is not None else live_source(mk)
     now = _aware(sd.now())
+    cal = _dates_of(_bench(mk, sd, now))
+    nxt = [d for d in cal if d > last_date]
+    if not nxt:
+        raise H1Refused(EXIT_USAGE, f"--last-date {last_date} 뒤 거래일이 아직 없어요(대기 자산 {idle_code(mk)} 의 마지막 확정 봉 "
+                                    f"{cal[-1]}) → 그 뒤 거래일이 지나 '시장은 거래했는데 이 종목만 거래가 없음'을 확인한 뒤 "
+                                    "등록하세요(그날 저녁에는 모든 종목의 마지막 봉이 그날이라 상장폐지를 확인할 수 없음)")
     try:
         f = sd.fetch(code, now)
     except Exception as e:
         _say(f"    ({code} 시세 받기 실패: {type(e).__name__}: {e})")
         f = None
+    market = f"시장은 그 뒤 {len(nxt)}거래일({nxt[0]}~{nxt[-1]}) 거래함"
     if f is None or getattr(f, "df", None) is None or len(f.df) == 0:
-        return f"지금 시세를 받을 수 없음(D2, {_iso(now)})"
+        return f"{market}, 이 종목은 지금 시세를 받을 수 없음(D2, {_iso(now)})"
     dates = _dates_of(f.df)
     after = [d for d in dates if d > last_date]
     if after:
         raise H1Refused(EXIT_USAGE, f"{code} 는 아직 거래 중이에요: 지금 받은 확정 시세에 --last-date {last_date} 뒤 거래한 봉 "
                                     f"{len(after)}개({after[0]}~{after[-1]})가 있어요 → 종목코드·마지막 거래일을 1차 출처로 다시 "
                                     "확인(오타면 아무것도 바뀌지 않았어요). 정말 상장폐지면 거래가 멈춘 뒤 다시 등록")
-    return f"지금 받은 확정 시세의 마지막 거래일 {dates[-1]} ≤ --last-date {last_date} (그 뒤 거래 행 없음, {_iso(now)})"
+    return (f"{market}, 이 종목의 확정 시세 마지막 거래일 {dates[-1]} ≤ --last-date {last_date} (그 뒤 거래 행 없음, "
+            f"{_iso(now)})")
 
 
 def _corp_delist(mk, states, head, code, last_date, last_close, source, at, regs, source_data=None):

@@ -452,6 +452,7 @@ def test_C11_corp_action_도_관문과_규칙_확인(tmp_path, monkeypatch):
     assert h.snap() == snap
     monkeypatch.setattr(h1, "MAX_LATE_TOTAL", real)
     R._pass(h.root, None, h1.env_info())
+    h.at(h.D[4]).src.missing.add("CCC")                                  # 다음 거래일이 지났고 그 종목만 시세 없음(F-3)
     assert h.corp("CCC", delist=True, last_date=h.D[3], gate=True) == 0
 
 

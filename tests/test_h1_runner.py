@@ -309,7 +309,9 @@ def test_T_F1b_운영_장부_격리(tmp_path, monkeypatch):
         for k in range(1, 4):
             assert h.run(h.D[k]) == 0
         assert h1.status(h.mk)
-        assert h.corp("AAA" if h.mk == "us" else "005930", delist=True, last_date=h.D[3]) == 0
+        code = "AAA" if h.mk == "us" else "005930"
+        h.at(h.D[4]).src.missing.add(code)                    # 다음 거래일이 지났고 그 종목만 시세가 없음(단계 4 F-3 증거)
+        assert h.corp(code, delist=True, last_date=h.D[3]) == 0
         assert h.run(h.D[4]) == 0
     after = {p: (fs.file_sha(p), p.stat().st_mtime_ns) for p in ops}
     assert after == before
@@ -600,6 +602,7 @@ def test_T_DELIST_시세를_못_받는_상태에서_등록_다음_run_진행(tmp
 def test_T_DELIST_last_close_를_비우면_마지막_marks(tmp_path):
     h = us_h(tmp_path, upto=3)
     marks = [r["marks"]["CCC"] for r in h.states()["A0"]["스프린터"]["days"] if "CCC" in r["marks"]]
+    h.at(h.D[4]).src.missing.add("CCC")                           # 다음 거래일이 지났고 그 종목만 시세가 없음(단계 4 F-3)
     assert h.corp("CCC", delist=True, last_date=h.D[3]) == 0
     reg = h.states()["A1"]["마라토너"]["corp_actions"][-1]
     assert reg["last_close"] == marks[-1] and reg["last_close_from"] == f"marks {h.D[3]}"
@@ -1002,6 +1005,7 @@ def test_T_HEAD_3개_바꾼_뒤_멈춤은_백업으로_되살려_같은_결과(t
 
 def test_T_HEAD_corp_action_뒤_같은_last_date_에서_멈춤(tmp_path, monkeypatch):
     h = us_h(tmp_path, upto=3)
+    h.at(h.D[4]).src.missing.add("CCC")                           # 다음 거래일이 지났고 그 종목만 시세가 없음(단계 4 F-3)
     assert h.corp("CCC", delist=True, last_date=h.D[3]) == 0      # 같은 last_date 에서 장부를 바꾸는 명령
     head_ca = h.head()
     assert head_ca["last_date"] == h.D[3] and "-corp-action-" in head_ca["run_id"]
