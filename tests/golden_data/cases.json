@@ -1,0 +1,114 @@
+[
+ {
+  "name": "국내 정지 두 모양·거래량 NaN·종가 NaN, 15:59 KST(마지막 봉 장중 → 버림)",
+  "kind": "fetch",
+  "market": "kr",
+  "code": "005930",
+  "now": "2026-11-10T15:59:00+09:00",
+  "input": "inputs/kr_halt.json"
+ },
+ {
+  "name": "국내 같은 원본, 16:01 KST(마지막 봉 확정)",
+  "kind": "fetch",
+  "market": "kr",
+  "code": "005930",
+  "now": "2026-11-10T16:01:00+09:00",
+  "input": "inputs/kr_halt.json"
+ },
+ {
+  "name": "국내 거래량 칸 이름 '거래량' + 정지",
+  "kind": "fetch",
+  "market": "kr",
+  "code": "000660",
+  "now": "2026-11-10T23:05:00+09:00",
+  "input": "inputs/kr_korean_volume.json"
+ },
+ {
+  "name": "국내 종가 모두 NaN → 확정 봉 없음",
+  "kind": "fetch",
+  "market": "kr",
+  "code": "035420",
+  "now": "2026-11-10T23:05:00+09:00",
+  "input": "inputs/kr_all_nan.json"
+ },
+ {
+  "name": "국내 시장에 미국 코드 → 오류",
+  "kind": "fetch",
+  "market": "kr",
+  "code": "AAPL",
+  "now": "2026-11-10T23:05:00+09:00",
+  "input": "inputs/us_stock.json"
+ },
+ {
+  "name": "미국 종목 16:14 ET(마지막 봉 미확정 → 버림), 종가 NaN 행",
+  "kind": "fetch",
+  "market": "us",
+  "code": "AAPL",
+  "now": "2026-11-10T16:14:00-05:00",
+  "input": "inputs/us_stock.json"
+ },
+ {
+  "name": "미국 종목 16:16 ET(마지막 봉 확정)",
+  "kind": "fetch",
+  "market": "us",
+  "code": "AAPL",
+  "now": "2026-11-10T16:16:00-05:00",
+  "input": "inputs/us_stock.json"
+ },
+ {
+  "name": "미국 받기 실패 → None",
+  "kind": "fetch",
+  "market": "us",
+  "code": "MSFT",
+  "now": "2026-11-11T07:10:00+09:00",
+  "input": "raise"
+ },
+ {
+  "name": "미국 빈 표 → None",
+  "kind": "fetch",
+  "market": "us",
+  "code": "NVDA",
+  "now": "2026-11-11T07:10:00+09:00",
+  "input": "empty"
+ },
+ {
+  "name": "대기 자산 SPY 16:14 ET(오늘 봉 버림)",
+  "kind": "idle",
+  "market": "us",
+  "code": "SPY",
+  "now": "2026-11-10T16:14:00-05:00",
+  "input": "inputs/spy.json"
+ },
+ {
+  "name": "대기 자산 SPY 16:16 ET(오늘 봉 확정)",
+  "kind": "idle",
+  "market": "us",
+  "code": "SPY",
+  "now": "2026-11-10T16:16:00-05:00",
+  "input": "inputs/spy.json"
+ },
+ {
+  "name": "대기 자산 KS200 22:29 KST(오늘 봉 버림 — 종목 16:00 과 다른 확정 시각)",
+  "kind": "idle",
+  "market": "kr",
+  "code": "KS200",
+  "now": "2026-11-10T22:29:00+09:00",
+  "input": "inputs/ks200.json"
+ },
+ {
+  "name": "대기 자산 KS200 22:31 KST(오늘 봉 확정)",
+  "kind": "idle",
+  "market": "kr",
+  "code": "KS200",
+  "now": "2026-11-10T22:31:00+09:00",
+  "input": "inputs/ks200.json"
+ },
+ {
+  "name": "대기 자산 받기 실패 → None",
+  "kind": "idle",
+  "market": "kr",
+  "code": "KS200",
+  "now": "2026-11-10T23:05:00+09:00",
+  "input": "raise"
+ }
+]

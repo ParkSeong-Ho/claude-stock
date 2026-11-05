@@ -268,12 +268,12 @@ def test_G2_파이썬이_cli_전에_죽으면_종료_코드_1(tmp_path):
 
 def test_G3_재시작해도_판정_기록은_그대로_같은_열쇠는_다시_씀(tmp_path):
     h = tr.us_h(tmp_path, upto=1)
-    dl = h.root / "analyst_cache.jsonl"
+    dl = h1.decisions_path(h.root, h.mk)
     before = dl.read_bytes()
     keys_s = {r["key"] for r in h1.DecisionLog(dl, read_only=True).records() if r["date"] == hs.S_A}
     assert keys_s
     runs_n, n_calls = len(h.runs()), len(h.ask.calls)
-    h1.restart("us", "시험: 판정 기록이 남는지", h.root)
+    tr._restart(h, "시험: 판정 기록이 남는지")
     assert dl.read_bytes() == before and len(h.runs()) >= runs_n    # 판정 기록·실행 일지는 시장 폴더 밖이라 그대로
     assert h.start() == 0                                        # 같은 시각 → 같은 S
     assert h.meta()["start_date"] == hs.S_A and h.meta()["restart_no"] == 1
@@ -287,7 +287,7 @@ def test_G3_재시작해도_판정_기록은_그대로_같은_열쇠는_다시_�
 
 def test_G4_판정_기록_가운데_줄이_깨지면_L24_2_장부_그대로(tmp_path):
     h = tr.us_h(tmp_path, upto=2)
-    dl = h.root / "analyst_cache.jsonl"
+    dl = h1.decisions_path(h.root, h.mk)
     lines = dl.read_bytes().split(b"\n")
     assert len(lines) > 3
     lines[1] = lines[1][:-5]                                     # 가운데 줄(마지막이 아님)이 깨짐
@@ -533,9 +533,9 @@ def test_G11_start_는_meta_rules_에_그대로_적고_어느_칸이_달라도_3
         bad["rules"][k] = (v + "x") if isinstance(v, str) else ([v, 0] if isinstance(v, list) else
                                                                 ({**v, "x": 1} if isinstance(v, dict) else v * 2 + 1))
         with pytest.raises(h1.H1Refused) as e:
-            h1._check_rules(bad, "us")
+            h1._check_rules(bad, "us", h.root)
         assert e.value.code == 3 and k in str(e.value)
-    h1._check_rules(meta, "us")                                  # 그대로면 통과
+    h1._check_rules(meta, "us", h.root)                          # 그대로면 통과
 
 
 # ============================ G12 시장별 판정 ============================
@@ -623,7 +623,7 @@ def test_T2_산_날_장_마감_뒤_분할_적용_경계는_L_없음(tmp_path):
     now = h.src.clock                                            # 분할로 소급 수정된 지금 시세를 frames 로 주고 다시 점검(L3·L6)
     frames = {c: f.df for c in tr.US_CODES if (f := h.src.fetch(c, now)) is not None}
     cal = h1._last_ok_calendar_line(h.root, "us")["dates"]
-    dec = h1.DecisionLog(h.root / "analyst_cache.jsonl", read_only=True)
+    dec = h1.DecisionLog(h1.decisions_path(h.root, h.mk), read_only=True)
     st = h.states()
     for arm in h1.ARMS:
         probs = h1_check.check_ledger("us", arm, st[arm], cal, dec, tr.allowed_now(), frames=frames)
@@ -803,11 +803,11 @@ def test_T14c_재시작_뒤_새_창이_옛_창의_late_no_llm_기록을_다시_�
     h = tr.us_h(tmp_path)
     assert h.start() == 0
     assert h.run(clock=h1.next_open("us", h.D[1]) + timedelta(minutes=1)) == 0 and h.last() == h.D[1]
-    dl = h.root / "analyst_cache.jsonl"
+    dl = h1.decisions_path(h.root, h.mk)
     old = [r for r in h1.DecisionLog(dl, read_only=True).records() if r["date"] == h.D[1]]
     assert old and {r["status"] for r in old} == {"late_no_llm"}
     before, n_calls = dl.read_bytes(), len(h.ask.calls)
-    h1.restart("us", "시험: 새 창이 옛 기록을 다시 쓰는지", h.root)
+    tr._restart(h, "시험: 새 창이 옛 기록을 다시 쓰는지")
     assert h.start(clock=fs.run_at("us", h.D[1])) == 0              # 장 시작 전 → 새 S = D1, 제때(llm)
     assert h.meta()["start_date"] == h.D[1] and h.meta()["restart_no"] == 1
     assert len(h.ask.calls) == n_calls and dl.read_bytes() == before   # LLM 0번, 기록 그대로
@@ -838,5 +838,5 @@ def test_재시작_수는_status_restart_보고서가_같은_규칙(tmp_path):
     assert "재시작 2/2 (남은 0)" in text and "재시작 수의 출처가 서로 다름" in text
     assert R.collect("us", final=True, root=h.root, online=False)["ops"]["restarts_used"] == 2
     with pytest.raises(h1.H1Refused) as e:                       # 옛 규칙(restarts.jsonl 만)이면 0 이라 받아 줬음
-        h1.restart("us", "세 번째", h.root)
+        tr._restart(h, "세 번째")
     assert e.value.code == 8 and h.mdir.is_dir()

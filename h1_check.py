@@ -30,6 +30,9 @@ L24(장부 파일 손상)는 2b-2 의 장부 읽기가 판단한다. 여기서�
   시세와 L3 비교를 하지 않는다. 두 장부의 분할 기록이 다르면 L8.
 - B-6 L12: '현금 부족' 보류 순간의 가능 금액을 그날 체결 순서(첫 전부 지수 → 정리 → 매도 → 매수 주문 순서)로 다시 세어
   기록과 맞춘다. 같은 시가의 체결 단계가 '매도 먼저 → 매수 → 쓸어 담기'가 아니면 L4.
+
+단계 4(docs/h1-review-4.md F-3): L23 은 h1.active_delists 로 취소된 상장폐지 등록(corp_actions 의 "delist_cancel" 줄)을
+보지 않는다(정리 전에만 취소할 수 있어 취소된 등록은 장부에 흔적이 없음). 바뀐 곳은 이것뿐이다.
 """
 from __future__ import annotations
 
@@ -404,7 +407,7 @@ def _check_one(out, market, arm, tname, st, calendar, decisions, allowed, frames
                 P("L12", f"0주 보류 {s['code']} 인데 상한 안에서 살 수 있음 (가격 {px!r})", dt)
 
     # ---- 원장 다시 걷기: L4(같은 시가 순서)·L7·L8·L10·L12(보류 순간 다시 센 가능 금액)·L23 ----
-    regs = {ca["code"]: ca for ca in d["corp_actions"] if ca.get("kind") == "delist"}
+    regs = h1.active_delists(d["corp_actions"])           # 취소된 등록(delist_cancel)은 보지 않음(단계 4 F-3)
     first_after = {c: next((x for x in dates if x > reg["last_date"]), None) for c, reg in regs.items()}
     splits = [ca for ca in d["corp_actions"] if ca.get("kind") == "split"]
     splits_on = {}
@@ -735,9 +738,8 @@ def _delist_first_bars(st):
     """{code: (등록 last_date, last_close, 등록 뒤 첫 처리 봉 날짜 또는 None)}."""
     dates = [r["date"] for r in st["days"]]
     out = {}
-    for ca in st["corp_actions"]:
-        if ca.get("kind") == "delist":
-            out[ca["code"]] = (ca["last_date"], ca["last_close"], next((x for x in dates if x > ca["last_date"]), None))
+    for code, ca in h1.active_delists(st["corp_actions"]).items():     # 취소된 등록은 빼고(단계 4 F-3)
+        out[code] = (ca["last_date"], ca["last_close"], next((x for x in dates if x > ca["last_date"]), None))
     return out
 
 

@@ -349,13 +349,13 @@ def test_C6_옮기기_전에_꺼지면_다음_restart_가_마저(tmp_path, monke
     with monkeypatch.context() as mp:
         crash_on(mp, lambda dst: dst.parent.name == "archive")
         with pytest.raises(Crash):
-            h1.restart("us", "첫 이유", h.root)
+            R._restart(h, "첫 이유")
     rs = fs.read_lines(h.root / "restarts.jsonl")
     assert [r["status"] for r in rs] == ["moving"] and h.mdir.is_dir()
     assert h.start() == 8 and "restart 를 다시" in h.ends()[-1]["message"]
-    dest = h1.restart("us", "다른 이유여도 됨", h.root)             # 새 재시작이 아니라 남은 이동을 끝냄
+    dest = h1.restart("us", "L", h.root, confirm="us", note="다른 이유여도 됨")   # 새 재시작이 아니라 남은 이동을 끝냄
     assert dest.name == Path(rs[0]["archive"]).name and dest.is_dir() and not h.mdir.exists()
-    assert h1._count_restarts("us", h.root) == 1
+    assert h1.restart_info("us", h.root)["used"] == 1
     assert h.start() == 0 and h.meta()["restart_no"] == 1
 
 
@@ -370,12 +370,12 @@ def test_C6_옮긴_뒤_끝_줄_전에_꺼지면_start_가_마저(tmp_path, monke
     with monkeypatch.context() as mp:
         mp.setattr(h1, "_append_log", cut)
         with pytest.raises(Crash):
-            h1.restart("us", "이유", h.root)
+            R._restart(h, "이유")
     assert not h.mdir.exists()
     assert h.start() == 0                                          # 흔적만 있는데 재시작 기록 없음 → 8 이 아님
     rs = fs.read_lines(h.root / "restarts.jsonl")
     assert [r["status"] for r in rs] == ["moving", "done"] and rs[1].get("recovered") is True
-    assert h1._count_restarts("us", h.root) == 1 and h.meta()["restart_no"] == 1
+    assert h1.restart_info("us", h.root, h.meta())["used"] == 1 and h.meta()["restart_no"] == 1
 
 
 # ============================ C-7 amend-rules 일지 ============================
@@ -451,7 +451,7 @@ def test_C11_corp_action_도_관문과_규칙_확인(tmp_path, monkeypatch):
     assert h.corp("CCC", delist=True, last_date=h.D[3]) == 3               # meta.rules 다름
     assert h.snap() == snap
     monkeypatch.setattr(h1, "MAX_LATE_TOTAL", real)
-    R._pass(h.root, h1.code_hash()[0], h1.env_info())
+    R._pass(h.root, None, h1.env_info())
     assert h.corp("CCC", delist=True, last_date=h.D[3], gate=True) == 0
 
 

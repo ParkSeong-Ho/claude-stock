@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -120,6 +121,55 @@ def split_after(day, r, tz):
 def file_sha(p):
     import hashlib
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+# ---- 재현 통과 기록(단계 4 F-1: files·data_golden_sha256 필수) 시험 도우미 ----
+_GOLDEN = {}
+
+
+def golden_digest():
+    """자료 받기 골든 지문(한 번만 계산)."""
+    if "d" not in _GOLDEN:
+        _GOLDEN["d"] = h1.data_golden_digest()
+    return _GOLDEN["d"]
+
+
+def code_variant(tag=None, file="h1_data.py"):
+    """지금 코드의 파일별 sha256 에서 file 하나만 sha256(tag) 로 바꾼 '가짜 코드' → (code_hash, files).
+    tag None 이면 지금 코드 그대로. 기본 file = h1_data.py(⑥-i 로 허용되는 자료 받기 고침)."""
+    import hashlib
+    ch, files = h1.code_hash()
+    if tag is None:
+        return ch, dict(files)
+    files = dict(files)
+    files[file] = hashlib.sha256(str(tag).encode("utf-8")).hexdigest()
+    return h1.combine_code_hash(files), files
+
+
+def pass_entry(code=None, env=None, ledger=None, golden=None, tax_free=None, **kw):
+    """시험용 재현 통과 줄(h1.replay_entry 와 같은 모양). code = (code_hash, files) 또는 None(지금 코드),
+    ledger = 장부 내용 지문 dict(기본 {"W1": "같음"}), golden = 자료 받기 골든 지문(기본 지금 값)."""
+    ch, files = code if code is not None else h1.code_hash()
+    return {"code_hash": ch, "files": dict(files), "env": dict(env or h1.env_info()),
+            "data_golden_sha256": golden or golden_digest(),
+            "h1_without_tax_table_sha256": tax_free if tax_free is not None else h1.tax_free_sha(),
+            "fingerprint_version": h1.FINGERPRINT_VERSION,
+            "ledger_fingerprints": {"W1": "같음"} if ledger is None else ledger, "passed_at": "2026-11-04", **kw}
+
+
+def record_pass(root, code=None, env=None, **kw):
+    """pass_entry 를 h1.record_replay_pass 로 기록. 돌려줌: 기록 줄 수."""
+    return h1.record_replay_pass(pass_entry(code, env, **kw), root)
+
+
+def give_l_evidence(root, market, start_date, at, date=None, code="L7"):
+    """restart --reason L 의 근거가 되는 errors.jsonl L 기록 한 줄(그 창 S, 그 시각)을 더한다(시험용, 단계 4 F-4)."""
+    import uuid
+    h1._append_line(Path(root) / "errors.jsonl", {
+        "at": at, "run_id": f"test-{uuid.uuid4().hex[:8]}", "command": "run", "market": market,
+        "start_date": start_date, "date": date,
+        "problems": [{"level": "L", "code": code, "market": market, "arm": None, "trainer": None, "date": date,
+                      "detail": "시험용 L 근거"}], "fingerprint": None})
 
 
 def tree_sha(root):

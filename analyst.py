@@ -19,6 +19,7 @@ H1 포워드 모의매매용 추가 (docs/h1-forward-design.md §3.4, 2026-11-04
   analyze() 와 결과가 다른 곳은 둘뿐이다(2a 검토 A-6): 답의 "analysis" 가 목록이 아니면 analyze() 는 TypeError 로
   멈추지만 analyze_logged 는 bad_json 폴백, 출력 글자를 읽지 못하면(UnicodeDecodeError 등) decode_error 폴백.
 - claude_cli_version(): `claude --version` 첫 줄(실패하면 None). H1 은 실행마다 한 번 불러 analyze_logged 에 넘긴다.
+- analyze_logged(cwd=…): H1 은 빈 전용 작업 폴더에서 `claude -p` 를 부른다(단계 4 F-8). cwd 를 안 주면 지금과 같다.
   _build_prompt()·analyze()·apply() 는 한 글자도 바꾸지 않았다(프롬프트는 운영과 같음, 설계 Q4).
 """
 
@@ -144,7 +145,7 @@ def _local_now():
     return datetime.now().astimezone()
 
 
-def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None):
+def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None, cwd=None):
     """analyze() 와 같은 일을 하고 (결과, meta) 를 돌려준다. 결과는 analyze() 와 같은 값이다
     (같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
     다른 곳은 둘뿐: "analysis" 가 목록이 아님 → bad_json 폴백(analyze 는 TypeError), 출력 디코드 실패 → decode_error 폴백.
@@ -152,6 +153,9 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT,
     now: 시간대가 있는 datetime 을 돌려주는 함수(시험·재현에서 시계를 바꿔 끼울 때). 없으면 이 컴퓨터의 지금 시각.
     cli_version: 이번 실행의 `claude --version` 값(claude_cli_version() 으로 한 번 구해 넘김). 받은 그대로 meta 에 적고,
                  이 함수는 `claude --version` 을 부르지 않는다.
+    cwd: `claude -p` 를 돌릴 작업 폴더(H1 은 빈 전용 폴더 state/h1/claude_cwd/ — 부르는 쪽 폴더의 Claude 설정·CLAUDE.md 가
+         팀장 입력에 섞이지 않게, 단계 4 F-8). None 이면 지금처럼 부르는 쪽 폴더(cwd 인자를 넘기지 않음).
+         운영 analyze() 는 그대로다.
 
     meta (설계 §3.4):
       status      "ok" | "no_claude" | "timeout" | "os_error" | "nonzero_exit" | "decode_error" | "bad_json" | "empty"
@@ -185,9 +189,10 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT,
     meta["asked_at"] = stamp()                    # 묻기 직전
     t0 = time.monotonic()
     try:
+        extra = {} if cwd is None else {"cwd": str(cwd)}
         r = subprocess.run(
             ["claude", "-p", prompt],
-            capture_output=True, text=True, timeout=timeout, env=env,
+            capture_output=True, text=True, timeout=timeout, env=env, **extra,
         )
     except subprocess.TimeoutExpired:
         meta["status"] = "timeout"

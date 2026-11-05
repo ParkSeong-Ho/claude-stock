@@ -144,7 +144,7 @@ def _final_scenario(tmp):
     """깨끗한 판정 창: 재현 통과 기록에 지금 코드·환경을 적고 관문을 켜서 S ~ S+65(66봉) 처리."""
     w = tr.us_world(end="2026-07-31")
     h = tr.H(tmp, w, hs.S_A, _plan_fin, hs.FakeAsk(hs.ASK_A), n_days=70)
-    h1.record_replay_pass({"code_hash": h1.code_hash()[0], "env": h1.env_info()}, h.root)
+    fs.record_pass(h.root)
     assert h.start(gate=True) == 0
     for k in range(1, 66):
         assert h.run(h.D[k], gate=True) == 0, k
@@ -176,14 +176,21 @@ def load(root, mk):
     return h1.load_market(mk, root, repair=False)
 
 
-def recommit(root, mk, fn_states=None, fn_meta=None):
-    """장면 사본의 장부·meta 를 고친 뒤 h1.commit 으로 HEAD 까지 맞춰 쓴다(엄격 읽기를 통과하게)."""
+def recommit(root, mk, fn_states=None, fn_meta=None, prereg=True):
+    """장면 사본의 장부·meta 를 고친 뒤 h1.commit 으로 HEAD 까지 맞춰 쓴다(엄격 읽기를 통과하게).
+    prereg: meta.rules 를 고쳤으면 사전 등록 파일(prereg_<m>.json)의 rules 도 같은 값으로(단계 4 F-2 — 판정 숫자는 사전
+    등록 파일에서 읽으므로 '처음부터 그 숫자로 사전 등록한 창'을 흉내 냄). False 면 meta 만 바꿈(⑩ 위반 장면)."""
     ld = load(root, mk)
     if fn_states:
         fn_states(ld.states)
     if fn_meta:
         fn_meta(ld.meta)
-    dec = h1.DecisionLog(h1.decisions_path(root), read_only=True)
+        if prereg:
+            p = h1.prereg_path(mk, root)
+            pre = json.loads(p.read_text(encoding="utf-8"))
+            pre["rules"] = json.loads(json.dumps(ld.meta["rules"]))
+            p.write_text(json.dumps(pre, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    dec = h1.DecisionLog(h1.decisions_path(root, mk), read_only=True)
     h1.commit(root, mk, ld.states, ld.meta, dec, "test-rewrite", ld.head["written_at"], ld.head)
 
 
@@ -193,8 +200,10 @@ def jline(path, rec):
 
 
 def files_sha(root):
-    """보고서·금리 저장본을 뺀 모든 파일의 sha256(장부·HEAD·meta·일지·판정 기록·백업·잠금 파일)."""
-    return {k: v for k, v in fs.tree_sha(root).items() if not k.startswith(("reports/", "rates/"))}
+    """보고서·금리 저장본·잠금 파일(빈 파일 — 보고서가 금리 받을 때 전역 잠금 h1-global.lock 을 만들 수 있음)을 뺀
+    모든 파일의 sha256(장부·HEAD·meta·일지·판정 기록·백업·사전 등록)."""
+    return {k: v for k, v in fs.tree_sha(root).items() if not k.startswith(("reports/", "rates/"))
+            and not k.endswith(".lock")}
 
 
 def team_values(st, arm, upto=None):
@@ -381,7 +390,7 @@ def test_T_F8a_실현손익_장면_항등식(built, tmp_path):
 def test_T_F8a_팀장_수와_폴백_20퍼센트(built, tmp_path):
     root = copy_of(built["us"], tmp_path)
     d = R.collect("us", "2026-03", root=root, online=False)
-    recs = [r for r in h1.DecisionLog(h1.decisions_path(root), read_only=True).records()
+    recs = [r for r in h1.DecisionLog(h1.decisions_path(root, "us"), read_only=True).records()
             if r["market"] == "us" and hs.S_A <= r["date"] <= d["cut"]]
     ld = d["leader"]
     assert ld["n"] == len(recs) > 0
@@ -452,7 +461,7 @@ def test_T_F8a_운영_기준_칸(built, tmp_path):
     assert ops["gate_refused"] == 1
     assert ops["data_stops"] == 3 and ops["data_kinds"] == {"D2": 1, "D3": 1, "D6": 1}
     assert ops["l_errors"] == 0 and ops["restarts_used"] == 0 and ops["restarts_left"] == 2
-    assert {k: len(v) for k, v in ops["corp"].items()} == {"split": 1, "delist": 1, "correction": 0}
+    assert {k: len(v) for k, v in ops["corp"].items()} == {"split": 1, "delist": 1, "delist_cancel": 0, "correction": 0}
     assert ops["other_fp"] == h.D[:26]                             # 재현 통과 기록 없음(관문 끈 시험) → 모두 '다른 지문'
     assert ops["deadline"] == "2027-06-30" and ops["days_to_deadline"] == (
         pd.Timestamp("2027-06-30") - pd.Timestamp(D[25])).days
@@ -1100,7 +1109,7 @@ def test_final_마감까지_끝날_수_없으면_H1_포워드_실패(built, tmp_
     """마감 전이라도 '휴장일 없이 매일 처리해도 S+62 가 마감 뒤'면 확실한 실패(거래일은 평일보다 일찍 올 수 없음)."""
     h = built["us"]
     root = copy_of(h, tmp_path)
-    h1.record_replay_pass({"code_hash": h1.code_hash()[0], "env": h1.env_info()}, root)   # 이 창을 깨끗하게
+    fs.record_pass(root)                                              # 이 창을 깨끗하게
     _, v = _verdict(root)
     assert v["result"] == "not_finished" and not v["violated"]
     edge = R._add_weekdays(h.D[25], 37)                               # 남은 37봉 → S+62 는 빨라야 이 날
@@ -1204,7 +1213,7 @@ def test_보고서는_장부와_일지를_고치지_않음(built, tmp_path, monk
 def test_보고서는_반쯤_쓴_판정_기록_줄도_자르지_않음(built, tmp_path):
     """판정 기록 마지막 줄이 반쯤 쓰였어도(run 이 쓰다 꺼짐) 보고서는 읽기 전용 — 자르지 않고 알리기만(다음 run 이 자름)."""
     root = copy_of(built["us"], tmp_path)
-    with open(root / "analyst_cache.jsonl", "ab") as f:
+    with open(h1.decisions_path(root, "us"), "ab") as f:
         f.write(b'{"key": "us|2026-03-10|')
     before = files_sha(root)
     text = R.write("us", root=root, online=False).read_text(encoding="utf-8")
@@ -1317,7 +1326,7 @@ def test_cli_잠금_30분_넘으면_5(built, tmp_path, monkeypatch):
     monkeypatch.setattr(h1, "_lock_clock", clock)
     monkeypatch.setattr(h1, "_lock_sleep", fake_sleep)
     before = files_sha(root)
-    fd = os.open(root / "h1.lock", os.O_RDWR | os.O_CREAT)
+    fd = os.open(root / "h1-us.lock", os.O_RDWR | os.O_CREAT)
     fcntl.flock(fd, fcntl.LOCK_EX)
     try:
         assert R.cli(["--market", "us", "--offline"]) == 5
@@ -1335,9 +1344,9 @@ def _fin_h(tmp_path, name="h1", n_days=70):
     return tr.H(tmp_path, w, hs.S_A, _plan_fin, hs.FakeAsk(hs.ASK_A), n_days=n_days, name=name)
 
 
-def _pass_now(root, ch=None, fps=None):
-    h1.record_replay_pass({"code_hash": ch or h1.code_hash()[0], "env": h1.env_info(),
-                           "ledger_fingerprints": fps if fps is not None else {"W1-us": "같음"}}, root)
+def _pass_now(root, code=None, fps=None):
+    """재현 통과 기록(단계 4 F-1 모양). code = (code_hash, files) 또는 None(지금 코드)."""
+    fs.record_pass(root, code, ledger=fps if fps is not None else {"W1-us": "같음"})
 
 
 @pytest.mark.parametrize("same_clock", [False, True])
@@ -1414,9 +1423,10 @@ def test_R2_L_오류는_errors_jsonl_과_종료_코드_2_의_합집합(tmp_path,
     assert ops["l_errors"] == 1                                            # 한 실행 = 한 번(run_id 로 합침)
     assert ops["l_runs_only"] == (0 if how == "ok" else 1)
     assert ops["l_list"][0][1] == h.D[3]                                  # 그 실행이 처리하려던 봉
-    if how == "half":
-        assert ops["broken"] == {"errors.jsonl": 1}
-        assert "읽지 못한(깨진) 일지 줄: errors.jsonl 1줄" in R.build("us", final=True, root=h.root, online=False)
+    if how == "half":                       # 줄바꿈 없이 끝난 마지막 줄 = 쓰는 중일 수 있음 → 깨진 줄과 따로(단계 4 F-7)
+        assert ops["broken"] == {} and ops["tail"] == {"errors.jsonl": 1}
+        assert "줄바꿈 없이 끝난 마지막 줄(다른 시장 명령이 지금 쓰는 중이거나 쓰다 꺼짐 — 깨진 줄로 세지 않음): " \
+               "errors.jsonl 1줄" in R.build("us", final=True, root=h.root, online=False)
 
 
 def test_R2_끝_기록_없는_실행은_L_이_아니고_따로_셈(tmp_path):
@@ -1486,7 +1496,7 @@ def _fp_scenario(tmp_path, *, same_fps=True, tamper=False):
     """D3 에서 점검 함수가 거짓 L 을 냄(종료 코드 2) → 점검을 '고친'(code_hash 가 바뀐) 코드로 D3·D4 처리."""
     h = _fin_h(tmp_path, n_days=70)
     H_old = h1.code_hash()[0]
-    _pass_now(h.root, H_old)
+    _pass_now(h.root)
     assert h.start(gate=True) == 0
     for k in (1, 2):
         assert h.run(h.D[k], gate=True) == 0
@@ -1508,10 +1518,11 @@ def _fp_scenario(tmp_path, *, same_fps=True, tamper=False):
         rec["fingerprint"] = "0" * 64
         lines[-1] = json.dumps(rec, ensure_ascii=False)
         (h.root / "errors.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    H_new = "f" * 64
-    _pass_now(h.root, H_new, {"W1-us": "같음"} if same_fps else {"W1-us": "다름"})
+    NEW = fs.code_variant("점검 고침", file="h1_check.py")              # 점검 함수(h1_check.py)만 고친 코드
+    H_new = NEW[0]
+    _pass_now(h.root, NEW, {"W1-us": "같음"} if same_fps else {"W1-us": "다름"})
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(h1, "code_hash", lambda *a, **k: (H_new, {}))
+        mp.setattr(h1, "code_hash", lambda *a, **k: NEW)
         code = h.run(h.D[4], gate=True)                               # 밀린 D3(늦은 봉) + D4
     return h, err, code, H_old, H_new
 
@@ -1539,9 +1550,11 @@ def test_R4_거짓_양성_조건이_맞으면_기록하고_보고서_L_오류에
     assert "거짓 양성으로 판정(사전 등록 ④) 1건은 뺌" in text
     end = h.ends()[-1]
     assert end["false_positive"] == [{"bar": h.D[3], "error_run_id": err["run_id"]}]
+    assert d["verdict"]["c6"]["ok"]                                       # ⑥: h1_check.py 고침은 ④ 기록이 있어 허용
     # 같은 기록으로 다시 판정하지 않음(다음 실행에서 또 쓰지 않음)
+    NEW = fs.code_variant("점검 고침", file="h1_check.py")
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(h1, "code_hash", lambda *a, **k: (H_new, {}))
+        mp.setattr(h1, "code_hash", lambda *a, **k: NEW)
         assert h.run(h.D[5], gate=True) == 0
     assert len([r for r in fs.read_lines(h.root / "changes.jsonl") if r.get("kind") == "false_positive"]) == 1
 
@@ -1549,12 +1562,19 @@ def test_R4_거짓_양성_조건이_맞으면_기록하고_보고서_L_오류에
 @pytest.mark.parametrize("which", ["가", "나"])
 def test_R4_조건이_하나라도_틀리면_기록하지_않고_L_오류는_그대로(tmp_path, capsys, which):
     h, err, code, _, _ = _fp_scenario(tmp_path, same_fps=(which != "가"), tamper=(which == "나"))
-    assert code == 0 and h.last() == h.D[4]                              # 처리·커밋은 평소대로
     assert not [r for r in fs.read_lines(h.root / "changes.jsonl") if r.get("kind") == "false_positive"]
     out = capsys.readouterr().out
-    assert "④ 조건 안 맞음 → 그 L 오류는 그대로(재시작 대상)" in out and f"({which})" in out
-    ops = R.collect("us", final=True, root=h.root, online=False)["ops"]
+    if which == "가":                       # 재현 장부 지문이 다른 코드 = 장부 계산이 바뀜 → ⑥ 위반, 관문이 먼저 거절(단계 4 F-1)
+        assert code == 3 and h.last() == h.D[2]
+        assert "⑥ 코드 동결" in h.ends()[-1]["message"] and "(b)" in h.ends()[-1]["message"]
+    else:
+        assert code == 0 and h.last() == h.D[4]                          # 처리·커밋은 평소대로
+        assert "④ 조건 안 맞음 → 그 L 오류는 그대로(재시작 대상)" in out and f"({which})" in out
+    d = R.collect("us", final=True, root=h.root, online=False)
+    ops = d["ops"]
     assert ops["l_errors"] == 1 and ops["l_false_positive"] == 0
+    if which == "나":                       # 점검 함수(h1_check.py)가 바뀌었는데 ④ 기록이 없음 → ⑥ 칸도 실패
+        assert not d["verdict"]["c6"]["ok"] and "false_positive" in d["verdict"]["c6"]["detail"]
 
 
 def test_R5_월간은_처리하려던_봉의_달로_나눔_언제_만들어도_같음(tmp_path):
