@@ -15,17 +15,25 @@ h1_replay.py - H1 재현(단계 5, 설계 docs/h1-forward-design.md §5)
 - 창(비교하는 기간, §5.2)
     W1-us  미국 2026-06-01 ~ 2026-11-03 (R0 20종목 + SPY)       W1-kr  국내 같은 기간 (KR_UNIVERSE 32종목 + KS200)
     W2-kr  국내 2018-03-01 ~ 2018-12-31 (거래정지를 가로지른 보유 포함)
-    W3     합성 시세 + 가짜 브레인(정해진 날에만 사고팖)으로 드문 길 6장면(s1~s6)을 일부러 지나게 한 차등 재현
-- 비교 항목 M1~M9(§5.4)와 받아들이는 차이 K1~K13(§5.5). 그 밖의 차이가 하나라도 있으면 "통과 아님".
-- 통과하면 state/h1/replay_pass.json 에 한 줄(h1.replay_entry → h1.record_replay_pass, 전역 잠금 아래)을 더하고,
-  보고서를 state/h1/reports/replay-<날짜>.md 에 쓰고, 금리 첫 저장본(R2 data/rates/*.csv)을 state/h1/rates/ 에 (없을 때만) 둔다.
+    W3     합성 시세 + 가짜 브레인(정해진 날·정해진 보유일수에만 사고팖)으로 드문 길 7장면(s1~s7)을 일부러 지나게 한 차등 재현
+- 비교 항목 M1~M9(§5.4) + M10 보유 상태(날마다 트레이너마다 종목별 주식 수·매수가·보유일수·매수일, 검토 5 P-2)와
+  받아들이는 차이 K1~K13(§5.5). 그 밖의 차이가 하나라도 있으면 "통과 아님".
+- 기준값 연구 브랜치는 커밋을 고정한다(R2_COMMIT). 이름(origin/research-r2-2026-11-04)이 다른 커밋을 가리키면 멈춘다(4).
+- 통과하면: 보고서(state/h1/reports/replay-<날짜>.md, 기록할 줄의 내용까지)와 기준값 결과(replay-<날짜>-baseline.json)를 먼저
+  쓰고 → state/h1/replay_pass.json 에 한 줄(h1.replay_entry → h1.record_replay_pass, 전역 잠금 아래) → 보고서의 "기록함" 줄을
+  채운다. 금리 첫 저장본(R2 data/rates/*.csv)은 state/h1/rates/ 에 (없을 때만) 둔다.
 
 사용
   python h1_replay.py                         # 전부(W1·W2·W3), 기록 = 이 폴더의 state/h1
   python h1_replay.py --root /tmp/x/h1        # 다른 장부 폴더에 기록(시험·확인용)
-  python h1_replay.py --windows W3            # 일부만(통과 기록은 남기지 않음 — W1·W2·W3 를 다 돌려야 기록)
+  python h1_replay.py --windows W3            # 일부만(통과 기록은 남기지 않음 — W1·W2·W3 를 다 돌려야 기록, 종료 코드 3)
   python h1_replay.py --r2-ref REF --keep-temp
-  종료 코드: 0 통과 · 2 차이(통과 아님) · 4 환경 문제(git·파일·잠금) · 9 인자 오류 · 130 사람이 멈춤(Ctrl-C)
+  종료 코드
+    0   통과 + 기록함(관문이 이 코드·환경으로 열림)
+    3   고른 창은 모두 같지만 기록하지 않음(일부 창만 돌림) — 관문은 열리지 않는다
+    2   차이(통과 아님, 기록 없음) — 임시 폴더를 자동으로 남기고 경로를 알림
+    4   환경 문제(git·R2 커밋 다름·파일·잠금·하네스·재현 도중 코드 바뀜·파이썬 3.12 미만) — 기록 없음, 임시 폴더 남김
+    9   명령 인자 오류          130  사람이 멈춤(Ctrl-C, h1.run 안에서 눌러도 바로 멈춤)
   걸리는 시간: 이 개발 컨테이너에서 전부 약 8분(W1 미·국 각 2분여, W2 3분, W3 10초 안팎). 인터넷이 필요 없다.
 
 주의
@@ -72,31 +80,38 @@ from paper_wallet import shares_within_cap
 REPO = Path(__file__).resolve().parent
 R2_REF = "origin/research-r2-2026-11-04"
 R2_DIR = "reports/research-r2-2026-11-04"
-EXIT_OK, EXIT_DIFF, EXIT_ENV, EXIT_USAGE, EXIT_INTERRUPT = 0, 2, 4, 9, 130
+R2_COMMIT = "22b7934c4b183d38bf411d132ddec5e5d7742195"   # 기준값 연구 브랜치 커밋 고정(검토 5 P-5) — 다르면 4
+EXIT_OK, EXIT_DIFF, EXIT_PARTIAL, EXIT_ENV, EXIT_USAGE, EXIT_INTERRUPT = 0, 2, 3, 4, 9, 130
+EXIT_TEXT = {0: "통과 + 기록함", 2: "차이(통과 아님, 기록 없음)", 3: "고른 창은 같지만 기록하지 않음(일부 창만 돌림)",
+             4: "환경 문제(기록 없음)", 9: "명령 인자 오류", 130: "사람이 멈춤(Ctrl-C)"}
 KST = ZoneInfo("Asia/Seoul")
 TOL_REL = 1e-9            # 상대 차 허용(M1 지수 수량·M4 매일 값·M6·M7, K12)
 TOL_CASH = 1e-6           # 현금 절대 차 허용(M1 현금 변화·M4 현금, probe4)
-W_ALLOWED = ("W2", "W3", "W4")     # M8: 재현에서 나도 되는 경고(정지·팀장 끔·W2 창에서 아직 상장 전인 종목)
+W_ALLOWED = ("W2", "W3")          # M8: 모든 창에서 나도 되는 경고(W2 거래정지·W3 팀장 끔 폴백)
+W4_ALLOWED_W2 = ("316140", "329180", "402340", "373220")   # M8: W4(종목군 시세 못 받음)는 W2 창에서 아직 상장 전인 이 넷만(설계 M8)
 
 # W3 합성 세계: 국내, 2019-06-03 세율 경계(0.30% → 0.25%)를 지나는 45봉 창(S = 2019-04-22 월요일)
 W3_HIST_START = "2018-09-03"
 W3_START, W3_END = "2019-04-22", "2019-06-21"
-W3_UNIVERSE = ("005930", "000660", "005380", "035420", "105560", "068270", "207940", "051910", "035720", "006400")
+W3_UNIVERSE = ("005930", "000660", "005380", "035420", "105560", "068270", "207940", "051910", "035720", "006400",
+               "003550")      # 003550 = s7 '0주' 장면용 아주 비싼 합성 종목(파이오니어 상한 150만 원 안에서 1주도 못 삼)
 
 WINDOWS = {
     "W1-us": {"group": "W1", "market": "us", "start": "2026-06-01", "end": "2026-11-03", "kind": "real"},
     "W1-kr": {"group": "W1", "market": "kr", "start": "2026-06-01", "end": "2026-11-03", "kind": "real"},
-    "W2-kr": {"group": "W2", "market": "kr", "start": "2018-03-01", "end": "2018-12-31", "kind": "real"},
+    "W2-kr": {"group": "W2", "market": "kr", "start": "2018-03-01", "end": "2018-12-31", "kind": "real",
+              "w4_ok": W4_ALLOWED_W2},
     "W3-kr": {"group": "W3", "market": "kr", "start": W3_START, "end": W3_END, "kind": "synthetic"},
 }
 GROUPS = ("W1", "W2", "W3")
 FINGERPRINT_WINDOWS = ("W1-us", "W1-kr", "W2-kr")      # 통과 기록 ledger_fingerprints 의 열쇠(설계 §5.6)
-REQUIRED = {"W1": ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "K"),
-            "W2": ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "K"),
-            "W3": ("M1", "M2", "M3", "M4", "M5", "M8", "M9", "K", "S")}
+REQUIRED = {"W1": ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "K"),
+            "W2": ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "K"),
+            "W3": ("M1", "M2", "M3", "M4", "M5", "M8", "M9", "M10", "K", "S")}
+CHECK_ORDER = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "K", "S")
 M_NAMES = {"M1": "체결", "M2": "보류", "M3": "주문", "M4": "매일 값", "M5": "그림자 서킷(M5′)", "M6": "지수 B&H",
-           "M7": "이자 계산", "M8": "장부 점검", "M9": "멱등·저장", "K": "받아들이는 차이의 전제(K4·K5·K9 등)",
-           "S": "W3 장면이 실제로 그 길을 지남"}
+           "M7": "이자 계산", "M8": "장부 점검", "M9": "멱등·저장", "M10": "보유 상태(주식 수·매수가·보유일수·매수일)",
+           "K": "받아들이는 차이의 전제(K3·K4·K5·K9)", "S": "W3 장면이 실제로 그 길을 지남"}
 
 
 class ReplayEnvError(Exception):
@@ -139,12 +154,26 @@ def extract_r2(ref, dst, repo=None) -> Path:
 
 
 def r2_commit(ref, repo=None) -> str | None:
+    """ref 가 가리키는 커밋(태그면 그 커밋). 없으면 None."""
     try:
-        p = subprocess.run(["git", "-C", str(Path(repo or REPO)), "rev-parse", ref], capture_output=True, text=True,
-                           timeout=60)
+        p = subprocess.run(["git", "-C", str(Path(repo or REPO)), "rev-parse", "--verify", "-q", f"{ref}^{{commit}}"],
+                           capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
-    return p.stdout.strip() if p.returncode == 0 else None
+    return p.stdout.strip() if p.returncode == 0 and p.stdout.strip() else None
+
+
+def check_r2_commit(ref, repo=None) -> str:
+    """기준값 연구 브랜치가 고정 커밋(R2_COMMIT)인지(검토 5 P-5). 맥에서 git fetch 가 그 가지를 다른 커밋으로 옮겼으면
+    (연구 가지에 실수 커밋·강제 푸시) 기준값과 입력 시세가 함께 바뀌어도 모르므로 멈춘다(ReplayEnvError → 4)."""
+    got = r2_commit(ref, repo)
+    if got is None:
+        raise ReplayEnvError(f"연구 브랜치 {ref} 를 찾지 못했어요 → 먼저 `git fetch origin research-r2-2026-11-04`")
+    if got != R2_COMMIT:
+        raise ReplayEnvError(f"연구 브랜치 {ref} 가 커밋 {got[:12]} 를 가리켜요. 재현 기준값은 커밋 {R2_COMMIT[:12]} 로 고정돼 "
+                             "있어요(연구 브랜치는 읽기만 하고 바뀌면 안 됨) → 가지가 왜 옮겨졌는지 사람이 확인. 정말 바꿔야 하면 "
+                             "h1_replay.py 의 R2_COMMIT 을 고치는 코드 변경(재현을 다시 통과)으로만")
+    return got
 
 
 # 하네스: R2 임시 폴더 안에 써 넣고 `python -I -B` 로만 돈다(지금 저장소 모듈을 읽지 않게, §7 R22).
@@ -190,12 +219,21 @@ class OperatingStartSim(sim_team.TeamSim):
 
 
 def _record_units(cls):
-    """매일 종가 행에 트레이너별 지수 단위(units_<이름>)를 더 적는 관찰용 하위 클래스(동작은 바꾸지 않음)."""
+    """관찰용 하위 클래스(동작은 바꾸지 않음): 매일 종가 뒤
+    - 종가 행에 트레이너별 지수 단위(units_<이름>)를 더 적고(M4),
+    - 트레이너별 보유 상태 {종목: [주식 수, 매수가, 보유일수, 매수일]} 를 pos_snap 에 적는다(M10, 검토 5 P-2).
+      보유일수는 R2 가 매일 시가에 그 종목 봉이 있을 때만 1 늘리는 days_held 그대로다(_decide 가 j − entry_own 과 같은지 확인하는 값)."""
     class Rec(cls):
         def _close(self, t):
             super()._close(t)
+            snap = {}
             for s in self.sleeves:
                 self.rows[-1]["units_" + s.name] = s.units(self.md.idx_code)
+                snap[s.name] = {c: [p["shares"], p["buy_price"], p["days_held"], p["buy_date"]]
+                                for c, p in s.positions.items()}
+            if not hasattr(self, "pos_snap"):
+                self.pos_snap = []
+            self.pos_snap.append({"date": self.md.dstr[t], "sleeves": snap})
     Rec.__name__ = cls.__name__ + "Rec"
     return Rec
 
@@ -246,7 +284,10 @@ def _run(md, job, arm, cb, cls, interest=False):
     cfg = sim_team.Config(market=md.key, period=(job["start"], job["end"]), arm=arm, cb=cb, interest=interest,
                           with_refs=False)
     i0, i1 = sim_team.period_range(md, cfg.period)
-    return i0, i1, cls(md, cfg, i0, i1).run()
+    sim = cls(md, cfg, i0, i1)
+    r = sim.run()
+    r["pos_snap"] = getattr(sim, "pos_snap", [])
+    return i0, i1, r
 
 
 def _daily(r):
@@ -279,6 +320,9 @@ for job in SPEC["jobs"]:
                            for o in r["orders"]],
                 "events": [{k: _plain(v) for k, v in ev.items()} for ev in r["events"]],
                 "daily": _daily(r) if cb == "none" else [],
+                "positions": [{"date": x["date"], "sleeves": {n: {c: [_plain(v) for v in p] for c, p in ps.items()}
+                                                              for n, ps in x["sleeves"].items()}}
+                              for x in r["pos_snap"]] if cb == "none" else [],
                 "over_slots": {n: int(v["over_slots"]) for n, v in r["sleeves"].items()},
                 "units_end": {n: float(v["units_end"]) for n, v in r["sleeves"].items()},
             }
@@ -468,15 +512,38 @@ def snapshot(root, market) -> dict:
     return out
 
 
+def positions_now(root, market) -> dict:
+    """지금(마지막 커밋) 장부 6개의 보유 상태 {arm: {트레이너: {종목: [주식 수, 매수가, 보유일수, 매수일]}}} — 저장된 파일에서
+    그대로 읽는다(M10, 검토 5 P-2: 엔진이 실제로 들고 있는 상태. 하루 기록에서 다시 계산하지 않음)."""
+    mk = h1._mkey(market)
+    out = {}
+    for arm in h1.ARMS:
+        out[arm] = {}
+        for tn in h1.TRAINERS:
+            d = json.loads(h1.ledger_path(mk, arm, tn, root).read_text(encoding="utf-8"))
+            out[arm][tn] = {c: [p["shares"], p["buy_price"], p["days_held"], p["buy_date"]]
+                            for c, p in d["positions"].items()}
+    return out
+
+
+def run_problems(rr) -> list:
+    """실행 결과(run_h1_window)에서 멈춘·실패한 실행 목록: 첫 실행이 0 이 아니거나 같은 날 두 번째 실행이 0 이 아님(검토 5 P-7)."""
+    return [x for x in rr["exit_codes"] if x["code"] != 0 or x["code2"] not in (0, None)]
+
+
 def run_h1_window(name, spec, src, root, log_path, *, brains=None, twice=True, progress=_say) -> dict:
     """창 하나를 새 코드로: 첫 봉 = h1.start, 그 뒤 날마다 h1.run(운영 시각). twice 이면 같은 날 한 번 더 h1.run 을 불러
-    멱등(M9)을 본다. 화면 출력(h1 의 실행 요약)은 log_path 파일로 보낸다."""
+    멱등(M9)을 본다. 날마다 첫 실행 뒤 보유 상태를 장부 파일에서 적는다(M10). h1 의 실행 요약은 log_path 파일로,
+    진행 표시(25봉마다)는 화면으로 보낸다(검토 5 P-6).
+    첫 실행이든 두 번째 실행이든 0 이 아니면 거기서 멈춘다. h1 이 130(사람이 Ctrl-C)을 돌려주면 재현 전체를 바로 멈춘다
+    (KeyboardInterrupt 를 다시 냄, 검토 5 P-7)."""
     mk = spec["market"]
     cal = src.dates(spec["start"], spec["end"])
     if not cal:
         raise ReplayEnvError(f"{name}: 대기 자산 시세에 {spec['start']} ~ {spec['end']} 날짜가 없어요")
-    codes, same, seconds = [], [], []
+    codes, same, seconds, pos = [], [], [], {}
     t0 = time.time()
+    screen = sys.stdout                                   # 진행 표시는 h1 로그가 아니라 화면으로
     with open(log_path, "w", encoding="utf-8") as logf, contextlib.redirect_stdout(logf), src.fdr_installed(), \
             no_claude(), brains_swapped(brains):
         for i, b in enumerate(cal):
@@ -486,32 +553,50 @@ def run_h1_window(name, spec, src, root, log_path, *, brains=None, twice=True, p
                 c1 = h1.start(mk, root=root, source=src, leader_mode="replay", gate=False)
             else:
                 c1 = h1.run(mk, root=root, source=src, leader_mode="replay", gate=False)
+            if c1 == h1.EXIT_INTERRUPT:
+                raise KeyboardInterrupt
             c2 = None
-            if twice and c1 == h1.EXIT_OK:
-                before = snapshot(root, mk)
-                c2 = h1.run(mk, root=root, source=src, leader_mode="replay", gate=False)
-                same.append({"bar": b, "same": before == snapshot(root, mk), "code": c2})
+            if c1 == h1.EXIT_OK:
+                pos[b] = positions_now(root, mk)
+                if twice:
+                    before = snapshot(root, mk)
+                    c2 = h1.run(mk, root=root, source=src, leader_mode="replay", gate=False)
+                    if c2 == h1.EXIT_INTERRUPT:
+                        raise KeyboardInterrupt
+                    same.append({"bar": b, "same": before == snapshot(root, mk), "code": c2})
             codes.append({"bar": b, "cmd": "start" if i == 0 else "run", "code": c1, "code2": c2})
             seconds.append(time.time() - t1)
-            if c1 != h1.EXIT_OK:
+            if c1 != h1.EXIT_OK or c2 not in (h1.EXIT_OK, None):
                 break
             if progress and (i + 1) % 25 == 0:
-                progress(f"    {name}: {i + 1}/{len(cal)}봉 ({time.time() - t0:.0f}초)")
-    return {"cal": cal, "exit_codes": codes, "twice": same, "seconds": time.time() - t0,
+                with contextlib.redirect_stdout(screen):
+                    progress(f"    {name}: {i + 1}/{len(cal)}봉 ({time.time() - t0:.0f}초)")
+    return {"cal": cal, "exit_codes": codes, "twice": same, "positions": pos, "seconds": time.time() - t0,
             "max_run_s": max(seconds) if seconds else 0.0}
 
 
-# ============================ 3. 비교 (§5.4 M1~M9, §5.5 K1~K13) ============================
+# ============================ 3. 비교 (§5.4 M1~M10, §5.5 K1~K13) ============================
 
 def _chk(ok, detail, diffs=()):
     return {"ok": bool(ok), "detail": detail, "diffs": list(diffs)[:30], "n_diffs": len(list(diffs))}
 
 
 def _rel(a, b):
+    """상대 차. 한쪽이라도 NaN·inf 면 무한대(= 늘 차이, 검토 5 P-4)."""
     a, b = float(a), float(b)
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return math.inf
     if a == b:
         return 0.0
     return abs(a - b) / max(abs(a), abs(b))
+
+
+def _abs(a, b):
+    """절대 차(현금). 한쪽이라도 NaN·inf 면 무한대(= 늘 차이, 검토 5 P-4)."""
+    a, b = float(a), float(b)
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return math.inf
+    return abs(a - b)
 
 
 _SIDE = {"매수": "buy", "매도": "sell"}
@@ -547,7 +632,7 @@ def compare_fills(states, arm, base_none, upto) -> dict:
                     diffs.append(f"{k}: 지수 수량 상대 차 {q:.2e} > {TOL_REL}")
             if x["price"] != y["price"]:
                 diffs.append(f"{k}: 체결가 {x['price']!r} ≠ {y['price']!r}")
-            c = abs(float(x["cash_delta"]) - float(y["cash"]))
+            c = _abs(x["cash_delta"], y["cash"])
             worst["cash_abs"] = max(worst["cash_abs"], c)
             if c > TOL_CASH:
                 diffs.append(f"{k}: 현금 변화 차 {c:.2e} > {TOL_CASH}")
@@ -604,7 +689,7 @@ def compare_daily(states, arm, base_none, upto) -> dict:
                 worst[key] = max(worst[key], q)
                 if q > TOL_REL:
                     diffs.append(f"{tn} {d['date']} {hk}: 상대 차 {q:.2e}")
-            c = abs(float(d["cash"]) - float(rr[f"cash_{tn}"]))
+            c = _abs(d["cash"], rr[f"cash_{tn}"])
             worst["cash_abs"] = max(worst["cash_abs"], c)
             if c > TOL_CASH:
                 diffs.append(f"{tn} {d['date']} 현금: 차 {c:.2e}")
@@ -613,8 +698,8 @@ def compare_daily(states, arm, base_none, upto) -> dict:
         for name, a, b in (("팀 평가액", v, rr["value"]), ("팀 주식", s, rr["stock"]), ("팀 지수", i, rr["index"])):
             if _rel(a, b) > TOL_REL:
                 diffs.append(f"{day} {name}: 상대 차 {_rel(a, b):.2e}")
-        if abs(c - rr["cash"]) > TOL_CASH:
-            diffs.append(f"{day} 팀 현금: 차 {abs(c - rr['cash']):.2e}")
+        if _abs(c, rr["cash"]) > TOL_CASH:
+            diffs.append(f"{day} 팀 현금: 차 {_abs(c, rr['cash']):.2e}")
     return {**_chk(not diffs, f"{len(rows)}일, 평가액 최대 상대 차 {worst['value_rel']:.1e}, 지수 단위 {worst['units_rel']:.1e}, "
                              f"현금 최대 차 {worst['cash_abs']:.1e}", diffs), **worst, "n_days": len(rows)}
 
@@ -698,8 +783,40 @@ def compare_interest(market, states, base, series) -> dict:
             "approx_gap_pct": None if not ref_r2 else (approx / ref_r2 - 1) * 100}
 
 
-def compare_window(market, states, base, *, series=None, do_m6=True, do_m7=True) -> dict:
-    """한 창의 M1~M7 비교(M8·M9 는 실행 결과로 따로). base = 하네스 결과의 그 창. 돌려줌 {"M1": …, …}."""
+POS_FIELDS = ("주식 수", "매수가", "보유일수", "매수일")
+
+
+def compare_positions(h_pos, base, dates) -> dict:
+    """M10 보유 상태(검토 5 P-2): 날마다 × 장부 × 트레이너마다 보유 종목 모음이 같고, 종목마다 주식 수·매수가·보유일수·매수일이
+    **정확히** 같다. h_pos = {날짜: {arm: {트레이너: {종목: [주식 수, 매수가, 보유일수, 매수일]}}}}(새 코드: 날마다 커밋 뒤 장부
+    파일의 positions), base = 하네스 결과(기준값: 날마다 종가 뒤 R2 sleeve.positions). 마지막 봉도 포함(체결 뒤 상태라 K1 무관).
+    보유일수는 정지일(그 종목 봉이 없는 날)엔 늘지 않아야 하므로, 정지 중 '판단 쉼' 규칙이 R2 와 같은지 여기서 직접 본다."""
+    diffs, n = [], 0
+    for arm in h1.ARMS:
+        r = {x["date"]: x["sleeves"] for x in base["arms"][arm]["none"].get("positions") or []}
+        for d in dates:
+            hd, rd = (h_pos or {}).get(d), r.get(d)
+            if hd is None or rd is None:
+                diffs.append(f"{arm} {d}: 보유 상태 기록 없음(H1 {'있음' if hd is not None else '없음'} / "
+                             f"R2 {'있음' if rd is not None else '없음'})")
+                continue
+            for tn in h1.TRAINERS:
+                a, b = hd[arm][tn], rd.get(tn, {})
+                if set(a) != set(b):
+                    diffs.append(f"{arm} {d} {tn}: 보유 종목 H1 {sorted(a)} ≠ R2 {sorted(b)}")
+                for c in sorted(set(a) & set(b)):
+                    n += 1
+                    for i, name in enumerate(POS_FIELDS):
+                        x, y = a[c][i], b[c][i]
+                        if x != y or isinstance(x, bool) or isinstance(y, bool) or \
+                                (isinstance(x, float) and not math.isfinite(x)):
+                            diffs.append(f"{arm} {d} {tn} {c} {name}: H1 {x!r} ≠ R2 {y!r}")
+    return {**_chk(not diffs, f"{len(dates)}일 × 장부 2 × 트레이너 3, 보유 종목·날 {n}건의 주식 수·매수가·보유일수·매수일", diffs),
+            "n": n}
+
+
+def compare_window(market, states, base, *, series=None, do_m6=True, do_m7=True, h_pos=None) -> dict:
+    """한 창의 M1~M7(+ h_pos 를 주면 M10) 비교(M8·M9 는 실행 결과로 따로). base = 하네스 결과의 그 창. 돌려줌 {"M1": …, …}."""
     last = base["i1"]
     out = {}
     per_arm = {}
@@ -723,6 +840,8 @@ def compare_window(market, states, base, *, series=None, do_m6=True, do_m7=True)
     if do_m7:
         out["M7"] = compare_interest(market, states, base, series) if series is not None else \
             _chk(False, "금리 자료를 읽지 못함", ["R2 data/rates 금리 파일 없음"])
+    if h_pos is not None:
+        out["M10"] = compare_positions(h_pos, base, base["dates"])
     return out
 
 
@@ -746,13 +865,16 @@ def check_ledgers(market, root, ch, env, frames) -> dict:
                                        for p in errs[:20]], "states": states, "loaded": loaded}
 
 
-def check_runs(root, market) -> dict:
-    """M8 의 실행 일지 점검: 모든 실행의 끝 줄에서 D 등급 0, W 는 W2·W3·W4 만. 경고 종류별 수를 센다."""
+def check_runs(root, market, w4_ok=()) -> dict:
+    """M8 의 실행 일지 점검: 모든 실행의 끝 줄에서 D 등급 0, W 는 창마다 허용한 것만(검토 5 P-11):
+    W2(거래정지)·W3(팀장 끔 폴백)은 모든 창, W4(종목군 시세 못 받음)는 w4_ok 종목만(W2 창의 아직 상장 전 넷). 경고 종류별 수를 센다."""
+    import re
     mk = h1._mkey(market)
     ends = [r for r in h1.read_jsonl(Path(root) / "runs.jsonl") if r.get("event") == "end" and r.get("market") == mk]
     d = Counter()
     w = Counter()
     bad_exit = Counter()
+    w4_codes = Counter()
     for r in ends:
         if r.get("exit_code") != 0:
             bad_exit[r.get("exit_code")] += 1
@@ -761,8 +883,15 @@ def check_runs(root, market) -> dict:
                 d[str(p.get("code"))] += 1
             if isinstance(p, dict) and p.get("level") == "W":
                 w[str(p.get("code"))] += 1
+                if p.get("code") == "W4":
+                    m = re.search(r"종목군 (\S+) 시세", str(p.get("detail") or ""))
+                    w4_codes[m.group(1) if m else "(종목 모름)"] += 1
+    other = sorted(k for k in w if k not in W_ALLOWED and k != "W4")
+    bad_w4 = sorted(c for c in w4_codes if c not in set(w4_ok))
+    if bad_w4:
+        other.append(f"W4({', '.join(bad_w4)})")
     return {"n_runs": len(ends), "d": dict(d), "w": dict(sorted(w.items())), "bad_exit": dict(bad_exit),
-            "w_other": sorted(k for k in w if k not in W_ALLOWED)}
+            "w_other": other, "w4_codes": dict(sorted(w4_codes.items()))}
 
 
 def check_m9(run_res, root, market, states) -> dict:
@@ -770,6 +899,7 @@ def check_m9(run_res, root, market, states) -> dict:
     같음(파일 글자에서 직접 읽은 값 == 하루 기록에 적은 값 == 엄격 읽기 값)."""
     mk = h1._mkey(market)
     diffs = [f"{x['bar']}: 두 번째 실행이 파일을 바꿈(종료 코드 {x['code']})" for x in run_res["twice"] if not x["same"]]
+    diffs += [f"{x['bar']}: 같은 날 두 번째 실행 종료 코드 {x['code']}" for x in run_res["twice"] if x["code"] != 0]
     if len(run_res["twice"]) != len(run_res["cal"]):
         diffs.append(f"두 번째 실행 {len(run_res['twice'])}번 ≠ 봉 {len(run_res['cal'])}개")
     idle = h1.idle_code(mk)
@@ -789,11 +919,35 @@ def check_m9(run_res, root, market, states) -> dict:
                 diffs)
 
 
+def replay_last_day() -> str:
+    """모든 재현 창(W1·W2·W3)의 끝 날짜 중 가장 늦은 날(K9 의 '뒤에 더한 세율 줄은 이 날보다 뒤' 기준)."""
+    return max(s["end"] for s in WINDOWS.values())
+
+
+def tax_table_problems(h_table, r2_table, last) -> list:
+    """K9 국내 매도세 표(검토 5 P-1): H1 표의 앞줄(R2 표에 있는 줄 수만큼)이 R2 표와 **똑같고**, 그 뒤에 더한 줄(사전 등록 ⑥-ii
+    세율 줄 추가)은 시행일이 날짜 순서대로이고 모든 재현 창의 마지막 날(last)보다 뒤여야 한다 — 그래야 재현 창 안의 모든 매도세가
+    R2 와 같다. 앞줄이 바뀌었거나 줄었거나, 더한 줄이 재현 창 안에 들어오면 문제 목록."""
+    h, r = h1._norm(h_table), h1._norm(r2_table)
+    if len(h) < len(r) or h[:len(r)] != r:
+        return [f"K9: 국내 매도세 표의 앞줄이 R2 표와 다름(앞줄을 바꾸거나 지움) — H1 {h[:len(r)]} / R2 {r}"]
+    out, prev = [], (r[-1][0] if r else "")
+    for row in h[len(r):]:
+        d = row[0] if isinstance(row, list) and row else None
+        if not isinstance(d, str) or d <= prev:
+            out.append(f"K9: 더한 세율 줄 {row} 의 시행일이 앞줄보다 뒤가 아님(날짜 순서)")
+        elif d <= last:
+            out.append(f"K9: 더한 세율 줄 {row} 의 시행일이 재현 창 마지막 날 {last} 보다 뒤가 아님(재현 창 안의 매도세가 바뀜)")
+        prev = d if isinstance(d, str) else prev
+    return out
+
+
 def k_checks(market, frames, universe, base, start_date, last) -> dict:
     """받아들이는 차이의 전제를 이번 자료로 다시 확인한다(설계 §5.5).
     K4 스크리너 70봉(H1) vs 60봉(R2): 창 시작 S 에 확정 봉이 1~69개인 종목이 없고, 창 안 신규 상장도 없다.
     K5 '오래된 봉' 기준: 창의 날마다 종목군 중 그날 확정 봉이 있는 종목이 있다(스캔 최근 봉 == t).
-    K9 국내 매도세 표: R2 sim_team.KR_SELL_TAX == h1.KR_SELL_TAX. K3 종목군: 국내는 R2 KR_UNIVERSE 와 같은 32개·같은 순서."""
+    K9 국내 매도세 표: R2 표가 H1 표의 앞부분이고, 더한 줄은 모든 재현 창 뒤(tax_table_problems).
+    K3 종목군: 국내는 R2 KR_UNIVERSE 와 같은 32개·같은 순서."""
     mk = h1._mkey(market)
     diffs = []
     dates = base["dates"]
@@ -817,19 +971,20 @@ def k_checks(market, frames, universe, base, start_date, last) -> dict:
     if stale:
         diffs.append(f"K5: 종목군 어느 종목에도 확정 봉이 없는 날 {stale[:5]}")
     if base.get("_kr_sell_tax") is not None and mk == "kr":
-        if [list(x) for x in h1.KR_SELL_TAX] != base["_kr_sell_tax"]:
-            diffs.append("K9: 국내 매도세 표가 R2 와 다름")
+        diffs += tax_table_problems([list(x) for x in h1.KR_SELL_TAX], base["_kr_sell_tax"], replay_last_day())
     if base.get("_kr_universe") is not None and mk == "kr" and base.get("_kind") == "real":
         if list(markets.KR_UNIVERSE.values()) != base["_kr_universe"]:
             diffs.append("K3: KR_UNIVERSE 가 R2 브랜치와 다름(32개·순서)")
     return _chk(not diffs, "K3·K4·K5·K9 전제 확인" + ("" if not diffs else f" — 어긋남 {len(diffs)}"), diffs)
 
 
-# ============================ 4. W3 합성 차등 재현 (§5.2 W3, 장면 s1~s6) ============================
+# ============================ 4. W3 합성 차등 재현 (§5.2 W3, 장면 s1~s7) ============================
 
 W3_BRAINS_TEMPLATE = '''"""h1_replay W3 가짜 브레인 (h1_replay.py 가 자동으로 만듦 — 고치지 마세요).
 같은 파일을 기준값(R2 sim_team.MarketData(brains=...))과 새 코드(team·screener.BRAINS)가 함께 읽는다.
-정해진 (종목, 날짜)에만 매수/매도 신호를 내고, 그 밖에는 '관망'. 종목은 시세의 Tag 칸("c" + 종목코드)으로 안다."""
+정해진 (종목, 날짜)에만 매수/매도 신호를 내고, 그 밖에는 '관망'. 종목은 시세의 Tag 칸("c" + 종목코드)으로 안다.
+sell_after = [(종목, k)]: 그 종목을 들고 있고 보유일수(position["days_held"])가 k 이상이 된 첫 판단에서 매도 —
+보유일수를 세는 규칙(정지일은 세지 않음)이 R2 와 다르면 매도 날이 달라져 체결 비교(M1)도 갈린다(검토 5 P-2)."""
 
 PLAN = __PLAN__
 TRAINERS = ("마라토너", "스프린터", "파이오니어")
@@ -839,6 +994,7 @@ def _make(tname):
     p = PLAN.get(tname, {})
     buys = frozenset(tuple(x) for x in p.get("buy", []))
     sells = frozenset(tuple(x) for x in p.get("sell", []))
+    after = {x[0]: int(x[1]) for x in p.get("sell_after", [])}
 
     class W3Brain:
         def add_indicators(self, df):
@@ -851,6 +1007,8 @@ def _make(tname):
                 return "매수", f"재현 W3 가짜 매수 신호 {code} {d} ({tname})"
             if position is not None and (code, d) in sells:
                 return "매도", f"재현 W3 가짜 매도 신호 {code} {d} ({tname})"
+            if position is not None and code in after and int(position["days_held"]) >= after[code]:
+                return "매도", f"재현 W3 가짜 보유일수 매도 {code} 보유 {int(position['days_held'])}일 ({tname})"
             return "관망", "재현 W3 가짜 관망"
 
     W3Brain.__name__ = "W3Brain_" + str(TRAINERS.index(tname))
@@ -895,8 +1053,11 @@ def make_w3(dst) -> dict:
     """W3 합성 세계(국내)를 dst 에 만든다: KS200.csv·<종목>.csv(원본 모양 — 정지일은 거래량 0 행)·w3_brains.py·w3_meta.json.
     장면(설계 §5.2): s1 대기 매수가 3일 정지를 가로지름 / s2 보유 종목이 정지를 가로지르고 정지 전날 매도 신호 /
     s3 같은 날 매도 + 매수(지수를 팔아 자금) / s4 A1 현금 부족 보류 / s5 쓸어 담기 문턱(남은 현금 0.99… 그대로, 1.00… 지수로) /
-    s6 세율 경계일(2019-05-31 0.30% → 2019-06-03 0.25%) 매도 + 그림자 서킷(누적 −10%·하루 −7%).
-    s5 는 A1 파이오니어의 남는 현금이 문턱 근처가 되게 그날 시가를 PaperWallet 과 같은 식으로 풀어 정한다."""
+    s6 세율 경계일(2019-05-31 0.30% → 2019-06-03 0.25%) 매도 + 그림자 서킷(누적 −10%·하루 −7%) /
+    s7 '0주' 보류(종목 상한 안에서 1주도 못 삼, 검토 5 P-10).
+    s5 는 A1 파이오니어의 남는 현금이 문턱 근처가 되게 그날 시가를 PaperWallet 과 같은 식으로 풀어 정한다.
+    s2 의 G 는 '보유일수 31 이 되면 매도'(sell_after)라, 정지 3일(W33~W35)을 보유일수로 세지 않아야 W37 신호 → W38 매도가 된다
+    (보유일수 규칙이 R2 와 다르면 매도 날이 달라짐, 검토 5 P-2)."""
     dst = Path(dst)
     dst.mkdir(parents=True, exist_ok=True)
     all_days = [d.date().isoformat() for d in pd.bdate_range(W3_HIST_START, W3_END)]
@@ -905,13 +1066,19 @@ def make_w3(dst) -> dict:
     A, B, C, D4 = "005380", "035420", "105560", "051910"         # 마라토너(30%): 셋 체결, 넷째는 현금 부족(s4)
     E, F, G, H = "000660", "068270", "207940", "005930"          # 스프린터(20%): s1·s2·s3
     X, Y = "035720", "006400"                                    # 파이오니어(15%): s5
+    Z = "003550"                                                 # 파이오니어: s7 '0주'(시가가 상한 150만 원보다 큼)
+    G_AFTER = 31                                                 # s2: G 는 보유일수 31 이 되면 매도
     rng = np.random.default_rng(20261105)
     bases = {"005930": 52000, "000660": 76000, "005380": 140000, "035420": 150000, "105560": 47000,
              "068270": 200000, "207940": 380000, "051910": 330000, "035720": 120000, "006400": 250000}
+    first10 = [c for c in W3_UNIVERSE if c != Z]                 # 씨앗 순서를 그대로 두려고 Z 는 따로 만든다
     n = len(all_days)
-    px = {c: _w3_frame(rng, all_days, bases[c]) for c in W3_UNIVERSE}
+    px = {c: _w3_frame(rng, all_days, bases[c]) for c in first10}
     idle_o, idle_c = _w3_frame(rng, all_days, 280.0, ret=0.006, gap=0.002)
-    vol = {c: [float(rng.integers(500_000, 2_000_000)) for _ in all_days] for c in W3_UNIVERSE}
+    vol = {c: [float(rng.integers(500_000, 2_000_000)) for _ in all_days] for c in first10}
+    rng_z = np.random.default_rng(20261106)
+    px[Z] = _w3_frame(rng_z, all_days, 2_500_000.0)
+    vol[Z] = [float(rng_z.integers(100_000, 300_000)) for _ in all_days]
 
     def at(k):
         return i0 + k
@@ -964,6 +1131,9 @@ def make_w3(dst) -> dict:
     px[Y][1][at(16)] = round(p_y16 * 1.001, 2)
     s5 = {"q_x": q_x, "n_y": n_y, "n_x2": n_x2, "left1": net1 - need_y, "left2": net2 - need_x2,
           "x_open_w12": p_x12, "y_open_w16": p_y16}
+    # s7: Z 를 W19 신호 → W20 시가에 사려 하면 상한(시작 예산 1천만 원 × 15%) 안에서 1주도 못 삼 → '0주' 보류
+    if shares_within_cap(budget, cap, px[Z][0][at(20)], fee, slip) != 0:
+        raise ReplayEnvError("W3 합성 세계: s7 종목이 상한 안에서 1주라도 살 수 있음(장면이 안 됨)")
 
     for code in W3_UNIVERSE:
         o, c = px[code]
@@ -980,15 +1150,16 @@ def make_w3(dst) -> dict:
     idx.to_csv(dst / "KS200.csv")
     plan = {
         "마라토너": {"buy": [[A, W[2]], [B, W[2]], [C, W[2]], [D4, W[2]]], "sell": [[A, W[28]], [B, W[29]]]},
-        "스프린터": {"buy": [[F, W[2]], [G, W[2]], [E, W[6]], [H, W[24]]], "sell": [[F, W[18]], [E, W[24]]]},
-        "파이오니어": {"buy": [[X, W[3]], [Y, W[11]], [X, W[15]]], "sell": [[X, W[11]], [Y, W[15]]]},
+        "스프린터": {"buy": [[F, W[2]], [G, W[2]], [E, W[6]], [H, W[24]]], "sell": [[F, W[18]], [E, W[24]]],
+                 "sell_after": [[G, G_AFTER]]},
+        "파이오니어": {"buy": [[X, W[3]], [Y, W[11]], [X, W[15]], [Z, W[19]]], "sell": [[X, W[11]], [Y, W[15]]]},
     }
     (dst / "w3_brains.py").write_text(W3_BRAINS_TEMPLATE.replace("__PLAN__", json.dumps(plan, ensure_ascii=False,
                                                                                          indent=1)),
                                       encoding="utf-8")
     meta = {"W": W, "plan": plan, "halts": {c: [W[k] for k in ks] for c, ks in halts.items()},
-            "codes": {"A": A, "B": B, "C": C, "D4": D4, "E": E, "F": F, "G": G, "H": H, "X": X, "Y": Y}, "s5": s5,
-            "universe": list(W3_UNIVERSE)}
+            "codes": {"A": A, "B": B, "C": C, "D4": D4, "E": E, "F": F, "G": G, "H": H, "X": X, "Y": Y, "Z": Z},
+            "s5": s5, "g_after": G_AFTER, "universe": list(W3_UNIVERSE)}
     # 저장 → 읽기에서 값이 비트까지 그대로인지(두 쪽이 같은 값을 읽어야 함)
     for code in (X, Y):
         back = read_raw(dst / f"{code}.csv")
@@ -1009,15 +1180,21 @@ def load_brains(path):
 
 
 def check_w3_scenes(states, meta) -> dict:
-    """W3 장면이 새 코드 쪽에서 실제로 그 길을 지났는지(M1~M5′ 가 같으므로 기준값도 같은 길을 지남)."""
+    """W3 장면이 새 코드 쪽에서 실제로 그 길을 지났는지(M1~M5′·M10 이 같으므로 기준값도 같은 길을 지남).
+    장면마다 '그 전제'(예: 정말 들고 있었나)까지 확인한다 — 전제가 빠져 공허하게 참이 되지 않게(검토 5 P-3)."""
     W, c = meta["W"], meta["codes"]
     out = {}
+    empty = {"halted": [], "marks": {}, "cash": math.nan, "events": []}
 
     def fills(arm, tn, date=None):
         return [f for f in states[arm][tn]["fills"] if date is None or f["date"] == date]
 
     def day(arm, tn, d):
-        return next(r for r in states[arm][tn]["days"] if r["date"] == d)
+        return next((r for r in states[arm][tn]["days"] if r["date"] == d), empty)
+
+    def held(arm, tn, code, ks):
+        """그 날들 종가에 그 종목을 들고 있었나(하루 기록 marks 는 그날 보유 종목의 평가 종가 = positions 의 열쇠)."""
+        return all(isinstance(day(arm, tn, W[k])["marks"].get(code), float) for k in ks)
     sp, ma, pi = "스프린터", "마라토너", "파이오니어"
     # s1: 대기 매수(신호 W6)가 정지 W7~W9 를 넘겨 W10 시가에 체결, A1 은 그날 지수를 팔아 자금
     ok1 = all(any(f["code"] == c["E"] and f["side"] == "buy" and f["kind"] == "stock" for f in fills(a, sp, W[10]))
@@ -1025,19 +1202,26 @@ def check_w3_scenes(states, meta) -> dict:
               and not any(f["code"] == c["E"] for k in (7, 8, 9) for f in fills(a, sp, W[k])) for a in h1.ARMS)
     ok1 = ok1 and any(f["purpose"] == f"fund:{c['E']}" for f in fills("A1", sp, W[10]))
     out["s1"] = _chk(ok1, f"{c['E']} 매수 신호 {W[6]} → 정지 {W[7]}~{W[9]} → {W[10]} 시가 체결(A1 지수 매도로 자금)")
-    # s2: 보유 F, 매도 신호 W18(정지 전날) → 정지 W19~W21 동안 대기·평가는 정지 전 종가 → W22 매도. G 는 신호 없이 정지를 넘김
+    # s2: 보유 F, 매도 신호 W18(정지 전날) → 정지 W19~W21 동안 대기·평가는 정지 전 종가 → W22 매도.
+    #     G 는 W32~W35 를 들고 신호 없이 정지(W33~W35)를 넘기고(평가는 정지 전 종가), 보유일수 31 이 된 W37 에 매도 신호 → W38 매도
     ok2 = True
+    ga = int(meta.get("g_after", 31))
     for a in h1.ARMS:
         o = [x for x in states[a][sp]["orders"] if x["code"] == c["F"] and x["action"] == "매도"]
         ok2 = ok2 and len(o) == 1 and o[0]["signal_date"] == W[18] and o[0]["done_date"] == W[22]
+        ok2 = ok2 and held(a, sp, c["F"], range(18, 22))
         ok2 = ok2 and all(c["F"] in day(a, sp, W[k])["halted"] for k in (19, 20, 21))
         ok2 = ok2 and all(day(a, sp, W[k])["marks"].get(c["F"]) == day(a, sp, W[18])["marks"].get(c["F"])
                           for k in (19, 20, 21))
+        ok2 = ok2 and held(a, sp, c["G"], range(32, 36))
         ok2 = ok2 and all(c["G"] in day(a, sp, W[k])["halted"] for k in (33, 34, 35))
         ok2 = ok2 and all(day(a, sp, W[k])["marks"].get(c["G"]) == day(a, sp, W[32])["marks"].get(c["G"])
                           for k in (33, 34, 35))
-    out["s2"] = _chk(ok2, f"{c['F']} 매도 신호 {W[18]} → 정지 {W[19]}~{W[21]} → {W[22]} 체결, {c['G']} 신호 없이 정지 "
-                          f"{W[33]}~{W[35]}(평가는 정지 전 종가)")
+        og = [x for x in states[a][sp]["orders"] if x["code"] == c["G"] and x["action"] == "매도"]
+        ok2 = ok2 and len(og) == 1 and og[0]["signal_date"] == W[37] and og[0]["done_date"] == W[38]
+        ok2 = ok2 and any(f["code"] == c["G"] and f["side"] == "sell" for f in fills(a, sp, W[38]))
+    out["s2"] = _chk(ok2, f"{c['F']} 매도 신호 {W[18]} → 정지 {W[19]}~{W[21]} → {W[22]} 체결 · {c['G']} 들고 정지 "
+                          f"{W[33]}~{W[35]}(평가는 정지 전 종가, 보유일수 안 셈) → 보유일수 {ga} 인 {W[37]} 신호 → {W[38]} 매도")
     # s3: 같은 날 W25 매도(E) + 매수(H), A1 은 모자란 만큼 지수 매도(fund:H)
     ok3 = all({(f["code"], f["side"]) for f in fills(a, sp, W[25]) if f["kind"] == "stock"} >= {(c["E"], "sell"),
                                                                                             (c["H"], "buy")}
@@ -1061,8 +1245,7 @@ def check_w3_scenes(states, meta) -> dict:
     for a in h1.ARMS:
         for code, d, rate in ((c["A"], W[29], 0.0030), (c["B"], W[30], 0.0025)):
             f = [x for x in fills(a, ma, d) if x["code"] == code and x["side"] == "sell" and x["kind"] == "stock"]
-            proceeds = f[0]["exec_price"] * f[0]["qty"] if f else None
-            got = f[0]["tax"] / proceeds if f else None
+            got = f[0]["tax"] / (f[0]["exec_price"] * f[0]["qty"]) if f else None
             rates[(a, d)] = got
             ok6 = ok6 and bool(f) and abs(got - rate) < 1e-12
     whys = [e["why"] for a in h1.ARMS for tn in h1.TRAINERS for r in states[a][tn]["days"] for e in r["events"]
@@ -1070,6 +1253,17 @@ def check_w3_scenes(states, meta) -> dict:
     ok6 = ok6 and any(w.startswith("누적") for w in whys) and any(w.startswith("하루") for w in whys)
     out["s6"] = _chk(ok6, f"매도세 {W[29]} {rates.get(('A0', W[29]))} · {W[30]} {rates.get(('A0', W[30]))}, 그림자 서킷 첫 발동 "
                           f"누적 {sum(1 for w in whys if w.startswith('누적'))}건·하루 {sum(1 for w in whys if w.startswith('하루'))}건")
+    # s7: 파이오니어 Z(아주 비싼 종목) 매수 신호 W19 → W20 시가에 상한 안에서 1주도 못 삼 → 두 장부 모두 '0주' 보류,
+    #     주문은 skipped(0주), 체결 없음, A1 은 그 매수용 지수를 팔지 않음
+    ok7 = True
+    for a in h1.ARMS:
+        sk = [x for x in states[a][pi]["skips"] if x["code"] == c["Z"] and x["date"] == W[20]]
+        oz = [x for x in states[a][pi]["orders"] if x["code"] == c["Z"] and x["action"] == "매수"]
+        ok7 = ok7 and len(sk) == 1 and sk[0]["kind"] == "0주"
+        ok7 = ok7 and len(oz) == 1 and oz[0]["status"] == "skipped" and oz[0]["why"] == "0주" and oz[0]["done_date"] == W[20]
+        ok7 = ok7 and not any(f["code"] == c["Z"] or f["purpose"] == f"fund:{c['Z']}" for f in fills(a, pi))
+    out["s7"] = _chk(ok7, f"파이오니어 {c['Z']} 매수 신호 {W[19]} → {W[20]} 시가에 상한 안에서 1주도 못 삼 → 두 장부 '0주' 보류"
+                          "(체결·지수 매도 없음)")
     return out
 
 
@@ -1086,29 +1280,71 @@ def _frames_at(src, cal_last, codes):
     return out
 
 
+def stop_cause(root, market, log_path, n_lines=12) -> list:
+    """실행이 멈춘 창의 원인(검토 5 P-8): errors.jsonl 의 마지막 L 기록(문제 코드·내용 앞 몇 줄), runs.jsonl 의 마지막
+    0 이 아닌 끝 줄(종료 코드·메시지·D 문제), h1 로그의 끝 몇 줄. 보고서·화면에 그대로 옮긴다."""
+    out = []
+    mk = h1._mkey(market)
+    try:
+        errs = [r for r in h1.read_jsonl(Path(root) / "errors.jsonl") if r.get("market") == mk]
+        if errs:
+            e = errs[-1]
+            out.append(f"errors.jsonl 마지막 L 기록(봉 {e.get('date')}, 실행 {e.get('run_id')}):")
+            for p in (e.get("problems") or [])[:6]:
+                if isinstance(p, dict):
+                    out.append(f"  {p.get('code')} {p.get('arm') or ''}/{p.get('trainer') or ''} {p.get('date') or ''}: "
+                               f"{str(p.get('detail'))[:200]}")
+            if e.get("exception"):
+                out.append(f"  예외: {e['exception']}")
+        ends = [r for r in h1.read_jsonl(Path(root) / "runs.jsonl")
+                if r.get("event") == "end" and r.get("market") == mk and r.get("exit_code") not in (0, None)]
+        if ends:
+            r = ends[-1]
+            out.append(f"runs.jsonl 마지막 실패 실행: 종료 코드 {r.get('exit_code')} — {str(r.get('message'))[:300]}")
+            for p in [p for p in r.get("problems") or [] if isinstance(p, dict) and p.get("level") in ("D", "L")][:6]:
+                out.append(f"  {p.get('level')} {p.get('code')} {p.get('date') or ''}: {str(p.get('detail'))[:200]}")
+    except OSError as e:
+        out.append(f"(일지를 읽지 못함: {e})")
+    try:
+        tail = [x for x in Path(log_path).read_text(encoding="utf-8").splitlines() if x.strip()][-n_lines:]
+        if tail:
+            out.append("h1 실행 로그 끝:")
+            out += ["  " + x[:220] for x in tail]
+    except OSError:
+        pass
+    return out
+
+
 def replay_window(name, spec, base, src, work, ch, env, *, brains=None, meta=None, series=None, progress=_say,
                   twice=True) -> dict:
-    """창 하나: 새 코드로 돌리고(run_h1_window) → 비교(M1~M7) → 장부 점검(M8) → 멱등(M9) → K 전제 → (W3) 장면."""
+    """창 하나: 새 코드로 돌리고(run_h1_window) → 비교(M1~M7·M10) → 장부 점검(M8) → 멱등(M9) → K 전제 → (W3) 장면."""
     root = Path(work) / f"root-{name}" / "h1"
     root.mkdir(parents=True)
     mk = spec["market"]
+    log_path = Path(work) / f"h1-{name}.log"
     progress(f"  [{name}] 새 코드: h1.start → 날마다 h1.run ×2 ({spec['start']} ~ {spec['end']}, 장부 폴더 {root})")
-    rr = run_h1_window(name, spec, src, root, Path(work) / f"h1-{name}.log", brains=brains, twice=twice,
-                       progress=progress)
+    rr = run_h1_window(name, spec, src, root, log_path, brains=brains, twice=twice, progress=progress)
     out = {"name": name, "spec": spec, "run": {k: rr[k] for k in ("seconds", "max_run_s")}, "root": str(root),
-           "n_bars": len(rr["cal"]), "S": rr["cal"][0], "last": rr["cal"][-1]}
-    bad = [x for x in rr["exit_codes"] if x["code"] != 0 or x["code2"] not in (0, None)]
+           "n_bars": len(rr["cal"]), "S": rr["cal"][0], "last": rr["cal"][-1], "log": str(log_path)}
+    bad = run_problems(rr)
     out["exit_codes"] = dict(Counter(x["code"] for x in rr["exit_codes"]))
+    out["exit_codes2"] = dict(Counter(x["code2"] for x in rr["exit_codes"] if x["code2"] is not None))
     checks = {}
     if bad or len(rr["exit_codes"]) != len(rr["cal"]):
         first = bad[0] if bad else None
-        detail = f"실행이 멈춤: {first['bar']} {first['cmd']} 종료 코드 {first['code']}" if first else "모든 봉을 돌지 못함"
+        if first is None:
+            detail = f"모든 봉을 돌지 못함({len(rr['exit_codes'])}/{len(rr['cal'])}봉)"
+        elif first["code"] != 0:
+            detail = f"실행이 멈춤: {first['bar']} {first['cmd']} 종료 코드 {first['code']}"
+        else:
+            detail = f"실행이 멈춤: {first['bar']} 같은 날 두 번째 run 종료 코드 {first['code2']}(첫 실행은 0)"
         if h1.code_hash()[0] != ch:                     # 재현 도중 CODE_FILES 를 고치면 지난 봉 지문이 달라 L22 로 멈춘다
             detail += " — 재현 도중 코드 파일이 바뀜(같은 코드로 처음부터 다시 돌리세요)"
-        for m in ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "K", "S"):
-            checks[m] = _chk(False, detail, [detail])
+        cause = stop_cause(root, mk, log_path)
+        for m in CHECK_ORDER:
+            checks[m] = _chk(False, detail, [detail] + cause)
         out["checks"] = checks
-        out["log"] = str(Path(work) / f"h1-{name}.log")
+        out["stopped"] = {"detail": detail, "cause": cause}
         return out
     if rr["cal"] != base["dates"]:
         checks["K"] = _chk(False, "창 날짜가 R2 와 다름", [f"H1 {rr['cal'][:2]}…{rr['cal'][-1]} / R2 {base['dates'][:2]}…"])
@@ -1117,17 +1353,19 @@ def replay_window(name, spec, base, src, work, ch, env, *, brains=None, meta=Non
         frames = _frames_at(src, rr["cal"][-1], codes)
         led = check_ledgers(mk, root, ch, env, frames)
     states = led["states"]
-    checks.update(compare_window(mk, states, base, series=series, do_m6=True, do_m7=True))
-    runs = check_runs(root, mk)
+    checks.update(compare_window(mk, states, base, series=series, do_m6=True, do_m7=True, h_pos=rr["positions"]))
+    runs = check_runs(root, mk, spec.get("w4_ok", ()))
     m8_diffs = list(led["list"])
     if runs["d"]:
         m8_diffs.append(f"자료 문제(D) {runs['d']}")
     if runs["w_other"]:
-        m8_diffs.append(f"허용 밖 경고 {runs['w_other']} (허용: {', '.join(W_ALLOWED)})")
+        m8_diffs.append(f"허용 밖 경고 {runs['w_other']} (모든 창 허용: {', '.join(W_ALLOWED)}; W4 허용 종목: "
+                        f"{', '.join(spec.get('w4_ok', ())) or '없음'})")
     if runs["bad_exit"]:
         m8_diffs.append(f"0 이 아닌 종료 코드 {runs['bad_exit']}")
     checks["M8"] = _chk(not m8_diffs, f"L 오류 {led['n_l']} · D {sum(runs['d'].values())} · 경고 {runs['w'] or '없음'} "
-                                      f"(실행 {runs['n_runs']}번)", m8_diffs)
+                                      f"(실행 {runs['n_runs']}번)" + (f" · W4 종목 {runs['w4_codes']}" if runs["w4_codes"]
+                                                                  else ""), m8_diffs)
     checks["M9"] = check_m9(rr, root, mk, states)
     kc = k_checks(mk, frames, list(src.uni), base, rr["cal"][0], rr["cal"][-1])
     if "K" in checks:
@@ -1137,13 +1375,11 @@ def replay_window(name, spec, base, src, work, ch, env, *, brains=None, meta=Non
         scenes = check_w3_scenes(states, meta)
         out["scenes"] = scenes
         miss = [s for s, v in scenes.items() if not v["ok"]]
-        checks["S"] = _chk(not miss, "장면 s1~s6 모두 지남" if not miss else f"지나지 않은 장면 {miss}",
+        checks["S"] = _chk(not miss, f"장면 {', '.join(scenes)} 모두 지남" if not miss else f"지나지 않은 장면 {miss}",
                            [f"{s}: {scenes[s]['detail']}" for s in miss])
     out["checks"] = checks
     out["fingerprint"] = h1.ledger_fingerprint(states)
     out["warnings"] = runs["w"]
-    out["ref"] = {"original": base.get("ref_original"), "a0_interest": checks.get("M7", {}).get("approx_gap_pct")}
-    out["log"] = str(Path(work) / f"h1-{name}.log")
     return out
 
 
@@ -1184,15 +1420,16 @@ def replay(groups, r2_ref, work, *, progress=_say, repo=None, specs=None) -> dic
     names = [n for n, s in windows.items() if s["group"] in groups]
     progress(f"[재현] 코드 지문 {ch0[:12]}… · 파이썬 {env0.get('python')} · pandas {env0.get('pandas')} · "
              f"FinanceDataReader {env0.get('FinanceDataReader')} · 창 {', '.join(names)}")
-    progress(f"[재현] 1/4 연구 브랜치 {r2_ref} 를 임시 폴더에 풀기")
-    r2_rep = extract_r2(r2_ref, work / "r2", repo)
+    commit = check_r2_commit(r2_ref, repo)                # 고정 커밋인지 먼저(검토 5 P-5)
+    progress(f"[재현] 1/4 연구 브랜치 {r2_ref}(커밋 {commit[:12]}, 고정값과 같음)를 임시 폴더에 풀기")
+    r2_rep = extract_r2(commit, work / "r2", repo)
     r2_root = r2_rep.parents[1]
     jobs, meta, brains = [], None, None
     for n in names:
         s = windows[n]
         job = {"name": n, "kind": s["kind"], "market": s["market"], "start": s["start"], "end": s["end"]}
         if s["kind"] == "synthetic":
-            progress("[재현]     W3 합성 시세·가짜 브레인 만들기(s1~s6)")
+            progress("[재현]     W3 합성 시세·가짜 브레인 만들기(s1~s7)")
             meta = make_w3(work / "w3")
             inside = r2_root / "h1_replay_w3"
             shutil.copytree(work / "w3", inside)              # 기준값 쪽도 같은 파일을 읽는다(설계 §5.2 W3)
@@ -1207,6 +1444,8 @@ def replay(groups, r2_ref, work, *, progress=_say, repo=None, specs=None) -> dic
     tb = time.time()
     base_all = run_harness(r2_rep, jobs, work / "harness")
     t_base = time.time() - tb
+    base_file = work / "harness" / "harness_out.json"
+    base_sha = _sha_file(base_file)
     progress(f"[재현]     기준값 끝 ({t_base:.0f}초): 모듈 {base_all['modules']}")
     if list(markets.KR_UNIVERSE.values()) != base_all["kr_universe"] and any(
             windows[n]["market"] == "kr" and windows[n]["kind"] == "real" for n in names):
@@ -1256,10 +1495,10 @@ def replay(groups, r2_ref, work, *, progress=_say, repo=None, specs=None) -> dic
     complete = set(groups) == set(GROUPS) and specs is None
     passed = all(r["ok"] for r in results.values())
     return {"code_hash": ch0, "files": files0, "env": env0, "code_changed": (ch1, env1) != (ch0, env0),
-            "r2_ref": r2_ref, "r2_commit": r2_commit(r2_ref, repo), "modules": base_all["modules"],
+            "r2_ref": r2_ref, "r2_commit": commit, "modules": base_all["modules"],
             "windows": results, "groups": sorted(groups), "complete": complete, "passed": passed,
-            "seconds": time.time() - t0, "baseline_seconds": t_base,
-            "started_at": started}
+            "seconds": time.time() - t0, "baseline_seconds": t_base, "baseline_file": str(base_file),
+            "baseline_sha256": base_sha, "started_at": started, "work": str(work)}
 
 
 def _fresh(p):
@@ -1290,47 +1529,66 @@ def _ok(b):
     return "통과" if b else "**차이**"
 
 
-def render_report(res, *, recorded, record_note, golden) -> str:
-    """재현 보고서(쉬운 말). res = replay() 결과."""
+def _verdict_text(res, golden, recorded):
+    good = res["passed"] and golden["ok"] and not res["code_changed"]
+    if not good:
+        return "통과 아님(차이 또는 환경 문제 — 기록 없음)"
+    if not res["complete"]:
+        return "고른 창은 모두 같음 — 일부 창만 돌려 통과 기록 없음(종료 코드 3, 관문은 열리지 않음)"
+    return "통과 — 통과 기록함" if recorded else "통과 — 통과 기록 중"
+
+
+def _entry_preview(entry) -> str:
+    """보고서에 적는 '기록할 줄'(files 는 파일 수와 몇 개만 — 전체는 replay_pass.json 에)."""
+    e = {k: v for k, v in entry.items() if k != "files"}
+    e["files"] = f"{len(entry.get('files') or {})}개 파일의 sha256 (전체는 replay_pass.json)"
+    return json.dumps(e, ensure_ascii=False, indent=1, sort_keys=True)
+
+
+def render_report(res, *, golden, record_status, entry=None, baseline_rel=None) -> str:
+    """재현 보고서(쉬운 말). res = replay() 결과. record_status = 통과 기록 상태 한 줄. entry = 기록할(또는 기록한) 줄."""
     L = []
     w = res["windows"]
-    good = res["passed"] and golden["ok"] and not res["code_changed"]
-    verdict = ("통과" if res["complete"] else "고른 창은 같음(일부만 돌려 통과 기록 없음)") if good else "통과 아님"
-    L.append(f"# H1 재현 보고서 — {verdict}")
+    recorded = record_status.startswith("기록함")
+    L.append(f"# H1 재현 보고서 — {_verdict_text(res, golden, recorded)}")
     L.append("")
-    L.append(f"- 만든 때: {res['started_at']} · 걸린 시간 {res['seconds']:.0f}초(기준값 {res['baseline_seconds']:.0f}초)")
+    L.append(f"- 재현 시작: {res['started_at']} · 걸린 시간 {res['seconds']:.0f}초(기준값 {res['baseline_seconds']:.0f}초)")
     L.append(f"- 코드 지문(code_hash): `{res['code_hash']}`")
     env = res["env"]
     L.append(f"- 환경(env): 파이썬 {env.get('python')} · pandas {env.get('pandas')} · numpy {env.get('numpy')} · "
              f"ta {env.get('ta')} · FinanceDataReader {env.get('FinanceDataReader')}")
-    L.append(f"- 기준값: 연구 브랜치 `{res['r2_ref']}` (커밋 `{res['r2_commit']}`), 임시 폴더에 풀어 그 안의 모듈만 읽음 "
-             f"({', '.join(f'{k}={v}' for k, v in res['modules'].items())})")
+    L.append(f"- 기준값: 연구 브랜치 `{res['r2_ref']}` → 커밋 `{res['r2_commit']}`(고정값 `{R2_COMMIT}` 과 같음을 확인), 임시 폴더에 "
+             f"풀어 그 안의 모듈만 읽음 ({', '.join(f'{k}={v}' for k, v in res['modules'].items())})")
+    if res.get("baseline_sha256"):
+        L.append(f"- 기준값 결과(하네스 출력) sha256: `{res['baseline_sha256']}`"
+                 + (f" — 파일 `{baseline_rel}`" if baseline_rel else ""))
     L.append(f"- 돌린 창: {', '.join(res['groups'])}" + ("" if res["complete"] else " (일부만 — 통과 기록은 W1·W2·W3 를 다 돌릴 때만)"))
     L.append(f"- 자료 받기 골든: {golden['detail']}")
-    L.append(f"- 통과 기록: {'replay_pass.json 에 한 줄 더함' if recorded else '남기지 않음'} — {record_note}")
+    L.append(f"- 통과 기록: {record_status}")
+    if not (res["passed"] and golden["ok"] and not res["code_changed"]) and res.get("work"):
+        L.append(f"- 임시 폴더(원인 확인용으로 남겨 둠): `{res['work']}` — 창마다 h1 실행 로그 `h1-<창>.log`, 재현 장부 "
+                 "`root-<창>/h1/`(runs.jsonl·errors.jsonl), 기준값 `harness/harness_out.json`")
     L.append("")
     L.append("## 무엇을 했나 (쉬운 설명)")
     L.append("")
-    L.append("- **기준값**: 연구 때 쓴 시뮬레이터(R2 `sim_team.py`)를 연구 브랜치 그대로 임시 폴더에 풀어 돌렸다. 운영과 같은 시작 "
-             "규칙(첫 봉 S 는 돈만 넣고, 다음 봉 S+1 시가에 쉬는 돈을 먼저 전부 지수로 산 뒤 그날 주문)을 넣은 하위 클래스"
-             "(`OperatingStartSim`, 설계 §5.1)를 썼다. 서킷(손실 한도)은 끈 것과 켠 것(그림자 비교용)을 둘 다 돌렸다.")
+    L.append("- **기준값**: 연구 때 쓴 시뮬레이터(R2 `sim_team.py`)를 연구 브랜치 그대로(커밋 고정) 임시 폴더에 풀어 돌렸다. 운영과 "
+             "같은 시작 규칙(첫 봉 S 는 돈만 넣고, 다음 봉 S+1 시가에 쉬는 돈을 먼저 전부 지수로 산 뒤 그날 주문)을 넣은 하위 클래스"
+             "(`OperatingStartSim`, 설계 §5.1)를 썼다. 서킷(손실 한도)은 끈 것과 켠 것(그림자 비교용)을 둘 다 돌렸다. 날마다 종가 뒤 "
+             "보유 상태(종목별 주식 수·매수가·보유일수·매수일)도 적었다.")
     L.append("- **새 코드**: 임시 장부 폴더에서 `h1.start` 한 번, 그 뒤 날마다 `h1.run` 을 실제 운영 시각(국내 그날 23:05, "
              "미국 다음 평일 아침 07:10)으로 불렀다. 같은 날 한 번 더 불러 아무 파일도 바뀌지 않는지(멱등)도 봤다. 시세는 연구 "
-             "브랜치의 지난 시세를 그날까지만 잘라 운영 받기 층(`h1_data`)을 그대로 거쳐 넣었다. 팀장(claude)은 부르지 않았다.")
+             "브랜치의 지난 시세를 그날까지만 잘라 운영 받기 층(`h1_data`)을 그대로 거쳐 넣었다. 팀장(claude)은 부르지 않았다. "
+             "날마다 저장된 장부의 보유 상태를 읽어 두었다.")
     L.append("- **비교**: 체결 하나하나·보류·주문·매일 평가액·그림자 서킷 첫 날·지수 사서 들고 있기·이자 계산·장부 점검·멱등"
-             "(M1~M9). 미리 정해 둔 '받아들이는 차이'(K1~K13) 밖의 차이가 하나라도 있으면 통과가 아니다.")
+             "(M1~M9)·보유 상태(M10). 미리 정해 둔 '받아들이는 차이'(K1~K13) 밖의 차이가 하나라도 있으면 통과가 아니다.")
     L.append("")
     L.append("## 창별 결과")
     L.append("")
-    head = "| 항목 | " + " | ".join(w.keys()) + " |"
-    L.append(head)
+    L.append("| 항목 | " + " | ".join(w.keys()) + " |")
     L.append("|" + "---|" * (len(w) + 1))
-    for m in ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "K", "S"):
+    for m in CHECK_ORDER:
         cells = []
         for n, r in w.items():
-            if m not in REQUIRED[r["spec"]["group"]] and m not in r["checks"]:
-                cells.append("–")
-                continue
             c = r["checks"].get(m)
             if c is None:
                 cells.append("–")
@@ -1345,12 +1603,16 @@ def render_report(res, *, recorded, record_note, golden) -> str:
         L.append("")
         L.append(f"- 시장 {s['market']} · 창 {s['start']} ~ {s['end']} · 실제 S {r.get('S')} ~ 마지막 봉 {r.get('last')} "
                  f"({r.get('n_bars')}봉) · 새 코드 실행 {r['run']['seconds']:.0f}초(한 번 실행 최대 {r['run']['max_run_s']:.1f}초)")
+        if r.get("stopped"):
+            L.append(f"- **실행이 멈춤**: {r['stopped']['detail']}")
+            for x in r["stopped"]["cause"]:
+                L.append(f"    - {x}")
         if r.get("warnings") is not None:
             L.append(f"- 경고(멈추지 않음, 실행마다 센 수 — 같은 날 두 번째 실행 포함): {r['warnings'] or '없음'} — 허용: "
-                     "W2 거래정지·W3 팀장 끔(재현)·W4 아직 상장 전 종목")
-        for m in ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "K", "S"):
+                     f"W2 거래정지·W3 팀장 끔(재현)" + (f"·W4 아직 상장 전 {', '.join(s['w4_ok'])}" if s.get("w4_ok") else ""))
+        for m in CHECK_ORDER:
             c = r["checks"].get(m)
-            if c is None:
+            if c is None or r.get("stopped"):
                 continue
             L.append(f"- {m} {M_NAMES[m]}: {_ok(c['ok'])} — {c['detail']}")
             for d in c["diffs"][:10]:
@@ -1365,7 +1627,7 @@ def render_report(res, *, recorded, record_note, golden) -> str:
     L.append("## 받아들인 차이 (설계 §5.5)")
     L.append("")
     k_rows = [
-        ("K1", "R2 는 창 마지막 봉에서 판단을 하지 않음", "마지막 봉에 생긴 주문·빈자리 부족·그림자 서킷을 비교에서 뺐다(체결·매일 값은 포함)"),
+        ("K1", "R2 는 창 마지막 봉에서 판단을 하지 않음", "마지막 봉에 생긴 주문·빈자리 부족·그림자 서킷을 비교에서 뺐다(체결·매일 값·보유 상태는 포함)"),
         ("K2", "R2 끝값은 매도 비용을 뺀 값", "매일 종가 평가액만 비교, 지수 B&H 마지막 날은 단위 × 종가로"),
         ("K3", "종목군", "재현은 R2 종목군을 강제(미국 universe.json 순서, 국내 KR_UNIVERSE — R2 브랜치와 같은 32개·순서 확인)"),
         ("K4", "스크리너 70봉(H1) vs 60봉(R2)", "창 시작 때 확정 봉 1~69개인 종목·창 안 신규 상장이 없는지 매번 확인(K 칸)"),
@@ -1373,10 +1635,11 @@ def render_report(res, *, recorded, record_note, golden) -> str:
         ("K6", "team.py 의 저장 안 하는 날", "H1 은 매일 저장 → R2 와 같은 쪽(운영 장부와의 차이일 뿐)"),
         ("K7", "현금 이자", "기준값을 interest=False 로, 이자는 M7 로 따로"),
         ("K8", "팀장 판정 칸", "재현은 팀장 끔(replay_no_llm) → 비교하지 않음. ⑧ 폴백 비율 대신: **재현은 팀장 끔**"),
-        ("K9", "국내 매도세", "R2 와 H1 표가 같은지 확인(K 칸)"),
+        ("K9", "국내 매도세", f"R2 표에 있는 줄은 H1 표와 똑같고, 뒤에 더한 줄(⑥-ii)은 시행일이 모든 재현 창 끝({replay_last_day()}) "
+                         "뒤인지 확인(K 칸)"),
         ("K10", "지표 계산 길이", "재현은 R2 처럼 처음부터(운영은 2024-06-01 부터, 차이는 무시할 크기)"),
         ("K11", "빈자리 부족 합계", "트레이너 합계만 비교(K1 뺀 뒤 같아야 함, M3 안)"),
-        ("K12", "부동소수점 더하는 순서", "M1·M4 의 허용 오차 안(상대 1e-9, 현금 1e-6)"),
+        ("K12", "부동소수점 더하는 순서", "M1·M4 의 허용 오차 안(상대 1e-9, 현금 1e-6). NaN·inf 는 늘 차이"),
         ("K13", "시작 규칙", "기준값이 운영 시작 규칙 하위 클래스라 차이 아님(원래 sim_team 과의 차이는 아래 참고)"),
     ]
     L.append("| # | 차이 | 이번 재현에서 |")
@@ -1384,12 +1647,19 @@ def render_report(res, *, recorded, record_note, golden) -> str:
     for k, a, b in k_rows:
         L.append(f"| {k} | {a} | {b} |")
     L.append("")
-    L.append("## 설명되지 않은 차이")
+    L.append("## 설명되지 않은 차이 (원인)")
     L.append("")
     any_diff = False
     for n, r in w.items():
-        for m, c in r["checks"].items():
-            if not c["ok"]:
+        if r.get("stopped"):
+            any_diff = True
+            L.append(f"- {n}: {r['stopped']['detail']}")
+            for x in r["stopped"]["cause"]:
+                L.append(f"    - {x}")
+            continue
+        for m in CHECK_ORDER:
+            c = r["checks"].get(m)
+            if c is not None and not c["ok"]:
                 any_diff = True
                 L.append(f"- {n} {m} {M_NAMES.get(m, m)}: {c['detail']}")
                 for d in c["diffs"][:15]:
@@ -1403,6 +1673,13 @@ def render_report(res, *, recorded, record_note, golden) -> str:
     if not any_diff:
         L.append("- 없음")
     L.append("")
+    if entry is not None:
+        L.append("## 통과 기록 줄 (replay_pass.json 에 더하는 내용)")
+        L.append("")
+        L.append("```json")
+        L.append(_entry_preview(entry))
+        L.append("```")
+        L.append("")
     L.append("## 참고 (통과 조건 아님)")
     L.append("")
     for n, r in w.items():
@@ -1425,71 +1702,105 @@ def _report_path(root, day) -> Path:
     base = h1.h1_path(root, "reports")
     p = base / f"replay-{day}.md"
     i = 2
-    while p.exists():
+    while p.exists() or p.with_name(p.stem + "-baseline.json").exists():
         p = base / f"replay-{day}-{i}.md"
         i += 1
     return p
 
 
+def _now_iso():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def finish(res, root, r2_rep=None, *, progress=_say) -> int:
-    """결과로 종료 코드를 정하고 파일을 쓴다. 통과(모든 창·자료 골든·코드 그대로)면: replay_pass.json 한 줄(h1.replay_entry →
-    record_replay_pass, 그 안에서 전역 잠금) → 전역 잠금 아래 보고서·금리 첫 저장본. 아니면 기록 없이 보고서만, 차이 표를 화면에."""
+    """결과로 종료 코드를 정하고 파일을 쓴다(검토 5 P-7·P-8).
+    통과(모든 창·자료 받기 골든·코드 그대로)면 순서대로:
+      1 전역 잠금 아래 보고서(기록할 줄의 내용까지, 상태 '기록 전')와 기준값 결과 replay-<날짜>-baseline.json 을 쓴다
+      2 replay_pass.json 에 한 줄(h1.replay_entry → record_replay_pass — 그 안에서 전역 잠금). passed_at = 기록하는 때,
+        started_at = 재현 시작 때, baseline_sha256 = 기준값 결과 파일의 sha256
+      3 전역 잠금 아래 보고서의 '통과 기록' 줄을 '기록함'으로 채우고, 금리 첫 저장본(없을 때만)을 둔다.
+    종료 코드: 0 통과+기록 / 3 고른 창은 같지만 일부 창이라 기록 안 함 / 2 차이 / 4 코드·환경이 바뀜·기록 실패."""
     root = h1._root(root)
-    progress("[재현] 4/4 자료 받기 골든 확인 → (통과면) 통과 기록·보고서·금리 첫 저장본")
+    progress("[재현] 4/4 자료 받기 골든 확인 → (통과면) 보고서 → 통과 기록 → 보고서에 '기록함'·금리 첫 저장본")
     golden = data_golden_ok()
     ok = res["passed"] and golden["ok"] and not res["code_changed"]
     day = datetime.now().astimezone().date().isoformat()
-    recorded, note = False, ""
+    with h1.h1_lock(root):
+        rpath = _report_path(root, day)
+    bpath = rpath.with_name(rpath.stem + "-baseline.json")
+    rel, brel = "/".join(rpath.relative_to(root).parts), "/".join(bpath.relative_to(root).parts)
+    has_base = bool(res.get("baseline_file")) and Path(res["baseline_file"]).exists()
+    entry, status = None, ""
     if res["code_changed"]:
-        note = "재현 도중 코드·환경이 바뀜(같은 코드로 다시 돌리세요)"
-    elif not res["passed"] or not golden["ok"]:
-        note = "차이가 있어 통과 아님"
+        status = "남기지 않음 — 재현 도중 코드·환경이 바뀜(같은 코드로 처음부터 다시 돌리세요)"
+    elif not ok:
+        status = "남기지 않음 — 차이가 있어 통과 아님"
     elif not res["complete"]:
-        note = "일부 창만 돌림(W1·W2·W3 를 다 돌려야 기록)"
-    rpath = _report_path(root, day)
-    rel = "/".join(rpath.relative_to(root).parts)
-    if ok and res["complete"]:
+        status = "남기지 않음 — 일부 창만 돌림(W1·W2·W3 를 다 돌려야 기록, 종료 코드 3)"
+    else:
         fps = {n: res["windows"][n]["fingerprint"] for n in FINGERPRINT_WINDOWS}
         with contextlib.redirect_stdout(io.StringIO()):          # 자료 받기 골든의 '받기 실패 흉내' 안내 줄은 화면에 내지 않음
-            entry = h1.replay_entry(fps, passed_at=res["started_at"], report=rel, r2_ref=res["r2_ref"],
-                                    r2_commit=res["r2_commit"], windows=sorted(res["windows"]))
+            entry = h1.replay_entry(fps, started_at=res["started_at"], passed_at=_now_iso(), report=rel,
+                                    baseline=brel if has_base else None, baseline_sha256=res.get("baseline_sha256"),
+                                    r2_ref=res["r2_ref"], r2_commit=res["r2_commit"], windows=sorted(res["windows"]))
         if entry["code_hash"] != res["code_hash"] or h1.env_key(entry["env"]) != h1.env_key(res["env"]):
-            note = "기록 직전 코드·환경이 재현 때와 다름 → 기록하지 않음"
+            status = "남기지 않음 — 기록 직전 코드·환경이 재현 때와 다름"
             res["code_changed"] = True
+            entry = None
         else:
-            try:
-                n = h1.record_replay_pass(entry, root)
-            except h1.H1Refused as e:
-                raise ReplayEnvError(f"통과 기록을 쓰지 못함(종료 코드 {e.code}): {e}")
-            recorded = True
-            note = f"replay_pass.json {n}번째 줄"
-    text = render_report(res, recorded=recorded, record_note=note or "통과", golden=golden)
-    with h1.h1_lock(root):                                     # 보고서·금리 저장본 = 전역 잠금(h1_report 의 금리 받기와 같은 잠금)
-        h1._write_atomic(rpath, text.encode("utf-8"))
+            status = "기록 전 — 이 보고서를 먼저 쓰고 바로 아래 줄을 replay_pass.json 에 더함(이 줄이 남아 있으면 기록이 실패한 것)"
+
+    def write(text):
+        with h1.h1_lock(root):                                 # 보고서·기준값·금리 저장본 = 전역 잠금
+            if has_base and not bpath.exists():
+                blob = Path(res["baseline_file"]).read_bytes()
+                if h1._sha256_bytes(blob) != res.get("baseline_sha256"):
+                    raise ReplayEnvError("기준값 결과 파일이 재현 도중 바뀜")
+                h1._write_atomic(bpath, blob)
+            h1._write_atomic(rpath, text.encode("utf-8"))
+
+    write(render_report(res, golden=golden, record_status=status, entry=entry, baseline_rel=brel if has_base else None))
+    progress(f"[재현] 보고서: {rpath}" + (f" · 기준값 결과: {bpath.name}" if has_base else ""))
+    recorded = False
+    if entry is not None:
+        try:
+            n = h1.record_replay_pass(entry, root)
+        except h1.H1Refused as e:
+            write(render_report(res, golden=golden, entry=entry, baseline_rel=brel if has_base else None,
+                                record_status=f"기록 실패(종료 코드 {e.code}): {e}"))
+            raise ReplayEnvError(f"통과 기록을 쓰지 못함(종료 코드 {e.code}): {e}")
+        recorded = True
+        write(render_report(res, golden=golden, entry=entry, baseline_rel=brel if has_base else None,
+                            record_status=f"기록함 — replay_pass.json {n}번째 줄(passed_at {entry['passed_at']})"))
         copied = []
-        if recorded and r2_rep is not None:
-            src = Path(r2_rep) / "data" / "rates"
-            for f in sorted(src.glob("*.csv")):
-                dst = h1.h1_path(root, "rates", f.name)
-                if not dst.exists():
-                    h1._write_atomic(dst, f.read_bytes())
-                    copied.append(f.name)
-    progress(f"[재현] 보고서: {rpath}")
-    if copied:
-        progress(f"[재현] 금리 첫 저장본을 rates/ 에 둠: {', '.join(copied)}")
-    if recorded:
-        progress(f"[재현] 통과 — {note}")
+        if r2_rep is not None:
+            with h1.h1_lock(root):
+                src = Path(r2_rep) / "data" / "rates"
+                for f in sorted(src.glob("*.csv")):
+                    dst = h1.h1_path(root, "rates", f.name)
+                    if not dst.exists():
+                        h1._write_atomic(dst, f.read_bytes())
+                        copied.append(f.name)
+        if copied:
+            progress(f"[재현] 금리 첫 저장본을 rates/ 에 둠: {', '.join(copied)}")
+        progress(f"[재현] 통과 — replay_pass.json {n}번째 줄 (종료 코드 0)")
         return EXIT_OK
     if ok and not res["complete"]:
-        progress(f"[재현] 고른 창은 모두 같음 — {note}")
-        return EXIT_OK
+        progress("[재현] 고른 창은 모두 같음 — 그러나 일부 창만 돌려 통과 기록을 남기지 않음 → 관문은 열리지 않음 (종료 코드 3)")
+        return EXIT_PARTIAL
     if res["code_changed"]:
-        progress(f"[재현] {note}")
+        progress(f"[재현] {status} (종료 코드 4)")
         return EXIT_ENV
     progress("[재현] 통과 아님 — 차이 표:")
     for n, r in res["windows"].items():
-        for m, c in r["checks"].items():
-            if not c["ok"]:
+        if r.get("stopped"):
+            progress(f"    {n}: {r['stopped']['detail']}")
+            for x in r["stopped"]["cause"][:8]:
+                progress(f"        {x}")
+            continue
+        for m in CHECK_ORDER:
+            c = r["checks"].get(m)
+            if c is not None and not c["ok"]:
                 progress(f"    {n} {m} {M_NAMES.get(m, m)}: {c['detail']}")
                 for d in c["diffs"][:5]:
                     progress(f"        - {d}")
@@ -1510,16 +1821,22 @@ class _Parser(argparse.ArgumentParser):
 
 
 def _parser():
-    p = _Parser(prog="h1_replay.py", description="H1 재현(단계 5): R2 연구 시뮬레이터와 새 코드가 같은 매매·숫자를 내는지 비교. "
-                                                 "종료 코드 0 통과 · 2 차이 · 4 환경 · 9 인자 · 130 Ctrl-C")
+    p = _Parser(prog="h1_replay.py", formatter_class=argparse.RawDescriptionHelpFormatter,
+                description="H1 재현(단계 5): R2 연구 시뮬레이터와 새 코드가 같은 매매·숫자를 내는지 비교.",
+                epilog="종료 코드\n" + "\n".join(f"  {k:>3}  {v}" for k, v in EXIT_TEXT.items()))
     p.add_argument("--root", default=None, help="통과 기록·보고서를 쓸 H1 폴더(기본: 이 폴더의 state/h1)")
-    p.add_argument("--r2-ref", default=R2_REF, help=f"연구 브랜치(기본 {R2_REF})")
-    p.add_argument("--windows", default="W1,W2,W3", help="돌릴 창(쉼표로, 기본 W1,W2,W3)")
-    p.add_argument("--keep-temp", action="store_true", help="임시 폴더(풀어 둔 R2·재현 장부·실행 로그)를 지우지 않음")
+    p.add_argument("--r2-ref", default=R2_REF, help=f"연구 브랜치(기본 {R2_REF}). 커밋 {R2_COMMIT[:12]} 를 가리켜야 함")
+    p.add_argument("--windows", default="W1,W2,W3", help="돌릴 창(쉼표로, 기본 W1,W2,W3). 일부만이면 기록 없이 종료 코드 3")
+    p.add_argument("--keep-temp", action="store_true", help="통과해도 임시 폴더(풀어 둔 R2·재현 장부·실행 로그)를 남김"
+                                                            "(차이·환경 문제면 늘 남김)")
     return p
 
 
 def cli(argv=None) -> int:
+    if sys.version_info < (3, 12):                   # tarfile filter="data" 등(검토 5 P-12) — 맥 venv 는 3.13
+        _say(f"[재현] 환경 문제(종료 코드 4): 파이썬 {sys.version.split()[0]} — 3.12 이상(H1 venv 는 3.13, requirements-h1.txt)"
+             "으로 돌리세요")
+        return EXIT_ENV
     try:
         a = _parser().parse_args(sys.argv[1:] if argv is None else argv)
         groups = [g.strip().upper() for g in a.windows.split(",") if g.strip()]
@@ -1534,26 +1851,32 @@ def cli(argv=None) -> int:
         _say(f"h1_replay.py: 명령 인자 오류 — {e}  (python h1_replay.py -h)")
         return EXIT_USAGE
     work = Path(tempfile.mkdtemp(prefix="h1-replay-"))
-    _say(f"[재현] 임시 폴더 {work}{' (남겨 둠)' if a.keep_temp else ''} · 기록할 곳 {root}")
+    _say(f"[재현] 임시 폴더 {work} · 기록할 곳 {root}")
+    code = EXIT_DIFF
     try:
         res = replay(groups, a.r2_ref, work)
-        return finish(res, root, work / "r2" / R2_DIR)
+        code = finish(res, root, work / "r2" / R2_DIR)
     except ReplayEnvError as e:
         _say(f"[재현] 환경 문제(종료 코드 4): {e}")
-        return EXIT_ENV
+        code = EXIT_ENV
     except KeyboardInterrupt:
-        _say("[재현] 사람이 멈춤(Ctrl-C) — 통과 기록 없음")
-        return EXIT_INTERRUPT
+        _say("[재현] 사람이 멈춤(Ctrl-C) — 통과 기록 없음 (종료 코드 130)")
+        code = EXIT_INTERRUPT
     except OSError as e:
         _say(f"[재현] 환경 문제(종료 코드 4) {type(e).__name__}: {e}")
-        return EXIT_ENV
+        code = EXIT_ENV
     except Exception as e:      # noqa: BLE001 — 예상 밖 오류는 통과가 아니다(기록 없음)
-        _say(f"[재현] 예상 밖 오류 {type(e).__name__}: {e} — 통과 아님(기록 없음)")
+        _say(f"[재현] 예상 밖 오류 {type(e).__name__}: {e} — 통과 아님(기록 없음, 종료 코드 2)")
         traceback.print_exc()
-        return EXIT_DIFF
+        code = EXIT_DIFF
     finally:
-        if not a.keep_temp:
+        keep = a.keep_temp or code in (EXIT_DIFF, EXIT_ENV)
+        if keep:
+            _say(f"[재현] 임시 폴더를 남겨 둠(원인 확인용): {work}")
+        else:
             shutil.rmtree(work, ignore_errors=True)
+    _say(f"[재현] 끝: 종료 코드 {code} — {EXIT_TEXT.get(code, '?')}")
+    return code
 
 
 if __name__ == "__main__":
