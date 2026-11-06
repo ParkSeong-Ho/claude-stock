@@ -65,6 +65,7 @@
 > - H1 명령은 **언제나 `/Users/나/claude-stock-h1` 폴더에서** 쳐요. 그래서 명령 상자는 `cd /Users/나/claude-stock-h1` 와 `P=/Users/나/.venv-h1/bin/python` 두 줄로 시작해요(새 터미널을 열면 `P` 가 사라지니 매번 다시 쳐요).
 > - **멈춤 규칙**: pytest 실패, 지킴이 실패, 재현 종료 코드가 0 이 아님, 그 밖에 예상과 다른 글이 나오면 **다음으로 넘어가지 말고** 화면 글을 그대로 Claude Code 에 보여 주세요.
 > - 걸리는 시간(대략): pytest 4분, 지킴이 5분, 재현 8분. 이 셋은 멈춘 것처럼 보여도 Ctrl-C 하지 마세요(start 는 §5 참고).
+> - **도우미(지름길)**: 손으로 칠 것을 줄이려고 `tools/h1_mac.py` 를 만들어 두었어요. §3.3 의 venv 만들기~§3.4 전부는 `setup`, §3.7 은 `check`, §4.1 의 plist 세 개는 `plists` 한 줄이에요(아래 각 절에 적었어요). 도우미가 멈추면 그 화면을 그대로 Claude Code 에 보여 주세요. 손으로 하는 길도 그대로 남겨 두었어요.
 
 ### 3.1 파이썬 3.13.18 설치 (brew 의 파이썬은 쓰지 않기)
 - 장부의 "환경 지문"에 파이썬 **패치 버전**(3.13.**18**)까지 들어가요. brew 파이썬으로 venv 를 만들면 `brew upgrade` 한 번에 3.13.19 가 되어 **매 실행 종료 코드 3**(재현 안 한 환경)이 나요.
@@ -101,6 +102,14 @@ mkdir -p logs
 - 이 폴더의 `state/` 는 운영 폴더의 `state/` 와 **다른 폴더**예요. 운영 장부는 여기 없어요.
 
 ### 3.4 시험 → 지킴이 → 재현 → 지문 확인 (이 순서 그대로)
+
+**지름길**: §3.3 의 `git worktree add` 까지 한 뒤, 아래 두 줄이면 §3.3 의 venv·라이브러리와 이 절 전부를 순서대로 해요(약 20분). 하나라도 실패하면 거기서 멈추고 "`--from N` 으로 이어서"를 알려 줘요.
+```
+cd /Users/나/claude-stock-h1
+/Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 tools/h1_mac.py setup
+```
+마지막에 `[setup] 모두 통과` 가 나오면 §3.5 로 가요. 아래는 같은 일을 손으로 하는 길이에요.
+
 ```
 cd /Users/나/claude-stock-h1
 P=/Users/나/.venv-h1/bin/python
@@ -150,6 +159,14 @@ env -i HOME=$HOME PATH=/Users/나/.local/bin:/opt/homebrew/bin:/usr/bin:/bin sh 
 - launchd 는 **잠자기**에서 깨면 놓친 작업을 한 번 돌리지만, **껐다 켜면** 돌리지 않아요. 다음 예정 실행이 밀린 봉을 5개까지 따라잡지만, **따라잡은 봉은 "늦은 봉"으로 세요**(팀장 없이 규칙만, 판정 창 전체 10개까지). 그래서 판정 창 동안은 맥을 끄지 않는 게 좋아요.
 
 ### 3.7 시작 전 확인
+
+**지름길**(아래 1~5를 한 번에):
+```
+cd /Users/나/claude-stock-h1
+/Users/나/.venv-h1/bin/python tools/h1_mac.py check
+```
+마지막에 `[check] 모두 맞음` 이 나오면 됩니다. KS200 날짜만은 눈으로 봐요(어제 날짜인지). 아래는 손으로 하는 길이에요.
+
 ```
 cd /Users/나/claude-stock-h1
 P=/Users/나/.venv-h1/bin/python
@@ -185,6 +202,15 @@ start 전에 켜 두면 매 실행이 종료 코드 8(장부 없음) 알림을 �
 - 팀장 호출이 하루에 대략 **두 배**가 돼요(운영 + H1, 같은 구독 한도).
 
 ### 4.1 plist 파일 만들기
+
+**지름길(권장)**: 아래 두 줄이면 국내·미국·월간 보고서 plist 세 개를 `/Users/나/Library/LaunchAgents/` 에 만들어요. claude 위치(§3.5)를 스스로 찾아 PATH 맨 앞에 넣고, 파일이 깨지지 않게 만들어 다시 읽어 확인해요. 켜는 명령은 화면에 보여 주기만 하니 §4.2 대로 쳐요. 휴대폰으로 상태를 보고 싶으면 끝에 `--icloud-status` 를 붙여요(§6).
+```
+cd /Users/나/claude-stock-h1
+/Users/나/.venv-h1/bin/python tools/h1_mac.py plists
+```
+`claude 를 찾지 못했어요` 가 나오면 `which claude` 로 나온 경로를 `--claude` 뒤에 붙여 다시 쳐요(예 `… plists --claude /Users/나/.local/bin/claude`). 이 길을 썼으면 아래 nano 길과 §7 의 보고서 plist 만들기는 건너뛰어요.
+
+**손으로 하는 길**:
 plist 는 터미널 편집기 `nano` 로 만들어요(텍스트 편집기 앱은 서식이 섞여 파일이 깨질 수 있어요).
 ```
 nano /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
