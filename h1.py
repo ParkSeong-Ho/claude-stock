@@ -533,6 +533,12 @@ class Leader:
     def _stamp(self):
         return _aware(self.now()).isoformat(timespec="seconds")
 
+    def prompt_context(self):
+        """H1 전용 프롬프트 정보(설계 Q4, 2026-11-06 사용자 결정): 기준 날짜(이 봉)·시장·종목 이름.
+        이름은 인터넷 없이 아는 것만: 국내는 markets.KR_UNIVERSE(이름 → 코드)를 뒤집은 것, 미국은 없음(티커 그대로)."""
+        names = {code: name for name, code in markets.KR_UNIVERSE.items()} if self.market == "kr" else {}
+        return {"market": self.market, "date": self.date, "names": names}
+
     def _next_call_no(self, trainer):
         prefix = f"{self.market}|{self.date}|{trainer}|"
         nums = []
@@ -580,7 +586,8 @@ class Leader:
                 self.late_calls += 1
         if status is None:
             ask = self.ask if self.ask is not None else analyst.analyze_logged
-            result, meta = ask(trainer, todo, timeout=self.timeout, now=self.now, cli_version=self.cli_version)
+            result, meta = ask(trainer, todo, timeout=self.timeout, now=self.now, cli_version=self.cli_version,
+                               context=self.prompt_context())
             self.llm_calls += 1
             meta = dict(meta or {})
             status = meta.get("status") or "bad_json"

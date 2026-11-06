@@ -145,11 +145,13 @@ class FakeAsk:
         self.per_call = per_call
         self.calls = []
         self.cwds = []
+        self.contexts = []
         self.clock_after = clock_after
 
-    def __call__(self, trainer, candidates, timeout=None, now=None, cli_version=None, cwd=None):
+    def __call__(self, trainer, candidates, timeout=None, now=None, cli_version=None, cwd=None, context=None):
         codes = [c["code"] for c in candidates]
         self.calls.append((trainer, codes))
+        self.contexts.append(context)              # 설계 Q4(2026-11-06): H1 전용 프롬프트 정보(날짜·시장·이름)
         self.cwds.append(cwd)                      # 단계 4 F-8: H1 은 빈 전용 폴더(state/h1/claude_cwd)에서 부른다
         if self.clock_after is not None:
             self.clock_after()

@@ -576,3 +576,50 @@ def test_T_RSI_2024_06_01_부터_계산해도_2026_06_이후는_같다(seed):
         for col in a.columns:
             diff = float((a.loc[after, col] - b.loc[after, col]).abs().max())
             assert diff < 1e-9, (cls.__name__, col, diff)
+
+
+# ---------- 설계 Q4 (2026-11-06 사용자 결정): H1 에서만 프롬프트에 날짜·시장·종목 이름 ----------
+
+def test_Q4_H1_프롬프트는_운영_글에_날짜_시장_이름_한_줄씩만_더한다():
+    cands = [{"code": "005930", "reason": "RSI 반등", "rsi": 28.1, "price": 70000},
+             {"code": "999999", "reason": "돌파", "rsi": 55, "price": 1000}]
+    base = analyst._build_prompt("마라토너", cands)
+    h1p = analyst._build_prompt_h1("마라토너", cands,
+                                   {"market": "kr", "date": "2026-11-06", "names": {"005930": "삼성전자"}})
+    extra = "기준 날짜: 2026-11-06 (이 날 종가까지의 자료로 낸 신호) · 시장: 국내 주식(코스피, 원)"
+    assert extra in h1p and "- 005930(삼성전자): 신호사유=RSI 반등" in h1p and "- 999999: 신호사유=돌파" in h1p
+    # 날짜 줄을 빼고 이름을 지우면 운영 글과 글자까지 같다(나머지 지시·JSON 모양은 그대로)
+    back = h1p.replace(extra + "\n", "").replace("005930(삼성전자)", "005930")
+    assert back == base
+    us = analyst._build_prompt_h1("스프린터", [{"code": "AAPL"}], {"market": "us", "date": "2026-11-05", "names": {}})
+    assert "시장: 미국 주식(S&P500 종목, 달러)" in us and "- AAPL: " in us
+    for bad in ({"market": "jp", "date": "2026-11-05"}, {"market": "us", "date": "2026-11-5"}, {}):
+        with pytest.raises(ValueError):
+            analyst._build_prompt_h1("마라토너", cands, bad)
+
+
+def test_Q4_analyze_logged_context_를_주면_H1_프롬프트_안_주면_운영_프롬프트(cli):
+    ctx = {"market": "us", "date": "2026-02-02", "names": {}}
+    analyst.analyze_logged("마라토너", CANDS, now=cli.now)
+    analyst.analyze_logged("마라토너", CANDS, now=cli.now, context=ctx)
+    (c1, _), (c2, _) = cli.ask_calls()
+    assert c1 == ["claude", "-p", analyst._build_prompt("마라토너", CANDS)]
+    assert c2 == ["claude", "-p", analyst._build_prompt_h1("마라토너", CANDS, ctx)] and c2 != c1
+
+
+def test_Q4_Leader_는_봉_날짜_시장_국내_이름을_팀장에게_넘긴다(tmp_path):
+    import h1
+    import markets
+    from tests import h1_synth as hs
+    ask = hs.FakeAsk()
+    log = h1.DecisionLog(tmp_path / "log.jsonl")
+    clock = lambda: datetime(2026, 2, 2, 23, 10, tzinfo=ZoneInfo("Asia/Seoul"))
+    ld = h1.Leader("kr", "2026-02-02", log, "llm", now=clock, ask=ask, cli_version="9.9.9")
+    ld("마라토너", [{"code": "005930", "price": 1, "rsi": 30, "reason": "x"}])
+    (ctx,) = ask.contexts
+    assert ctx["market"] == "kr" and ctx["date"] == "2026-02-02"
+    assert ctx["names"]["005930"] == "삼성전자" and len(ctx["names"]) == len(markets.KR_UNIVERSE)
+    ask2 = hs.FakeAsk()
+    clock2 = lambda: datetime(2026, 2, 2, 17, 0, tzinfo=ZoneInfo("America/New_York"))
+    h1.Leader("us", "2026-02-02", h1.DecisionLog(tmp_path / "l2.jsonl"), "llm", now=clock2, ask=ask2)("마라토너", [{"code": "AAPL"}])
+    assert ask2.contexts == [{"market": "us", "date": "2026-02-02", "names": {}}]

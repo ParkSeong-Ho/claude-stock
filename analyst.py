@@ -20,7 +20,9 @@ H1 포워드 모의매매용 추가 (docs/h1-forward-design.md §3.4, 2026-11-04
   멈추지만 analyze_logged 는 bad_json 폴백, 출력 글자를 읽지 못하면(UnicodeDecodeError 등) decode_error 폴백.
 - claude_cli_version(): `claude --version` 첫 줄(실패하면 None). H1 은 실행마다 한 번 불러 analyze_logged 에 넘긴다.
 - analyze_logged(cwd=…): H1 은 빈 전용 작업 폴더에서 `claude -p` 를 부른다(단계 4 F-8). cwd 를 안 주면 지금과 같다.
-  _build_prompt()·analyze()·apply() 는 한 글자도 바꾸지 않았다(프롬프트는 운영과 같음, 설계 Q4).
+  _build_prompt()·analyze()·apply() 는 한 글자도 바꾸지 않았다(운영 프롬프트는 그대로).
+- _build_prompt_h1() / analyze_logged(context=…): **H1 에서만** 프롬프트에 기준 날짜·시장·종목 이름을 넣는다
+  (설계 Q4, 2026-11-06 사용자 결정 "H1 에서만 넣기"). context 를 안 주면 운영과 같은 _build_prompt 를 쓴다.
 """
 
 from __future__ import annotations
@@ -53,6 +55,38 @@ def _build_prompt(trainer: str, candidates: list[dict]) -> str:
     return f"""{persona}
 
 너는 '{trainer}' 트레이너의 팀장(애널리스트)이다. 아래는 규칙이 '매수' 신호를 낸 후보다.
+각 종목의 최근 시장 상황·악재·위험을 성실히 고려해 평가하라. 확신 없으면 hold, 위험하면 veto.
+
+후보:
+{chr(10).join(lines) if lines else "(없음)"}
+
+반드시 아래 JSON 객체 '하나만' 출력하라(다른 설명 금지):
+{{"analysis": [{{"code": "<종목>", "verdict": "buy|hold|veto", "conviction": 0.0~1.0, "note": "<한 줄 근거>"}}]}}
+"""
+
+
+MARKET_WORDS = {"us": "미국 주식(S&P500 종목, 달러)", "kr": "국내 주식(코스피, 원)"}
+
+
+def _build_prompt_h1(trainer: str, candidates: list[dict], context: dict) -> str:
+    """H1 전용 프롬프트(설계 Q4, 2026-11-06 사용자 결정). _build_prompt 와 같은 글에 세 가지만 더한다:
+    기준 날짜(이 날 종가까지의 자료로 낸 신호), 시장, 종목 이름(아는 것만 — 국내 KR_UNIVERSE, 미국은 티커 그대로).
+    context = {"market": "us"|"kr", "date": "YYYY-MM-DD", "names": {종목: 이름}}. 모르는 시장이면 ValueError."""
+    market, date = context.get("market"), context.get("date")
+    if market not in MARKET_WORDS or not isinstance(date, str) or len(date) != 10:
+        raise ValueError(f"H1 프롬프트 context 가 이상해요: {context!r}")
+    names = context.get("names") or {}
+    persona = _persona(trainer)
+
+    def label(c):
+        n = names.get(c["code"])
+        return f"{c['code']}({n})" if n else f"{c['code']}"
+    lines = [f"- {label(c)}: 신호사유={c.get('reason','')} RSI={c.get('rsi','?')} 종가={c.get('price','?')}"
+             for c in candidates]
+    return f"""{persona}
+
+너는 '{trainer}' 트레이너의 팀장(애널리스트)이다. 아래는 규칙이 '매수' 신호를 낸 후보다.
+기준 날짜: {date} (이 날 종가까지의 자료로 낸 신호) · 시장: {MARKET_WORDS[market]}
 각 종목의 최근 시장 상황·악재·위험을 성실히 고려해 평가하라. 확신 없으면 hold, 위험하면 veto.
 
 후보:
@@ -145,7 +179,8 @@ def _local_now():
     return datetime.now().astimezone()
 
 
-def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None, cwd=None):
+def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None, cwd=None,
+                   context=None):
     """analyze() 와 같은 일을 하고 (결과, meta) 를 돌려준다. 결과는 analyze() 와 같은 값이다
     (같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
     다른 곳은 둘뿐: "analysis" 가 목록이 아님 → bad_json 폴백(analyze 는 TypeError), 출력 디코드 실패 → decode_error 폴백.
@@ -156,6 +191,8 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT,
     cwd: `claude -p` 를 돌릴 작업 폴더(H1 은 빈 전용 폴더 state/h1/claude_cwd/ — 부르는 쪽 폴더의 Claude 설정·CLAUDE.md 가
          팀장 입력에 섞이지 않게, 단계 4 F-8). None 이면 지금처럼 부르는 쪽 폴더(cwd 인자를 넘기지 않음).
          운영 analyze() 는 그대로다.
+    context: H1 전용 프롬프트 정보 {"market", "date", "names"}(설계 Q4). 주면 _build_prompt_h1, None 이면 _build_prompt
+             (운영과 같은 글). 프롬프트만 다르고 호출·파싱·meta 는 같다.
 
     meta (설계 §3.4):
       status      "ok" | "no_claude" | "timeout" | "os_error" | "nonzero_exit" | "decode_error" | "bad_json" | "empty"
@@ -185,7 +222,7 @@ def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT,
         meta["status"] = "no_claude"
         return None, meta
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}  # 구독 강제 (analyze 와 같음)
-    prompt = _build_prompt(trainer, candidates)
+    prompt = _build_prompt(trainer, candidates) if context is None else _build_prompt_h1(trainer, candidates, context)
     meta["asked_at"] = stamp()                    # 묻기 직전
     t0 = time.monotonic()
     try:

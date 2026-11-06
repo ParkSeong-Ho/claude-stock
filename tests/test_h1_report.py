@@ -1743,3 +1743,17 @@ def test_R9_그림자_서킷_사유는_쉬운_말_MDD_0_은_부호_없음_마라
     rows = [ln for ln in t0.splitlines() if ln.startswith("| A0 쉬는 돈") or ln.startswith("| A1 쉬는 돈")]
     assert rows and all(ln.rstrip(" |").endswith("0.00%") and "+0.00% |" != ln[-9:] for ln in rows)
     assert all(not ln.rstrip(" |").endswith("+0.00%") for ln in rows)
+
+
+def test_한계_절은_시장별로_맞는_말을_한다(built, tmp_path):
+    """종합 확인(docs/h1-intent-check.md §1.2 #5): SPY 는 ETF 라 보수는 가격에 이미 있음, 미국 종목군은 무작위 40,
+    하락장에서 A1 이 더 잃는 것·트레이너 매매 시점이 무작위보다 못했던 것을 적는다."""
+    def sec11(mk):
+        text = R.render(R.collect(mk, root=copy_of(built[mk], tmp_path, mk), online=False))
+        return text[text.index("## 11. 한계"):]
+    us, kr = sec11("us"), sec11("kr")
+    assert "ETF 라 운용보수는 이미 가격에" in us and "ETF 운용보수가 없다" not in us
+    assert "무작위로 섞은 40종목" in us and "상위 섞기" not in us
+    assert "ETF 운용보수가 없다: 대기 자산은 지수(KS200)" in kr and "KR_UNIVERSE 32종목" in kr
+    for t in (us, kr):
+        assert "A1 이 A0 보다 더 잃는다" in t and "무작위보다 못했다" in t
