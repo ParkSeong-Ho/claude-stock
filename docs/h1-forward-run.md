@@ -84,7 +84,8 @@
 ### 3.3 H1 전용 폴더(worktree)와 venv
 ```
 cd /Users/나/claude-stock
-git fetch origin --tags
+git fetch origin h1-forward
+git tag h1-forward-v1 c30753e
 git worktree add /Users/나/claude-stock-h1 h1-forward-v1
 cd /Users/나/claude-stock-h1
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m venv /Users/나/.venv-h1
@@ -93,7 +94,8 @@ cd /Users/나/claude-stock-h1
 mkdir -p logs
 ```
 - 첫 줄의 운영 폴더(`claude-stock`)는 **브랜치를 바꾸지 않아요**. `git worktree add` 는 옆에 새 폴더를 만들 뿐이에요.
-- `h1-forward-v1` 은 H1 태그 이름이에요. **태그는 아직 없어요**(2026-11-06 기준). 단계 6 이 끝난 커밋에 진행 담당이 태그를 찍고 푸시한 뒤 그 이름을 알려 줘요. 태그를 찍은 뒤로는 그 코드로만 돌려요.
+- `h1-forward-v1` 은 H1 태그(코드에 붙인 이름표)예요. 진행 담당이 정한 커밋은 **`c30753e`** 예요(2026-11-06, 단계 1~6 끝, 시험 944·지킴이·재현 통과). 클라우드 작업 환경에서는 태그를 GitHub 에 올릴 수 없어서, 위 `git tag …` 줄로 **맥에서 직접** 이름표를 붙여요(맥 안에만 있는 이름표라도 똑같이 쓸 수 있어요). `git tag` 줄이 "already exists" 라고 하면 이미 있는 것이니 그대로 다음 줄로 가요.
+- 태그를 붙인 뒤로는 그 코드로만 돌려요.
 - `-V` 줄은 `Python 3.13.18` 이어야 해요.
 - 폴더는 **iCloud 동기화 밖**에(`~/Desktop`·`~/Documents` 말고). 파일 이름 바꾸기·잠금이 동기화 폴더에서 깨질 수 있어요.
 - 이 폴더의 `state/` 는 운영 폴더의 `state/` 와 **다른 폴더**예요. 운영 장부는 여기 없어요.
