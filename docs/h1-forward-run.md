@@ -104,7 +104,7 @@ $P tools/h1_test_guard.py --quick
 $P h1_replay.py
 $P -c "import h1, json; now = h1.code_hash()[0]; last = json.load(open('state/h1/replay_pass.json'))[-1]['code_hash']; print(now); print(last); print('같음' if now == last else '다름 - 멈추고 물어보기')"
 ```
-- `pytest` 는 전부 통과해야 해요(지금 939개, 약 4분).
+- `pytest` 는 전부 통과해야 해요(지금 942개, 약 4분).
 - `git fetch …` 는 재현의 기준값(과거 연구 R2) 자료를 받아요.
 - 지킴이는 마지막에 `[지킴이] 모두 통과` 가 나와야 해요(인터넷·claude 를 쓰지 않는지, 세 번 돌려 결과가 같은지 봐요).
 - 재현(`h1_replay.py`, 약 8분)은 과거 시세로 새 코드와 R2 연구 시뮬레이터를 같이 돌려 **체결 하나하나까지 같은지** 봐요. 마지막에 `[재현] 끝: 종료 코드 0 — 통과 + 기록함` 이 나와야 해요. 통과하면 `state/h1/replay_pass.json` 에 "이 코드·이 환경은 검사받았다"가 적혀요. 이 기록이 없거나 코드·환경이 다르면 `h1.py` 는 실행을 거절해요(종료 코드 3, "관문").
