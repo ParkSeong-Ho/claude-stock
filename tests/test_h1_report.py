@@ -1752,8 +1752,11 @@ def test_한계_절은_시장별로_맞는_말을_한다(built, tmp_path):
         text = R.render(R.collect(mk, root=copy_of(built[mk], tmp_path, mk), online=False))
         return text[text.index("## 11. 한계"):]
     us, kr = sec11("us"), sec11("kr")
-    assert "ETF 라 운용보수는 이미 가격에" in us and "ETF 운용보수가 없다" not in us
-    assert "무작위로 섞은 40종목" in us and "상위 섞기" not in us
-    assert "ETF 운용보수가 없다: 대기 자산은 지수(KS200)" in kr and "KR_UNIVERSE 32종목" in kr
+    assert "대기 자산 SPY 는 ETF 라 운용보수는 이미 가격에" in us and "ETF 운용보수가 없다" not in us
+    assert "무작위로 섞은 40종목" in us and "상위 섞기" not in us and "시가총액 상위가 아니다" in us
+    assert "ETF 운용보수가 없다: 대기 자산은 지수(KS200)" in kr and "KR_UNIVERSE 32종목" in kr and "대형주만 본다" in kr
+    assert "생존편향이 있다" not in kr                       # 검토 6a A-4: 앞으로 가는 시험이라 생존편향은 없음
+    assert f"{h1.N_UNIVERSE}종목" in us and f"{len(markets.KR_UNIVERSE)}종목" in kr
     for t in (us, kr):
-        assert "A1 이 A0 보다 더 잃는다" in t and "무작위보다 못했다" in t
+        assert "A1 이 A0 보다 뒤처지기 쉽다" in t and "R2 2018·2022" in t
+        assert "미국 12%·16%(무작위보다 못함), 국내 88%" in t and "수익률이 아니라 순위" in t

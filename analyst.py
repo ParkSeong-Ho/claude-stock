@@ -65,35 +65,41 @@ def _build_prompt(trainer: str, candidates: list[dict]) -> str:
 """
 
 
-MARKET_WORDS = {"us": "미국 주식(S&P500 종목, 달러)", "kr": "국내 주식(코스피, 원)"}
+MARKET_WORDS = {"us": "미국 주식(S&P500 종목, 달러, 날짜는 뉴욕 기준)", "kr": "국내 주식(코스피, 원, 날짜는 한국 기준)"}
 
 
 def _build_prompt_h1(trainer: str, candidates: list[dict], context: dict) -> str:
     """H1 전용 프롬프트(설계 Q4, 2026-11-06 사용자 결정). _build_prompt 와 같은 글에 세 가지만 더한다:
-    기준 날짜(이 날 종가까지의 자료로 낸 신호), 시장, 종목 이름(아는 것만 — 국내 KR_UNIVERSE, 미국은 티커 그대로).
-    context = {"market": "us"|"kr", "date": "YYYY-MM-DD", "names": {종목: 이름}}. 모르는 시장이면 ValueError."""
+    기준 날짜(그 시장 현지 날짜 — 이 날 종가까지의 자료로 낸 신호, 체결은 다음 거래일 시가), 시장, 종목 이름(아는 것만).
+    종목 줄은 "- <코드>: 이름=<이름> 신호사유=…" 처럼 **코드를 맨 앞에 그대로** 두고, JSON 틀도 그 코드를 그대로 쓰라고
+    적는다(검토 6a A-1: "005930(삼성전자)" 를 code 로 베껴 돌려주면 판정이 버려짐). Leader 도 한 번 더 찾는다.
+    context = {"market": "us"|"kr", "date": "YYYY-MM-DD", "names": {종목: 이름}}. 모르는 시장·날짜 모양이면 ValueError."""
     market, date = context.get("market"), context.get("date")
-    if market not in MARKET_WORDS or not isinstance(date, str) or len(date) != 10:
+    try:
+        ok_date = isinstance(date, str) and datetime.strptime(date, "%Y-%m-%d").strftime("%Y-%m-%d") == date
+    except ValueError:
+        ok_date = False
+    if market not in MARKET_WORDS or not ok_date:
         raise ValueError(f"H1 프롬프트 context 가 이상해요: {context!r}")
     names = context.get("names") or {}
     persona = _persona(trainer)
 
-    def label(c):
+    def name_part(c):
         n = names.get(c["code"])
-        return f"{c['code']}({n})" if n else f"{c['code']}"
-    lines = [f"- {label(c)}: 신호사유={c.get('reason','')} RSI={c.get('rsi','?')} 종가={c.get('price','?')}"
+        return f" 이름={n}" if isinstance(n, str) and n else ""
+    lines = [f"- {c['code']}:{name_part(c)} 신호사유={c.get('reason','')} RSI={c.get('rsi','?')} 종가={c.get('price','?')}"
              for c in candidates]
     return f"""{persona}
 
 너는 '{trainer}' 트레이너의 팀장(애널리스트)이다. 아래는 규칙이 '매수' 신호를 낸 후보다.
-기준 날짜: {date} (이 날 종가까지의 자료로 낸 신호) · 시장: {MARKET_WORDS[market]}
+기준 날짜: {date} (이 날 종가까지의 자료로 낸 신호, 체결은 다음 거래일 시가) · 시장: {MARKET_WORDS[market]}
 각 종목의 최근 시장 상황·악재·위험을 성실히 고려해 평가하라. 확신 없으면 hold, 위험하면 veto.
 
 후보:
 {chr(10).join(lines) if lines else "(없음)"}
 
-반드시 아래 JSON 객체 '하나만' 출력하라(다른 설명 금지):
-{{"analysis": [{{"code": "<종목>", "verdict": "buy|hold|veto", "conviction": 0.0~1.0, "note": "<한 줄 근거>"}}]}}
+반드시 아래 JSON 객체 '하나만' 출력하라(다른 설명 금지). code 에는 위 목록 맨 앞의 종목 코드만 그대로 적어라(이름은 넣지 마라):
+{{"analysis": [{{"code": "<종목 코드>", "verdict": "buy|hold|veto", "conviction": 0.0~1.0, "note": "<한 줄 근거>"}}]}}
 """
 
 
@@ -182,7 +188,7 @@ def _local_now():
 def analyze_logged(trainer: str, candidates: list[dict], timeout: int = TIMEOUT, now=None, cli_version=None, cwd=None,
                    context=None):
     """analyze() 와 같은 일을 하고 (결과, meta) 를 돌려준다. 결과는 analyze() 와 같은 값이다
-    (같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
+    (context 가 없으면 같은 _build_prompt, 같은 `claude -p` 호출, 같은 환경(ANTHROPIC_API_KEY 제거), 같은 _extract_json 파싱).
     다른 곳은 둘뿐: "analysis" 가 목록이 아님 → bad_json 폴백(analyze 는 TypeError), 출력 디코드 실패 → decode_error 폴백.
 
     now: 시간대가 있는 datetime 을 돌려주는 함수(시험·재현에서 시계를 바꿔 끼울 때). 없으면 이 컴퓨터의 지금 시각.

@@ -108,21 +108,39 @@ def universe(market, n):
     return list(markets.KR_UNIVERSE.values())
 
 
+def universe_names(market) -> dict:
+    """종목 코드 → 이름(H1 팀장 프롬프트 표시용, 설계 Q4 2026-11-06). start 때 종목군과 함께 한 번 받아 종목군 파일에 적는다.
+    미국: FinanceDataReader S&P500 표의 Symbol·Name(screener.universe 가 읽는 것과 같은 표), 국내: markets.KR_UNIVERSE 를 뒤집은 것.
+    이름은 표시용이라 받지 못해도 멈추지 않는다 → 빈 dict(그때 프롬프트는 코드만)."""
+    if _mkey(market) == "kr":
+        return {code: name for name, code in markets.KR_UNIVERSE.items()}
+    try:
+        import FinanceDataReader as fdr
+        t = fdr.StockListing("S&P500")
+        return {s: n for s, n in zip(t["Symbol"].tolist(), t["Name"].tolist())
+                if isinstance(s, str) and isinstance(n, str) and n.strip()}
+    except Exception as e:                       # noqa: BLE001 — 표시용 정보라 실패해도 start 는 이어 간다
+        _say(f"    (종목 이름 목록 받기 실패: {type(e).__name__} → 팀장 프롬프트는 코드만)")
+        return {}
+
+
 @dataclass
 class DataSource:
     """자료 받는 곳 (운영 = live_source, 재현·시험 = 가짜). 모든 시각은 시간대 있는 datetime.
     benchmark(now) → 대기 자산 확정 시세 DataFrame 또는 None
     fetch(code, now) → Fetched 또는 None
     universe() → 종목 목록 (start 때 종목군 파일이 없을 때만 한 번 부름)
-    now() → 지금 시각"""
+    now() → 지금 시각
+    names() → {코드: 이름} (start 때 종목군과 함께 한 번, 없으면 None = 이름 없음. 설계 Q4)"""
     benchmark: object
     fetch: object
     universe: object
     now: object
+    names: object = None
 
 
 def live_source(market, n_universe, clock) -> DataSource:
     """운영 자료: load_idle·fetch·universe(n_universe), 시계는 부르는 쪽(h1.py)이 넘긴 것."""
     mk = _mkey(market)
     return DataSource(benchmark=lambda now: load_idle(mk, now), fetch=lambda code, now: fetch(mk, code, now),
-                      universe=lambda: universe(mk, n_universe), now=clock)
+                      universe=lambda: universe(mk, n_universe), now=clock, names=lambda: universe_names(mk))

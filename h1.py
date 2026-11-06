@@ -63,6 +63,7 @@ import json
 import math
 import os
 import platform
+import re
 import shutil
 import sys
 import time
@@ -513,7 +514,7 @@ class Leader:
        {code: {"code", "verdict", "conviction"(숫자 또는 None), "note"}}. 빈 dict 는 team 에서 폴백(None)과 똑같다."""
 
     def __init__(self, market, date, log: DecisionLog, mode: str, *, now=None, ask=None, cli_version=None,
-                 timeout=None):
+                 timeout=None, names=None):
         if mode not in LEADER_MODES:
             raise ValueError(f"팀장 mode 는 {LEADER_MODES} 중 하나 (받은 값 {mode!r})")
         _check_iso(date, "date")
@@ -524,6 +525,7 @@ class Leader:
         self.now = now if now is not None else _local_now
         self.ask = ask
         self.cli_version = cli_version
+        self.names = names
         self.timeout = analyst.TIMEOUT if timeout is None else timeout
         self.next_open = next_open(self.market, date)
         self.llm_calls = 0          # 실제로 LLM 을 부른 횟수
@@ -534,10 +536,25 @@ class Leader:
         return _aware(self.now()).isoformat(timespec="seconds")
 
     def prompt_context(self):
-        """H1 전용 프롬프트 정보(설계 Q4, 2026-11-06 사용자 결정): 기준 날짜(이 봉)·시장·종목 이름.
-        이름은 인터넷 없이 아는 것만: 국내는 markets.KR_UNIVERSE(이름 → 코드)를 뒤집은 것, 미국은 없음(티커 그대로)."""
-        names = {code: name for name, code in markets.KR_UNIVERSE.items()} if self.market == "kr" else {}
+        """H1 전용 프롬프트 정보(설계 Q4, 2026-11-06 사용자 결정): 기준 날짜(이 봉 = 신호 날짜, 시계 날짜 아님)·시장·
+        종목 이름. 이름은 종목군 파일의 이름 칸(start 때 받아 고정, run 이 names= 로 넘김). 국내는 빠진 이름을
+        markets.KR_UNIVERSE 로 채운다(인터넷 필요 없음). 미국에 이름이 없으면 코드만."""
+        names = dict(self.names or {})
+        if self.market == "kr":
+            for name, code in markets.KR_UNIVERSE.items():
+                names.setdefault(code, name)
         return {"market": self.market, "date": self.date, "names": names}
+
+    @staticmethod
+    def _reply_item(result, code):
+        """답에서 그 종목 찾기. 먼저 코드 그대로, 없으면 열쇠 맨 앞 코드(예 "005930(삼성전자)"·"005930 삼성전자"·
+        "005930: …")가 그 코드이고 그런 열쇠가 하나뿐일 때만(검토 6a A-1 — 표시 글을 베껴 와도 veto 가 버려지지 않게)."""
+        item = result.get(code)
+        if item is not None:
+            return item
+        hits = [v for k, v in result.items()
+                if isinstance(k, str) and k.strip() != code and re.split(r"[\s(:\[]", k.strip(), maxsplit=1)[0] == code]
+        return hits[0] if len(hits) == 1 else None
 
     def _next_call_no(self, trainer):
         prefix = f"{self.market}|{self.date}|{trainer}|"
@@ -599,7 +616,7 @@ class Leader:
             code = c["code"]
             item = None
             if status == "ok" and isinstance(result, dict):
-                item = result.get(code)
+                item = self._reply_item(result, code)
             if status == "ok" and isinstance(item, dict):
                 source, rec_status = "llm", "ok"
                 if analyst.normalize_verdict(item.get("verdict")) is None:
@@ -1379,7 +1396,7 @@ def _pre(msg):
 def run_bar(market, t, states, frames, universe, idle: IdleBar, *, decisions: DecisionLog, leader_mode="llm",
             halted=frozenset(), delist=None, prev_cal_date=None, calendar=None, now=None, ask=None,
             cli_version=None, code_hash="", env=None, allowed=None, head=None, universe_sha256=None,
-            meta_universe_sha256=None, brains=None) -> BarResult:
+            meta_universe_sha256=None, brains=None, names=None) -> BarResult:
     """확정 봉 t 하나를 한 시장의 장부 6개(A0·A1 × 트레이너 3명)에 처리한다 (설계 §2.3 "봉 t 하나" 1~4).
     파일은 쓰지 않는다(판정 기록 추가만 예외). 저장(백업 → 장부 6개 → HEAD)은 2b-2 의 일이다.
 
@@ -1493,7 +1510,7 @@ def run_bar(market, t, states, frames, universe, idle: IdleBar, *, decisions: De
     else:
         mode = "llm" if _aware(clock()) < next_open(mk, t) else "late"
     late = mode == "late"
-    leader = Leader(mk, t, decisions, mode, now=clock, ask=ask, cli_version=cli_version)
+    leader = Leader(mk, t, decisions, mode, now=clock, ask=ask, cli_version=cli_version, names=names)
     run_at = _aware(clock()).isoformat(timespec="seconds")
     n_rec0 = len(decisions)
 
@@ -2632,10 +2649,40 @@ def _archive_path(root, rec) -> Path:
 
 # ============================ 고정 종목군 (Q7, §3.7) ============================
 
-def _universe_blob(mk, codes, at, env) -> bytes:
+def _universe_blob(mk, codes, at, env, names=None) -> bytes:
+    """종목군 파일. names = {코드: 이름}(팀장 프롬프트 표시용, 설계 Q4 2026-11-06) — 종목군에 있는 코드만 남긴다."""
+    names = {c: names[c] for c in codes if isinstance((names or {}).get(c), str) and names[c].strip()}
     return _dump({"market": mk, "codes": list(codes), "n": len(codes), "fetched_at": at,
                   "source": f"screener.universe({N_UNIVERSE})" if mk == "us" else "markets.KR_UNIVERSE",
-                  "fdr_version": (env or {}).get("FinanceDataReader") if mk == "us" else None})
+                  "fdr_version": (env or {}).get("FinanceDataReader") if mk == "us" else None,
+                  "names": names})
+
+
+def _source_names(source, log):
+    """start 때 한 번: 자료 받는 곳의 names()(없으면 이름 없음). 표시용이라 실패해도 멈추지 않는다."""
+    fn = getattr(source, "names", None)
+    if fn is None:
+        return {}
+    try:
+        got = fn()
+    except Exception as e:                       # noqa: BLE001
+        log.note(f"종목 이름 받기 실패({type(e).__name__}) → 팀장 프롬프트는 코드만")
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
+def read_universe_names(market, root=None) -> dict:
+    """종목군 파일의 이름 칸 {코드: 이름}(팀장 프롬프트 표시용). 칸이 없거나(옛 파일) 모양이 다르면 빈 dict.
+    파일이 깨졌는지는 read_universe 가 따로 본다(L22) — 이 함수는 판정·점검에 쓰지 않는다."""
+    p = universe_path(_mkey(market), root)
+    try:
+        d = json_loads_strict(p.read_bytes().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {}
+    names = d.get("names") if isinstance(d, dict) else None
+    if not isinstance(names, dict):
+        return {}
+    return {c: n for c, n in names.items() if isinstance(c, str) and isinstance(n, str) and n.strip()}
 
 
 def _check_codes(mk, codes, what):
@@ -3429,7 +3476,8 @@ def _start_locked(mk, root, source, leader_mode, gate) -> int:
                 codes = _check_codes(mk, list(source.universe()), "받은 종목군")
             except Exception as e:
                 raise H1DataProblem("D2", f"종목군 목록을 받지 못함({type(e).__name__}: {e})")
-            u_blob = _universe_blob(mk, codes, _iso(now), env)
+            u_names = _source_names(source, log)
+            u_blob = _universe_blob(mk, codes, _iso(now), env, u_names)
             u_sha = _sha256_bytes(u_blob)
             _say(f"  종목군: 새로 받은 {len(codes)}종목을 고정(universe/{mk}.json)")
         fetched = _fetch_all(mk, source, now, codes, set(), CAL_PROBE[mk])           # 7 종목 시세
@@ -3456,7 +3504,9 @@ def _start_locked(mk, root, source, leader_mode, gate) -> int:
                       leader_mode=leader_mode, halted=_halted_on(fetched, codes, S), prev_cal_date=prev_s,
                       calendar=cal, now=source.now, ask=_leader_ask(root, leader_mode),
                       cli_version=_cli_version_once(leader_mode), code_hash=ch, env=env,
-                      allowed=allowed, head=None, universe_sha256=u_sha, meta_universe_sha256=u_sha)
+                      allowed=allowed, head=None, universe_sha256=u_sha, meta_universe_sha256=u_sha,
+                      names=(json_loads_strict(u_blob.decode("utf-8"))["names"] if u_blob is not None
+                             else read_universe_names(mk, root)))
         _absorb(log, res)
         _print_bar(res)
         if not res.ok:
@@ -3687,6 +3737,7 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
         raise _LFound(None, [h1_check.Problem("L", "L22", mk, None, None, None, f"종목군 파일 universe/{mk}.json 이 없음")],
                       _safe_fingerprint(states))
     codes, u_sha = got
+    u_names = read_universe_names(mk, root)          # 팀장 프롬프트 표시용 이름(설계 Q4) — 판정·점검에는 안 씀
     if u_sha != meta["universe_sha256"]:
         raise _LFound(None, [h1_check.Problem("L", "L22", mk, None, None, None,
                                               "종목군 파일 지문 ≠ meta.universe_sha256 (파일이 바뀜)")],
@@ -3756,7 +3807,7 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
                       leader_mode=leader_mode, halted=halted,
                       prev_cal_date=cal[cal.index(t) - 1], calendar=cal, now=source.now, ask=ask, cli_version=cli_version,
                       code_hash=ch, env=env, allowed=allowed, head=_head_digest(head), universe_sha256=u_sha,
-                      meta_universe_sha256=meta["universe_sha256"])
+                      meta_universe_sha256=meta["universe_sha256"], names=u_names)
         _absorb(log, res)
         _print_bar(res)
         if not res.ok:

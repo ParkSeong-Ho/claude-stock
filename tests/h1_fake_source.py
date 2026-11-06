@@ -67,6 +67,11 @@ class FakeSource:
         self.universe_calls += 1
         return list(self.uni)
 
+    name_map = None                   # 설계 Q4: start 때 names() 가 돌려줄 {코드: 이름}(None = 이름 없음)
+
+    def names(self):
+        return self.name_map
+
     def _local_day(self, now):
         return now.astimezone(ZoneInfo(self.m.tz)).date()
 

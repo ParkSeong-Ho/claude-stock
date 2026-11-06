@@ -1514,3 +1514,42 @@ def test_E2E_두_번_돌린_실행의_장부_내용_지문이_같음(e2e, mk):
     a, b = e2e[mk]
     assert a.fp() == b.fp()
     assert a.ledger_shas() != {} and a.head()["last_date"] == b.head()["last_date"]
+
+
+# ============================ 설계 Q4 (2026-11-06): H1 전용 프롬프트 — start → run 끝까지 ============================
+
+def test_Q4_start_run_끝까지_팀장에게_봉_날짜_시장_이름이_간다(tmp_path):
+    """검토 6a A-2: 실제 경로(start → run → run_bar → Leader → _leader_ask → analyst.analyze_logged)로
+    context 가 닿는지, 날짜가 시계가 아니라 봉(신호) 날짜인지, 이름이 start 때 종목군 파일에 고정되는지."""
+    h = us_h(tmp_path)
+    h.src.name_map = {c: f"{c} Corp" for c in h.src.uni} | {"ZZZZ": "종목군 밖"}
+    assert h.start() == 0
+    h.src.name_map = None                       # run 은 이름을 다시 받지 않고 start 때 고정한 종목군 파일에서 읽는다
+    h.run_to(4)
+    uni = json.loads((h.root / "universe" / "us.json").read_text(encoding="utf-8"))
+    assert uni["names"] == {c: f"{c} Corp" for c in uni["codes"]}                  # 종목군 밖 이름은 버림
+    ask = h.ask
+    assert ask.contexts and len(ask.contexts) == len(ask.calls)
+    dec = h1.DecisionLog(h1.decisions_path(h.root, "us"), read_only=True)
+    for (trainer, codes), ctx in zip(ask.calls, ask.contexts):
+        assert ctx["market"] == "us" and ctx["names"] == uni["names"]
+        days = {r["date"] for r in dec.records() if r["trainer"] == trainer and r["code"] in codes}
+        assert ctx["date"] in days and ctx["date"] in h.D                            # 봉 날짜
+    # 운영 시각(미국 봉은 다음 날 07:10 KST 에 처리)이라 맥 시계 날짜는 봉 날짜보다 하루 뒤 — 시계 날짜를 쓰면 틀린다
+    for r in dec.records():
+        if r["source"] == "llm":
+            assert r["asked_at"][:10] > r["date"]
+
+
+def test_Q4_국내_start_run_은_KR_UNIVERSE_이름_미국_이름_실패면_코드만(tmp_path):
+    h = kr_h(tmp_path, upto=4)
+    assert h.ask.contexts and all(c["market"] == "kr" and c["names"].get("005930") == "삼성전자" for c in h.ask.contexts)
+    u = us_h(tmp_path / "u")
+
+    def boom():
+        raise OSError("목록 받기 실패")
+    u.src.names = boom
+    assert u.start() == 0                                                            # 이름은 표시용 — 실패해도 시작
+    u.run_to(3)
+    assert json.loads((u.root / "universe" / "us.json").read_text(encoding="utf-8"))["names"] == {}
+    assert u.ask.contexts and all(c["names"] == {} for c in u.ask.contexts)

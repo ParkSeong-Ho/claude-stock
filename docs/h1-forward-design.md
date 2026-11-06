@@ -25,7 +25,7 @@
 | I7·I8 | 판정 기록을 추가 전용 JSONL 로 바꾸고 장부보다 먼저 쓴다. 커밋 지점은 HEAD 하나, 잠금도 하나다. 진입점은 `python h1.py run`(team.py `--h1` 없음). 맥에서는 H1 전용 worktree·venv 를 쓴다 | §2.5, §3, §8 |
 | I9·I10 | 장부에 `orders` 를 더했다. 현금은 절대 오차로 비교한다. K1 을 넓혔다. 재현은 실제 운영 시각으로 돈다. 국내 2018 창을 필수로 했고, sim_team 과의 합성 차등 재현을 더했다 | §3.5, §5 |
 | I11·m1 | 미국 종목군은 S 날 목록으로 고정한다. 국내 매도세는 날짜별 표를 쓴다 | §2.1, §2.2 ⑥ |
-| m3~m9 | 추가: `runs.jsonl`·`calendar.jsonl`·하루 기록 `marks`, 지문에 프롬프트·라이브러리 버전 포함, 새 시작은 명시 명령으로만, 보고서는 `state/h1/reports/` 에, 보고서 첫머리에 "A0 ≠ 운영 장부". 잘라 낸 것: 장부의 실현손익 칸(보고서 계산만 남김), `h1.py check`, 1판 M10, Q4 프롬프트 변경(보류) | 곳곳, §10 |
+| m3~m9 | 추가: `runs.jsonl`·`calendar.jsonl`·하루 기록 `marks`, 지문에 프롬프트·라이브러리 버전 포함, 새 시작은 명시 명령으로만, 보고서는 `state/h1/reports/` 에, 보고서 첫머리에 "A0 ≠ 운영 장부". 잘라 낸 것: 장부의 실현손익 칸(보고서 계산만 남김), `h1.py check`, 1판 M10, Q4 프롬프트 변경(보류 — 2026-11-06 사용자 결정으로 H1 에서만 넣음, §10.1 Q4) | 곳곳, §10 |
 
 **2판 → 3판 바뀐 것** (2차 검토 ID → 고친 곳)
 
@@ -89,7 +89,7 @@
 | 시작 자금 | 미국 $100,000, 국내 ₩100,000,000. 60/30/10, 종목상한·MAX_POSITIONS·확신도 규칙은 team.py 그대로 |
 | 서킷 | **두 장부 모두 끔.** 매일 "켜져 있었다면" 걸렸을지를 그림자 사건으로 기록만 한다 |
 | A1 규칙 | R2 `sim_team.py` A1 그대로: 같은 시가에 주식 매도 → 주식 매수(모자란 만큼만 지수 매도) → 남은 현금 ≥ 1 이면 지수. 현금+지수로도 모자라면 지수를 팔지 않고 보류. **첫날 전부 지수는 S+1 시가**(그 시가에 먼저 전부 지수로 바꾼 뒤 그날 주문) |
-| 팀장 | 두 장부가 같은 (날짜, 트레이너, 종목)에 같은 판정을 쓴다. 판정 기록 `state/h1/analyst_cache.jsonl`(추가만, 장부보다 먼저 씀). 프롬프트는 운영과 같다. LLM 은 다음 장 시작 전에만 부른다 |
+| 팀장 | 두 장부가 같은 (날짜, 트레이너, 종목)에 같은 판정을 쓴다. 판정 기록 `state/h1/analyst_cache.jsonl`(추가만, 장부보다 먼저 씀). 프롬프트는 운영 글에 기준 날짜·시장·종목 이름만 더한 H1 전용(Q4, 2026-11-06 사용자 결정). LLM 은 다음 장 시작 전에만 부른다 |
 | 종목군 | 미국은 S 날 40종목 목록·순서로 고정, 국내는 `KR_UNIVERSE` 32종목 |
 | 점검 | 장부 논리 오류(L) → 그날 저장 안 함, 고치고 재시작 / 자료 문제(D) → 그날 저장 안 함, 다음 실행이 다시 |
 | 재현 | 2026-06~11 미·국 + **2018 국내**(정지 보유 포함) + 합성 차등. **운영 시작 규칙으로 맞춘** sim_team 과 비교 |
@@ -624,8 +624,8 @@ def sell(self, code, price, shares, date=None, tax_rate=None) -> bool
 # analyst.py   (_build_prompt·analyze·apply 는 그대로)
 def normalize_verdict(v) -> str | None      # " VETO" → "veto", "Hold" → "hold", 그 밖은 None
 def claude_cli_version() -> str | None      # "claude --version" 첫 줄, 실패하면 None (H1 실행마다 한 번)
-def analyze_logged(trainer, candidates, timeout=TIMEOUT, now=None, cli_version=None) -> tuple[dict | None, dict]
-    # 같은 프롬프트(_build_prompt), 같은 호출(claude -p). 반환 meta =
+def analyze_logged(trainer, candidates, timeout=TIMEOUT, now=None, cli_version=None, cwd=None, context=None) -> tuple[dict | None, dict]
+    # context 없으면 같은 프롬프트(_build_prompt), 있으면 H1 전용 _build_prompt_h1(Q4, 2026-11-06). 같은 호출(claude -p). 반환 meta =
     # now: 시간대 있는 datetime 을 돌려주는 함수(시험·재현용, 기본 지금 시각). cli_version: 받은 값을 meta 에 그대로(이 함수는 --version 을 부르지 않음)
     # {"status": "ok"|"no_claude"|"timeout"|"os_error"|"nonzero_exit"|"decode_error"|"bad_json"|"empty",
     #  "asked_at": ISO 시각(시간대), "elapsed_s": float, "returncode": int|None,
@@ -1251,7 +1251,7 @@ which claude                                       # launchd PATH 에 넣을 경
 | **Q1** | **두 H1 장부 모두 서킷 끔**(`CircuitBreaker(inf, inf)`). 매일 지금 규칙(누적 −10%·하루 −7%)으로 "켜져 있었다면"을 계산해 **하루 기록 `events`** 에 그림자 사건으로만 남기고 보고서에 첫 발동일을 적는다(§2.6). 재현은 끈 장부만 맞추고, 그림자 첫 발동일 == R2 `cb="current"` 사건(M5′)으로 확인한다. 서킷 켠 장부 재현·1판 C16·T-CB 는 없앴다 | R2 H1 은 서킷을 끈 조건에서 채택 후보가 됐다. 켜면 재현 창 국내 6번째 거래일에 A1 세 트레이너가 멈춰 운영 기준을 확인할 매매가 남지 않는다. probe1: 그림자 첫 발동일이 R2 사건과 4/4 같음 |
 | Q2 | 늦은 봉(다음 장 시작 뒤 처리, 팀장 폴백)은 빠진 날이 아니고 따로 센다. **단 창 전체 10봉·한 번에 5봉을 넘으면 창 실패**(검토 I3 로 상한 추가) | 하루 꺼짐으로 3개월을 버리지 않되, 오래 꺼진 것은 운영 실패로 본다 |
 | Q3 | 장부 논리 오류로 재시작하면 63봉을 새 S 부터 센다. **재시작 최대 2번, 마감 2027-06-30**(검토 I3) | 운영 기준 ②-1 이 "창 동안 오류 0". 결과를 보고 끝없이 다시 시작하지 못하게 |
-| Q4 | ~~보류~~ → **2026-11-06 사용자 결정: H1 에서만 넣는다.** `h1.Leader.prompt_context()` 가 봉 날짜·시장·이름(국내 `KR_UNIVERSE` 를 뒤집은 것, 미국은 이름 없이 티커)을 `analyst.analyze_logged(context=)` 로 넘기고, `analyst._build_prompt_h1()` 이 운영 글에 "기준 날짜 · 시장" 한 줄과 종목 옆 이름만 더한다. 운영 `_build_prompt`·`analyze()` 는 그대로 | 판정 기록을 나중에 채점할 자료의 질(팀장이 회사·날짜를 알고 판단). A1−A0 공정성은 그대로(두 장부가 같은 판정). 미국 이름은 start 때 인터넷으로 이름 목록을 받아 종목군 파일 모양을 바꿔야 해서 넣지 않음(티커 자체가 널리 알려진 이름). 처음 결정(보류, 진행 담당 위임)은 의도 대조 docs/h1-intent-check.md §3.1 ① 에서 사용자 확인으로 넘김 |
+| Q4 | ~~보류~~ → **2026-11-06 사용자 결정: H1 에서만 넣는다.** `h1.Leader.prompt_context()` 가 봉 날짜·시장·이름(국내 `KR_UNIVERSE` 를 뒤집은 것, 미국은 start 때 받는 S&P500 표의 Name — 둘 다 start 때 종목군 파일 `universe/<m>.json` 의 `names` 칸에 고정, 받지 못하면 코드만)을 `analyst.analyze_logged(context=)` 로 넘기고, `analyst._build_prompt_h1()` 이 운영 글에 "기준 날짜(현지 날짜, 체결은 다음 거래일 시가) · 시장" 한 줄과 종목 줄의 `이름=` 을 더한다. 종목 코드는 줄 맨 앞에 그대로 두고 JSON 틀에 "code 에는 코드만"을 적으며, 답의 code 에 이름이 붙어 와도 Leader 가 맨 앞 코드로 한 번 더 찾는다(검토 6a A-1). 운영 `_build_prompt`·`analyze()` 는 그대로. 판정 기록에 프롬프트 칸은 두지 않는다(어떤 글로 물었는지는 코드 지문이 정함, 검토 6a A-10) | 판정 기록을 나중에 채점할 자료의 질(팀장이 회사·날짜를 알고 판단). A1−A0 공정성은 그대로(두 장부가 같은 판정). 처음 결정(보류, 진행 담당 위임)은 의도 대조 docs/h1-intent-check.md §3.1 ① 에서 사용자 확인으로 넘김 |
 | Q5 | H1 에서 판정 글자를 정리한다(원래 값도 기록), 판정 기록 유지 | 버그 수정. 운영 쪽 수정은 개선 후보 목록으로 따로 |
 | Q6 | 모델은 고정하지 않는다. 알 수 있으면 기록(launchd 에서는 대개 "모름"), `claude --version` 은 항상 기록. 바뀌면 보고서에 적음 | 구독 기본 모델을 3개월 고정할 수 있다는 보장이 없음 |
 | **Q7** | **미국 종목군은 첫 S 날 `screener.universe(40)` 목록·순서로 고정**(`state/h1/universe/us.json`, 재시작해도 그대로). N=40 도 고정 | 포워드 결과를 다시 만들 수 있어야 한다(개선 후보 11번). 재시작으로 종목군을 고를 수 없게 |
@@ -1274,7 +1274,7 @@ which claude                                       # launchd PATH 에 넣을 경
 | 분할·상장폐지 | 프로그램은 감지만(D6). 사람이 1차 출처 확인 뒤 미리 정한 넷 중 하나: 기다림 / `corp-action --split r` 공식 / 재시작 / `--delist` 정리 | I5 |
 | 보고서 위치 | `state/h1/reports/`(F8 의 `reports/h1-forward/` 를 바꿈) | m8 |
 | 맥 | H1 전용 worktree(태그 고정)·전용 venv, launchd 는 `h1.py` | I8·m4 |
-| 잘라 낸 것 | 장부의 실현손익·취득가 칸(보고서 계산만 남김), 서킷 켠 재현, 1판 C16·T-CB·G3, `h1.py check`, 1판 M10, Q4 프롬프트 변경, 종목군 지문 경고 | §5 잘라도 되는 것 |
+| 잘라 낸 것 | 장부의 실현손익·취득가 칸(보고서 계산만 남김), 서킷 켠 재현, 1판 C16·T-CB·G3, `h1.py check`, 1판 M10, Q4 프롬프트 변경(뒤에 사용자 결정으로 되살림, §10.1 Q4), 종목군 지문 경고 | §5 잘라도 되는 것 |
 
 ### 10.2c 구현 중 정한 것 (단계 2a·2b-1 독립 검토 반영)
 
