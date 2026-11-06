@@ -65,7 +65,7 @@
 > - H1 명령은 **언제나 `/Users/나/claude-stock-h1` 폴더에서** 쳐요. 그래서 명령 상자는 `cd /Users/나/claude-stock-h1` 와 `P=/Users/나/.venv-h1/bin/python` 두 줄로 시작해요(새 터미널을 열면 `P` 가 사라지니 매번 다시 쳐요).
 > - **멈춤 규칙**: pytest 실패, 지킴이 실패, 재현 종료 코드가 0 이 아님, 그 밖에 예상과 다른 글이 나오면 **다음으로 넘어가지 말고** 화면 글을 그대로 Claude Code 에 보여 주세요.
 > - 걸리는 시간(대략): pytest 4분, 지킴이 5분, 재현 8분. 이 셋은 멈춘 것처럼 보여도 Ctrl-C 하지 마세요(start 는 §5 참고).
-> - **도우미(지름길)**: 손으로 칠 것을 줄이려고 `tools/h1_mac.py` 를 만들어 두었어요. §3.3 의 venv 만들기~§3.4 전부는 `setup`, §3.7 은 `check`, §4.1 의 plist 세 개는 `plists` 한 줄이에요(아래 각 절에 적었어요). 도우미가 멈추면 그 화면을 그대로 Claude Code 에 보여 주세요. 손으로 하는 길도 그대로 남겨 두었어요.
+> - **도우미(지름길)**: 손으로 칠 것을 줄이려고 `tools/h1_mac.py` 를 만들어 두었어요. §3.3 의 venv 만들기~§3.4 전부는 `setup`, §3.7 은 `check`, §4.1·§7 의 plist 세 개는 `plists` 한 줄이에요(아래 각 절에 적었어요). 순서는 setup → (§3.5·§3.6 손으로) → check → plists 예요. 도우미가 멈추면 그 화면을 그대로 Claude Code 에 보여 주세요. 손으로 하는 길도 그대로 남겨 두었어요.
 
 ### 3.1 파이썬 3.13.18 설치 (brew 의 파이썬은 쓰지 않기)
 - 장부의 "환경 지문"에 파이썬 **패치 버전**(3.13.**18**)까지 들어가요. brew 파이썬으로 venv 를 만들면 `brew upgrade` 한 번에 3.13.19 가 되어 **매 실행 종료 코드 3**(재현 안 한 환경)이 나요.
@@ -86,7 +86,8 @@
 ```
 cd /Users/나/claude-stock
 git fetch origin h1-forward
-git tag h1-forward-v1 c30753e
+git tag h1-forward-v1 $(git log origin/h1-forward --format=%h --grep='^H1 태그 대상' -1)
+git log -1 --format='%h %s' h1-forward-v1
 git worktree add /Users/나/claude-stock-h1 h1-forward-v1
 cd /Users/나/claude-stock-h1
 /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -m venv /Users/나/.venv-h1
@@ -95,7 +96,9 @@ cd /Users/나/claude-stock-h1
 mkdir -p logs
 ```
 - 첫 줄의 운영 폴더(`claude-stock`)는 **브랜치를 바꾸지 않아요**. `git worktree add` 는 옆에 새 폴더를 만들 뿐이에요.
-- `h1-forward-v1` 은 H1 태그(코드에 붙인 이름표)예요. 진행 담당이 정한 커밋은 **`c30753e`** 예요(2026-11-06, 단계 1~6 끝, 시험 944·지킴이·재현 통과). 클라우드 작업 환경에서는 태그를 GitHub 에 올릴 수 없어서, 위 `git tag …` 줄로 **맥에서 직접** 이름표를 붙여요(맥 안에만 있는 이름표라도 똑같이 쓸 수 있어요). `git tag` 줄이 "already exists" 라고 하면 이미 있는 것이니 그대로 다음 줄로 가요.
+- `h1-forward-v1` 은 H1 태그(코드에 붙인 이름표)예요. 진행 담당이 정한 커밋은 메시지가 **"H1 태그 대상"** 으로 시작하는 커밋이에요(2026-11-06, 단계 1~6 끝 + 맥 도우미, 시험 964·지킴이·재현 통과). 클라우드 작업 환경에서는 태그를 GitHub 에 올릴 수 없어서, 위 `git tag …` 줄로 **맥에서 직접** 이름표를 붙여요(맥 안에만 있는 이름표라도 똑같이 쓸 수 있어요).
+- 그다음 `git log -1 …` 줄은 `xxxxxxx H1 태그 대상: …` 처럼 한 줄을 보여 줘야 해요. 다른 글이 나오거나 `git tag` 가 오류를 내면 멈추고 Claude Code 에 보여 주세요.
+- **예전에 `c30753e` 로 이미 태그를 붙였다면**(이 안내서의 앞 판): 그 커밋에는 맥 도우미(`tools/h1_mac.py`)가 없어요. `git tag -f h1-forward-v1 $(git log origin/h1-forward --format=%h --grep='^H1 태그 대상' -1)` 로 옮기고, H1 폴더를 이미 만들었으면 `git -C /Users/나/claude-stock-h1 checkout h1-forward-v1` 로 바꿔요(코드 지문은 같아서 재현을 다시 할 필요는 없어요).
 - 태그를 붙인 뒤로는 그 코드로만 돌려요.
 - `-V` 줄은 `Python 3.13.18` 이어야 해요.
 - 폴더는 **iCloud 동기화 밖**에(`~/Desktop`·`~/Documents` 말고). 파일 이름 바꾸기·잠금이 동기화 폴더에서 깨질 수 있어요.
@@ -113,14 +116,14 @@ cd /Users/나/claude-stock-h1
 ```
 cd /Users/나/claude-stock-h1
 P=/Users/나/.venv-h1/bin/python
-$P -m pytest -q
 git fetch origin research-r2-2026-11-04
+$P -m pytest -q
 $P tools/h1_test_guard.py --quick
 $P h1_replay.py
 $P -c "import h1, json; now = h1.code_hash()[0]; last = json.load(open('state/h1/replay_pass.json'))[-1]['code_hash']; print(now); print(last); print('같음' if now == last else '다름 - 멈추고 물어보기')"
 ```
-- `pytest` 는 전부 통과해야 해요(지금 944개, 약 4분).
-- `git fetch …` 는 재현의 기준값(과거 연구 R2) 자료를 받아요.
+- `git fetch …` 는 재현의 기준값(과거 연구 R2) 자료를 받아요. pytest 보다 **먼저** 받아야 해요(없으면 시험 20개가 "건너뜀"이 돼요).
+- `pytest` 는 전부 통과해야 해요(지금 964개, 약 4분). 끝 줄에 `skipped`(건너뜀)가 있으면 안 돼요.
 - 지킴이는 마지막에 `[지킴이] 모두 통과` 가 나와야 해요(인터넷·claude 를 쓰지 않는지, 세 번 돌려 결과가 같은지 봐요).
 - 재현(`h1_replay.py`, 약 8분)은 과거 시세로 새 코드와 R2 연구 시뮬레이터를 같이 돌려 **체결 하나하나까지 같은지** 봐요. 마지막에 `[재현] 끝: 종료 코드 0 — 통과 + 기록함` 이 나와야 해요. 통과하면 `state/h1/replay_pass.json` 에 "이 코드·이 환경은 검사받았다"가 적혀요. 이 기록이 없거나 코드·환경이 다르면 `h1.py` 는 실행을 거절해요(종료 코드 3, "관문").
 - 마지막 줄은 지금 코드의 지문과 재현 통과 기록의 지문을 비교해요. 끝에 `같음` 이 나오면 됩니다.
@@ -165,7 +168,7 @@ env -i HOME=$HOME PATH=/Users/나/.local/bin:/opt/homebrew/bin:/usr/bin:/bin sh 
 cd /Users/나/claude-stock-h1
 /Users/나/.venv-h1/bin/python tools/h1_mac.py check
 ```
-마지막에 `[check] 모두 맞음` 이 나오면 됩니다. KS200 날짜만은 눈으로 봐요(어제 날짜인지). 아래는 손으로 하는 길이에요.
+마지막에 `[check] 모두 맞음` 이 나오면 됩니다(KS200 이 가장 최근 거래일에서 며칠 넘게 멈춰 있거나, 자동 실행 파일이 다른 폴더를 가리키면 "확인할 것"으로 알려 줘요). 아래는 손으로 하는 길이에요.
 
 ```
 cd /Users/나/claude-stock-h1
@@ -231,7 +234,7 @@ nano /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
   <array>
     <string>/usr/bin/caffeinate</string><string>-i</string>
     <string>/bin/sh</string><string>-c</string>
-    <string>/Users/나/.venv-h1/bin/python h1.py run --market kr; c=$?; [ $c -eq 0 ] || osascript -e "display notification \"H1 국내 종료 코드 $c (logs/h1-kr.log)\" with title \"claude-stock\""; exit $c</string>
+    <string>'/Users/나/.venv-h1/bin/python' h1.py run --market kr; c=$?; [ $c -eq 0 ] || osascript -e "display notification \"H1 국내 종료 코드 $c (logs/h1-kr.log)\" with title \"claude-stock\""; exit $c</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
@@ -267,7 +270,7 @@ nano /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
   <array>
     <string>/usr/bin/caffeinate</string><string>-i</string>
     <string>/bin/sh</string><string>-c</string>
-    <string>/Users/나/.venv-h1/bin/python h1.py run --market us; c=$?; [ $c -eq 0 ] || osascript -e "display notification \"H1 미국 종료 코드 $c (logs/h1-us.log)\" with title \"claude-stock\""; exit $c</string>
+    <string>'/Users/나/.venv-h1/bin/python' h1.py run --market us; c=$?; [ $c -eq 0 ] || osascript -e "display notification \"H1 미국 종료 코드 $c (logs/h1-us.log)\" with title \"claude-stock\""; exit $c</string>
   </array>
   <key>StartCalendarInterval</key>
   <array>
@@ -294,11 +297,12 @@ nano /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
 plutil -lint /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist /Users/나/Library/LaunchAgents/com.claude-stock.h1-us.plist
 launchctl load -w /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
 launchctl load -w /Users/나/Library/LaunchAgents/com.claude-stock.h1-us.plist
+launchctl load -w /Users/나/Library/LaunchAgents/com.claude-stock.h1-report.plist
 osascript -e 'display notification "시험" with title "claude-stock"'
 launchctl kickstart gui/$(id -u)/com.claude-stock.h1-kr
 tail -20 /Users/나/claude-stock-h1/logs/h1-kr.log
 ```
-1. `plutil -lint` 가 두 파일 모두 `OK` 여야 해요.
+1. `plutil -lint` 가 두 파일 모두 `OK` 여야 해요. 도우미(`plists`)를 썼으면 도우미가 화면에 보여 준 `plutil -lint`·`launchctl load -w` 줄(보고서 포함 세 개)을 대신 쳐요. 보고서 plist 를 아직 안 만들었으면(손으로 하는 길) 셋째 `load` 줄은 §7 에서 만든 뒤에 쳐요.
 2. `osascript` 줄을 쳤을 때 화면 오른쪽 위에 "시험" 알림이 떠야 해요. 안 뜨면 시스템 설정 → 알림 → 스크립트 편집기 → 알림 허용.
 3. `kickstart` 는 지금 한 번 돌려 보는 것이에요. start 전이면 알림 "H1 국내 종료 코드 8" 이 뜨고, 로그에 `장부 없음` 이 보이면 정상이에요.
 - **팀장(claude)이 launchd 에서 정말 불리는지**는 start 뒤 **launchd 가 처음 새 봉을 처리한 다음 날** 봐요(국내·미국 따로):
@@ -362,8 +366,8 @@ cd /Users/나/claude-stock-h1
 
 - 로그 보기: `tail -40 /Users/나/claude-stock-h1/logs/h1-kr.log`. 자세한 기록은 `state/h1/runs.jsonl`(실행마다 시작·끝 두 줄), `errors.jsonl`(L 오류).
 - 자동 실행이 도는 중(국내 23:05 무렵, 팀장 호출로 몇 분)에 status 를 치면 `다른 H1 명령이 잠금 중이라 기다려요` 가 나오고 멈춘 듯 보여요. 몇 분 뒤 다시 치세요(Ctrl-C 해도 장부는 안전).
-- **휴대폰으로 보기(아이폰, 선택)**: §4 plist 의 `sh -c` 글에서 `exit $c` 바로 앞에 아래 한 줄을 그대로 넣으면, 실행 뒤 상태 글이 iCloud Drive 에 생겨 휴대폰 '파일' 앱에서 볼 수 있어요(H1 폴더 자체는 iCloud 밖 그대로, 상태 글 사본만). plist 는 XML 이라 `&`·`<`·`>` 를 그대로 쓰면 파일이 깨지므로, 이 줄에는 그런 글자를 넣지 않았어요.
-  `/Users/나/.venv-h1/bin/python h1.py status --market kr | tee "/Users/나/Library/Mobile Documents/com~apple~CloudDocs/H1-상태-kr.txt" ;`
+- **휴대폰으로 보기(아이폰, 선택)**: 도우미를 썼으면 `/Users/나/.venv-h1/bin/python tools/h1_mac.py plists --icloud-status --force` 를 다시 치고, 화면에 나온 `unload -w`·`load -w` 줄을 치면 끝이에요. 손으로 하려면 §4 plist 의 `sh -c` 글에서 `exit $c` 바로 앞에 아래 한 줄을 그대로 넣으면, 실행 뒤 상태 글이 iCloud Drive 에 생겨 휴대폰 '파일' 앱에서 볼 수 있어요(H1 폴더 자체는 iCloud 밖 그대로, 상태 글 사본만). plist 는 XML 이라 `&`·`<`·`>` 를 그대로 쓰면 파일이 깨지므로, 이 줄에는 그런 글자를 넣지 않았어요.
+  `'/Users/나/.venv-h1/bin/python' h1.py status --market kr | tee '/Users/나/Library/Mobile Documents/com~apple~CloudDocs/H1-상태-kr.txt' ;`
   넣은 뒤에는 꼭 아래로 확인하고 다시 읽혀요(`OK` 가 아니면 고친 줄을 지우고 다시):
   ```
   plutil -lint /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
@@ -395,7 +399,7 @@ $P h1_report.py --market kr --month 2026-12
     <key>ProgramArguments</key>
     <array>
       <string>/bin/sh</string><string>-c</string>
-      <string>m=$(date -v-1m +%Y-%m); for k in us kr; do /Users/나/.venv-h1/bin/python h1_report.py --market $k --month $m; done</string>
+      <string>m=$(date -v-1m +%Y-%m); for k in us kr; do '/Users/나/.venv-h1/bin/python' h1_report.py --market $k --month $m; done</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict><key>Day</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>30</integer></dict>
@@ -515,7 +519,7 @@ cd /Users/나/claude-stock
 git worktree add /Users/나/h1-rehearsal h1-forward-v1
 ```
 1. 그 폴더에서 §3.3 의 나머지(venv 는 같은 `/Users/나/.venv-h1` 을 써도 돼요)·§3.4(재현까지)를 해요. 명령의 `claude-stock-h1` 을 모두 `h1-rehearsal` 로 바꿔요.
-2. 진짜 claude·실시세로 `start` → 며칠 `run`. 자동 실행을 쓰려면 plist 의 Label·파일 이름·폴더·로그를 **진짜와 다르게**(예 `com.claude-stock.h1r-kr`, `/Users/나/h1-rehearsal`) 만들어요. §4 plist 를 그대로 복사하면 진짜 작업과 엉켜요.
+2. 진짜 claude·실시세로 `start` → 며칠 `run`. 자동 실행을 쓰려면 plist 의 Label·파일 이름·폴더·로그를 **진짜와 다르게**(예 `com.claude-stock.h1r-kr`, `/Users/나/h1-rehearsal`) 만들어요. §4 plist 를 그대로 복사하면 진짜 작업과 엉켜요. **리허설 폴더에서는 `tools/h1_mac.py plists` 를 쓰지 마세요**(진짜와 같은 이름의 작업을 만들어요 — 도우미도 `claude-stock-h1` 폴더가 아니면 거절해요).
 3. 잴 것: D6(미국 일봉이 뒤늦게 고쳐지는 일)이 얼마나 자주 나는지, D7(KS200 늦음), 팀장 한 번 묻는 데 걸리는 시간, 잠금 대기(종료 코드 5), 디스크 쓰기 문제(ENV, 종료 코드 4)가 안 나는지.
 4. 리허설 동안 팀장 호출이 더 늘어요(운영 + 리허설, 같은 구독 한도).
 5. 끝나면 지워요. **경로가 `h1-rehearsal` 인지 두 번 확인**하고(§13 의 경고 참고):
