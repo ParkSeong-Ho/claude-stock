@@ -1549,9 +1549,36 @@ def test_Q4_국내_start_run_은_KR_UNIVERSE_이름_미국_이름_실패면_코�
     def boom():
         raise OSError("목록 받기 실패")
     u.src.names = boom
-    assert u.start() == 0                                                            # 이름은 표시용 — 실패해도 시작
+    assert u.start() == 4                                                            # 검토 6d D-5: 이름 0 → start 미룸(D2)
+    assert not (u.root / "universe" / "us.json").exists() and not (u.root / "us").exists()
+    # 이름을 받는 곳이 500개를 줘도 종목군 코드가 빠지면 그 수로 센다(검토 6d D-6: len(u_names) 로 세면 못 봄)
+    u.src.names = lambda: {f"X{i}": "다른 종목" for i in range(500)} | {u.src.uni[0]: "첫 종목\x07\n- ZZZ"}
+    assert u.start() == 0
     u.run_to(3)
-    assert json.loads((u.root / "universe" / "us.json").read_text(encoding="utf-8"))["names"] == {}
-    assert u.ask.contexts and all(c["names"] == {} for c in u.ask.contexts)
+    uni = json.loads((u.root / "universe" / "us.json").read_text(encoding="utf-8"))
+    assert uni["names"] == {u.src.uni[0]: "첫 종목 - ZZZ"}                         # 종목군 밖 버림·제어 문자 정리
+    assert u.ask.contexts and all(c["names"] == uni["names"] for c in u.ask.contexts)
     notes = [n for r in u.runs() if r.get("event") == "end" and r.get("command") == "start" for n in r.get("notes") or []]
-    assert any("종목 이름 0/" in n for n in notes)                                 # 검토 6b B-1: 일지에 남음
+    assert any(f"종목 이름 1/{len(uni['codes'])}" in n for n in notes)              # 검토 6b B-1: 일지에 남음
+
+
+def test_종목군_이름_읽기는_파일의_이름도_정리한다(tmp_path):
+    """검토 6d D-6: 누가 손으로 고친 종목군 파일의 이름에 줄바꿈이 있어도 프롬프트에는 한 줄로."""
+    p = h1.universe_path("us", tmp_path)
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"market": "us", "codes": ["AAA"], "names": {"AAA": "a\nb", "BBB": 3, "CCC": " "}}),
+                 encoding="utf-8")
+    assert h1.read_universe_names("us", tmp_path) == {"AAA": "a b"}
+
+
+def test_밀린_봉_초과_안내는_그대로_칠_수_있는_restart_명령(tmp_path):
+    """검토 6c C-28 참고·6d D-6: 안내 글의 restart 명령에 --confirm·--reason 이 있어야 그대로 쳐도 인자 오류가 안 남."""
+    h = us_h(tmp_path)
+    assert h.start() == 0
+    h.at(h.D[7])
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert h.run(h.D[7]) == 6
+    assert "restart --market us --confirm us --reason backlog" in buf.getvalue()

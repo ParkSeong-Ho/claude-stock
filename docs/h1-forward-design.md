@@ -759,7 +759,7 @@ team.py 상태 키를 그대로 두고 H1 칸을 더한다.
 | `changes.jsonl` | 코드 동결 중 허용 변경(§2.2 ⑥)·기업 행위 결정(⑦). amend-rules 는 `pending` → `done`/`abandoned`. 장부·meta 에는 있는데 일지에 없던 줄은 다음 명령이 `recovered: true` 로 채움 |
 | `replay_pass.json` | 재현 통과: `[{code_hash, files, env, ledger_fingerprints: {"W1-us": 내용 지문, "W1-kr": …, "W2-kr": …}, fingerprint_version, passed_at, report}]`. **`h1.record_replay_pass` 로만 추가**(잠금 아래, 지난 줄 안 바꿈) |
 | `replay_pass.seal.json` | 통과 기록 줄마다 sha256. 목록이 줄거나 바뀌면 관문 거절 3 |
-| `universe/us.json`, `universe/kr.json` | 종목군 목록·순서(첫 S 에 한 번 쓰고 안 바꿈. 재시작해도 그대로). 미국은 받은 시각·FDR 버전도. `names`: {코드: 이름}(팀장 프롬프트 표시용, Q4 2026-11-06 — 정리한 한 줄 이름 60자까지, 받지 못한 종목은 없음, start 일지에 "종목 이름 n/N") |
+| `universe/us.json`, `universe/kr.json` | 종목군 목록·순서(첫 S 에 한 번 쓰고 안 바꿈. 재시작해도 그대로). 미국은 받은 시각·FDR 버전도. `names`: {코드: 이름}(팀장 프롬프트 표시용, Q4 2026-11-06 — 정리한 한 줄 이름 60자까지, 받지 못한 종목은 없음, start 일지에 "종목 이름 n/N". 이름을 주는 자료 받는 곳에서 하나도 못 받으면 start 를 D2 로 미룸, 검토 6d D-5) |
 | `<market>/HEAD.json`, `<market>/meta.json` | 커밋 지점, 시작 때 고정 값 |
 | `<market>/calendar.jsonl` | 실행마다 한 줄: 받은 시각, 달력의 **S 전 거래일 ~ 마지막 봉 날짜 목록 전체**, 그 sha256, 처리한 날짜 |
 | `<market>/corp_actions.jsonl` | 기업 행위 적용 |
@@ -1148,6 +1148,9 @@ W3 장면
 ---
 
 ## 8. 맥 운영
+
+> **맥에서 실제로 따라 할 순서는 `docs/h1-forward-run.md`(운영 안내서, 검토 6c·6d 반영)가 맞다.** 이 절은 설계 당시의 요약이라
+> 다른 곳(launchd 를 start 앞에, 파이썬 설치 방법, 깨우기 일정, plist 모양 등)은 운영 안내서를 따른다(2026-11-06).
 
 ### 8.1 처음 한 번 — H1 전용 worktree·venv (검토 I8)
 ```bash

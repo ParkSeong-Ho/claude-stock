@@ -2675,16 +2675,17 @@ def _universe_blob(mk, codes, at, env, names=None) -> bytes:
 
 
 def _source_names(source, log):
-    """start 때 한 번: 자료 받는 곳의 names()(없으면 이름 없음). 표시용이라 실패해도 멈추지 않는다."""
+    """start 때 한 번: 자료 받는 곳의 names(). 돌려줌: None = 이 자료 받는 곳은 이름을 주지 않음(재현·일부 시험),
+    dict = 받은 이름(받기가 실패하면 빈 dict — 부르는 쪽이 start 를 미룬다, 검토 6d D-5)."""
     fn = getattr(source, "names", None)
     if fn is None:
-        return {}
+        return None
     try:
         got = fn()
     except Exception as e:                       # noqa: BLE001
-        log.note(f"종목 이름 받기 실패({type(e).__name__}) → 팀장 프롬프트는 코드만")
+        log.note(f"종목 이름 받기 실패({type(e).__name__})")
         return {}
-    return got if isinstance(got, dict) else {}
+    return got if isinstance(got, dict) else None
 
 
 def read_universe_names(market, root=None) -> dict:
@@ -3497,7 +3498,12 @@ def _start_locked(mk, root, source, leader_mode, gate) -> int:
             u_blob = _universe_blob(mk, codes, _iso(now), env, u_names)
             u_sha = _sha256_bytes(u_blob)
             n_named = len(json_loads_strict(u_blob.decode("utf-8"))["names"])
-            if n_named < len(codes):                  # 검토 6b B-1: 이름이 모자라면 일지(runs.jsonl notes)에 남김
+            if n_named == 0 and u_names is not None:
+                # 검토 6d D-5: 이름 받기가 통째로 실패(인터넷 잠깐 끊김 등)하면 이 창 전체가 이름 없이 고정되므로 start 를 미룬다.
+                # 자료 문제(D2, 종료 코드 4) — 아무 파일도 남기지 않고, 잠시 뒤 다시 start 하면 된다.
+                raise H1DataProblem("D2", f"종목 이름을 하나도 받지 못함(종목군 {len(codes)}종목) → start 안 함. "
+                                          "잠시 뒤 다시 start(이름은 start 때 한 번 고정되므로)")
+            if n_named < len(codes):                  # 검토 6b B-1: 일부만 모자라면 일지(runs.jsonl notes)에 남김
                 log.note(f"종목 이름 {n_named}/{len(codes)} — 이름 없는 종목은 팀장 프롬프트에 코드만 가요"
                          f"(이름은 표시용, 판정·장부와 무관. 이 창 동안 그대로)")
             _say(f"  종목군: 새로 받은 {len(codes)}종목을 고정(universe/{mk}.json)")

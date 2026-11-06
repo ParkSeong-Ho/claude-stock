@@ -15,7 +15,7 @@
   - 두 장부는 같은 트레이너 규칙·같은 후보·**같은 팀장 판정**을 써요. 다른 것은 "쉬는 돈을 어디에 두나" 하나뿐이에요.
 - **얼마나**: 시장마다 시작 봉 S 부터 63거래일(S~S+62, 약 3개월). 미국·국내는 따로 시작하고 따로 판정해요.
 - **어디서**: 운영 폴더(지금 `team.py` 를 돌리는 폴더)와 **다른 폴더**(H1 전용 폴더 `/Users/나/claude-stock-h1`)에서, **다른 파이썬 환경**(H1 전용 venv)으로.
-- **순서**: 준비(§3) → **매일 자동 실행(launchd) 먼저 켜기(§4)** → 시작(§5) → 매일 status 보기(§6) → 매달 보고서(§7).
+- **순서**: 준비(§3) → (권장: 리허설 §10) → **매일 자동 실행(launchd) 먼저 켜기(§4)** → 시작(§5) → 매일 status 보기(§6) → 매달 보고서(§7).
 - **통과의 뜻**: "장부가 63일 동안 틀린 계산 없이, 빠진 날 없이, 검사받은 코드로만 돌았다". **"A1 이 돈을 더 번다"는 뜻이 아니에요**(§1).
 - **운영은 그대로**: 기존 `team.py`·`order_runner.py`·`state/` 는 평소처럼 돌아요. 이 문서는 운영 폴더의 브랜치·장부를 바꾸라고 하지 않아요.
 
@@ -64,15 +64,19 @@
 > - 코드 상자는 **한 줄씩** 복사해 붙여 넣으세요. 상자 안에는 설명(#)을 넣지 않았어요(맥 기본 터미널 zsh 는 줄 끝 `# 설명` 을 명령의 일부로 읽어 오류를 내요). 설명은 상자 아래에 있어요.
 > - H1 명령은 **언제나 `/Users/나/claude-stock-h1` 폴더에서** 쳐요. 그래서 명령 상자는 `cd /Users/나/claude-stock-h1` 와 `P=/Users/나/.venv-h1/bin/python` 두 줄로 시작해요(새 터미널을 열면 `P` 가 사라지니 매번 다시 쳐요).
 > - **멈춤 규칙**: pytest 실패, 지킴이 실패, 재현 종료 코드가 0 이 아님, 그 밖에 예상과 다른 글이 나오면 **다음으로 넘어가지 말고** 화면 글을 그대로 Claude Code 에 보여 주세요.
-> - 걸리는 시간(대략): pytest 4분, 지킴이 5분, 재현 8분. 멈춘 것처럼 보여도 Ctrl-C 하지 마세요.
+> - 걸리는 시간(대략): pytest 4분, 지킴이 5분, 재현 8분. 이 셋은 멈춘 것처럼 보여도 Ctrl-C 하지 마세요(start 는 §5 참고).
 
 ### 3.1 파이썬 3.13.18 설치 (brew 의 파이썬은 쓰지 않기)
 - 장부의 "환경 지문"에 파이썬 **패치 버전**(3.13.**18**)까지 들어가요. brew 파이썬으로 venv 를 만들면 `brew upgrade` 한 번에 3.13.19 가 되어 **매 실행 종료 코드 3**(재현 안 한 환경)이 나요.
 - 그래서 **python.org 에서 macOS 용 Python 3.13.18 설치 파일**을 받아 설치해요(목록에 3.13.18 이 없으면 멈추고 Claude Code 에 물어보세요 — 다른 방법(uv)을 알려 줘요).
-- 설치 뒤 확인(아래 줄이 `Python 3.13.18` 을 내야 해요):
+- 설치 창에서 **"사용자화(Customize)" → "Shell profile updater" 의 체크를 빼고** 설치해요. 그래야 터미널의 기본 `python3` 이 바뀌지 않아 운영 쪽(`team.py` 등)에 영향이 없어요.
+- 설치가 끝나면 Finder → 응용 프로그램 → Python 3.13 폴더의 **`Install Certificates.command` 를 두 번 눌러** 실행해요. 이것을 안 하면 금리 받기(인터넷 인증서 확인)가 조용히 실패해 보고서의 'A0+이자'가 옛 금리로 계산돼요.
+- 설치 뒤 확인(첫 줄은 `Python 3.13.18`, 둘째 줄은 설치 전과 같은 경로여야 해요 — 운영 쪽 파이썬이 그대로라는 뜻):
   ```
   /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13 -V
+  which python3
   ```
+- 이 두 가지(설치 옵션 이름, 인증서 단계)는 맥에서 직접 확인하지 못했어요. 화면이 다르면 Claude Code 에 보여 주세요.
 
 ### 3.2 시계
 - 시스템 설정 → 일반 → 날짜 및 시간: 시간대 **서울**, 자동으로 시간 설정 **켬**. "늦은 봉" 판단이 맥 시계에 달려 있어요.
@@ -104,7 +108,7 @@ $P tools/h1_test_guard.py --quick
 $P h1_replay.py
 $P -c "import h1, json; now = h1.code_hash()[0]; last = json.load(open('state/h1/replay_pass.json'))[-1]['code_hash']; print(now); print(last); print('같음' if now == last else '다름 - 멈추고 물어보기')"
 ```
-- `pytest` 는 전부 통과해야 해요(지금 942개, 약 4분).
+- `pytest` 는 전부 통과해야 해요(지금 944개, 약 4분).
 - `git fetch …` 는 재현의 기준값(과거 연구 R2) 자료를 받아요.
 - 지킴이는 마지막에 `[지킴이] 모두 통과` 가 나와야 해요(인터넷·claude 를 쓰지 않는지, 세 번 돌려 결과가 같은지 봐요).
 - 재현(`h1_replay.py`, 약 8분)은 과거 시세로 새 코드와 R2 연구 시뮬레이터를 같이 돌려 **체결 하나하나까지 같은지** 봐요. 마지막에 `[재현] 끝: 종료 코드 0 — 통과 + 기록함` 이 나와야 해요. 통과하면 `state/h1/replay_pass.json` 에 "이 코드·이 환경은 검사받았다"가 적혀요. 이 기록이 없거나 코드·환경이 다르면 `h1.py` 는 실행을 거절해요(종료 코드 3, "관문").
@@ -269,16 +273,23 @@ tail -20 /Users/나/claude-stock-h1/logs/h1-kr.log
 1. `plutil -lint` 가 두 파일 모두 `OK` 여야 해요.
 2. `osascript` 줄을 쳤을 때 화면 오른쪽 위에 "시험" 알림이 떠야 해요. 안 뜨면 시스템 설정 → 알림 → 스크립트 편집기 → 알림 허용.
 3. `kickstart` 는 지금 한 번 돌려 보는 것이에요. start 전이면 알림 "H1 국내 종료 코드 8" 이 뜨고, 로그에 `장부 없음` 이 보이면 정상이에요.
-- **팀장(claude)이 launchd 에서 정말 불리는지**는 start 뒤 **처음 새 봉을 처리한 다음 날** 봐요:
+- **팀장(claude)이 launchd 에서 정말 불리는지**는 start 뒤 **launchd 가 처음 새 봉을 처리한 다음 날** 봐요(국내·미국 따로):
   ```
   tail -3 /Users/나/claude-stock-h1/state/h1/analyst_cache_kr.jsonl
+  tail -3 /Users/나/claude-stock-h1/state/h1/analyst_cache_us.jsonl
   ```
-  `"status": "ok"` 이고 `"cli_version"` 에 `2.x.x (Claude Code)` 같은 글자가 있으면 OK. `"status": "no_claude"` 면 plist 의 PATH 에 claude 폴더가 없는 것(§3.5). 파일이 없거나 줄이 안 늘었으면 그날은 매수 후보가 없어 팀장을 안 부른 것이니 하루 더 기다려요.
+  줄 안에 `"status":"ok"`(빈칸 없이 붙어 있어요)가 있고 `"cli_version":"2.` 처럼 버전 글자가 있으면 OK. `"status":"no_claude"` 면 plist 의 PATH 에 claude 폴더가 없는 것(§3.5). 마지막 줄의 `"asked_at"` 시각이 터미널에서 start 를 친 시각이면 아직 launchd 결과가 아니에요(하루 더 기다리기). 줄이 안 늘었으면 그날은 매수 후보가 없어 팀장을 안 부른 것이에요.
+- 팀장 답의 종목 코드에 이름이 붙어 와서 H1 이 다시 찾아 쓴 횟수(`reply_code`)는 가끔 이렇게 세어 봐요. 0 이 아니어도 판정은 살아 있지만, 많으면 Claude Code 에 알려 주세요:
+  ```
+  grep -c '"reply_code":"' /Users/나/claude-stock-h1/state/h1/analyst_cache_kr.jsonl
+  ```
 - 알림은 **맥 화면에만** 떠요. 맥 앞에 없으면 놓쳐요 → §6 의 매일 확인 습관(휴대폰으로 보는 방법도 있어요).
 
 ---
 
 ## 5. 시작 (start)
+
+> **start 는 되돌릴 수 없어요.** 한 번 성공하면 정해 둔 사유(재시작) 없이는 다시 못 해요. 리허설(§10)을 하려면 **지금 먼저** §10 으로 가세요.
 
 국내:
 ```
@@ -297,6 +308,9 @@ $P h1.py start --market us
 - S 날은 **입금만** 해요. 다음 봉(S+1) 시가에 A1 은 현금을 먼저 전부 지수로 바꾸고, 그날 주문을 처리해요.
 - 미국 종목군은 S 날 S&P500 을 정해 둔 seed 로 섞은 40종목으로 **고정**돼요(재시작해도 그대로). 국내는 `KR_UNIVERSE` 32종목.
 - start 가 성공하면 `prereg_<시장>.json`(사전 등록 숫자)이 생겨요. 이 파일은 지우거나 고치지 마세요.
+- start 는 인터넷으로 시세·종목 목록·종목 이름을 받아요(보통 몇 분). 10분 넘게 아무 글도 안 나오면 Ctrl-C 로 멈춰도 돼요 — start 는 다 쓴 뒤에만 장부를 만들므로, 멈추면 아무것도 안 남고 다시 start 하면 돼요.
+- 미국 start 가 `자료 문제 D2 … 종목 이름을 하나도 받지 못함` 으로 끝나면(종료 코드 4) 인터넷이 잠깐 끊긴 것이에요. 아무 파일도 안 남으니 몇 분 뒤 다시 start 하세요(이름은 start 때 한 번 고정돼요).
+- start 화면에 `※ 종목 이름 38/40 …` 처럼 나오면 이름이 일부 빠진 것이에요. 빠진 종목은 팀장 글에 코드만 가요(판정·장부와는 상관없음). 그대로 진행해도 돼요.
 - §4 의 launchd 가 이미 켜져 있으니, 그날 밤(국내)·다음 날 아침(미국)부터 자동으로 이어져요.
 
 ---
@@ -320,8 +334,15 @@ cd /Users/나/claude-stock-h1
 
 - 로그 보기: `tail -40 /Users/나/claude-stock-h1/logs/h1-kr.log`. 자세한 기록은 `state/h1/runs.jsonl`(실행마다 시작·끝 두 줄), `errors.jsonl`(L 오류).
 - 자동 실행이 도는 중(국내 23:05 무렵, 팀장 호출로 몇 분)에 status 를 치면 `다른 H1 명령이 잠금 중이라 기다려요` 가 나오고 멈춘 듯 보여요. 몇 분 뒤 다시 치세요(Ctrl-C 해도 장부는 안전).
-- **휴대폰으로 보기(아이폰, 선택)**: §4 plist 의 `sh -c` 글에서 `exit $c` 바로 앞에 아래를 넣으면, 실행 뒤 상태 글이 iCloud Drive 에 생겨 휴대폰 '파일' 앱에서 볼 수 있어요(H1 폴더 자체는 iCloud 밖 그대로, 상태 글 사본만).
-  `/Users/나/.venv-h1/bin/python h1.py status --market kr > "/Users/나/Library/Mobile Documents/com~apple~CloudDocs/H1-상태-kr.txt" 2>&1;`
+- **휴대폰으로 보기(아이폰, 선택)**: §4 plist 의 `sh -c` 글에서 `exit $c` 바로 앞에 아래 한 줄을 그대로 넣으면, 실행 뒤 상태 글이 iCloud Drive 에 생겨 휴대폰 '파일' 앱에서 볼 수 있어요(H1 폴더 자체는 iCloud 밖 그대로, 상태 글 사본만). plist 는 XML 이라 `&`·`<`·`>` 를 그대로 쓰면 파일이 깨지므로, 이 줄에는 그런 글자를 넣지 않았어요.
+  `/Users/나/.venv-h1/bin/python h1.py status --market kr | tee "/Users/나/Library/Mobile Documents/com~apple~CloudDocs/H1-상태-kr.txt" ;`
+  넣은 뒤에는 꼭 아래로 확인하고 다시 읽혀요(`OK` 가 아니면 고친 줄을 지우고 다시):
+  ```
+  plutil -lint /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
+  launchctl unload -w /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
+  launchctl load -w /Users/나/Library/LaunchAgents/com.claude-stock.h1-kr.plist
+  ```
+  plist 가 깨지면 다음 재시동부터 매일 실행이 **알림도 없이** 멈춰요(5거래일이면 창 실패).
 
 ---
 
@@ -334,7 +355,7 @@ $P h1_report.py --market us --month 2026-12
 $P h1_report.py --market kr --month 2026-12
 ```
 - 결과: `state/h1/reports/<시장>-<YYYY-MM>.md`. 인터넷이 있으면 금리도 받아요(없어도 저장본으로 써요).
-- **같은 달 보고서는 나중에 다시 만들어도 2~9절 숫자가 같아요.** 그래서 한 달을 놓쳐도 나중에 만들 수 있어요.
+- **같은 달 보고서는 나중에 다시 만들어도 장부 숫자(2~8절)가 같아요.** 그래서 한 달을 놓쳐도 나중에 만들 수 있어요. 9절('A0+이자')만은 그사이 새 금리가 나오면 바뀔 수 있어요.
 - **자동 실행(권장)**: 매달 2일 09:30 에 지난달 보고서. `nano /Users/나/Library/LaunchAgents/com.claude-stock.h1-report.plist` 로 아래를 만들고 `plutil -lint` → `launchctl load -w` (§4.2 와 같게).
   ```xml
   <?xml version="1.0" encoding="UTF-8"?>
@@ -408,12 +429,25 @@ $P -m pip install -r requirements-h1.txt
 $P h1_replay.py
 ```
 - `h1-forward-v2` 는 새 태그 이름의 예예요. `pip install` 줄은 라이브러리 올림일 때 꼭 쳐요(아니면 재현이 옛 라이브러리로 통과해 버려요).
-- 재현이 0 이 아니면 `git checkout h1-forward-v1`(원래 태그)로 되돌리고 화면을 Claude Code 에 보여 주세요.
+- 재현이 0 이 아니면 원래대로 되돌리고 화면을 Claude Code 에 보여 주세요. 라이브러리도 같이 되돌려야 해요(안 하면 매 실행 종료 코드 3):
+  ```
+  cd /Users/나/claude-stock-h1
+  git checkout h1-forward-v1
+  /Users/나/.venv-h1/bin/python -m pip install -r requirements-h1.txt
+  ```
 - 주의: 재현은 FinanceDataReader 를 가짜로 바꿔 쓰기 때문에 **FinanceDataReader 버전 올림이 시세 모양을 바꿔도 재현은 못 봐요.** 그건 매일 실행의 D6(이미 처리한 날 값이 바뀌었는지 확인)이 지켜요.
 - 그 밖의 변경(프롬프트·`analyst.py`·트레이너 두뇌·점검 규칙·`h1_report.py` 등)은 **재시작 사유**예요.
 
 ### 9.2 기업 행위(분할·상장폐지·정정) 결정표
-매일 실행이 `D6 분할 의심 r=…` 또는 보유 종목의 `D2`(시세 못 받음)로 멈추면(종료 코드 4) **그 시장 장부 전체가 멈춰요.** 하루 지날 때마다 늦은 봉이 하나씩 쓰이고(10개까지), 5거래일을 넘기면 창 실패예요. 그러니 **1~2일 안에** 1차 출처(거래소 공시·회사 발표)를 확인해 아래 하나를 골라요(모르면 바로 Claude Code 에 로그를 보여 주기). 명령은 모두 `cd /Users/나/claude-stock-h1` 뒤 `/Users/나/.venv-h1/bin/python h1.py …` 로 쳐요.
+매일 실행이 `D6 분할 의심 r=…` 또는 보유 종목의 `D2`(시세 못 받음)로 멈추면(종료 코드 4) **그 시장 장부 전체가 멈춰요.** 하루 지날 때마다 늦은 봉이 하나씩 쓰이고(10개까지), 5거래일을 넘기면 창 실패예요. 그러니 **1~2일 안에** 1차 출처(거래소 공시·회사 발표)를 확인해 아래 하나를 골라요.
+
+> **이 명령들은 장부를 바로 고치고 되돌릴 수 없어요**(상장폐지 등록만 정리 전 취소 가능). 표의 명령은 모양만 보여 주는 것이에요. `m`·`X`·`r`·`<…>` 를 실제 값으로 바꾼 명령을 **먼저 Claude Code 에 보여 주고 확인받은 뒤** 쳐요. 주소는 따옴표로 감싸요(예 `--source "https://…"`).
+
+명령은 모두 아래 두 줄 뒤에 `$P h1.py corp-action …` 로 쳐요:
+```
+cd /Users/나/claude-stock-h1
+P=/Users/나/.venv-h1/bin/python
+```
 
 | 확인 결과 | 명령 |
 |---|---|
