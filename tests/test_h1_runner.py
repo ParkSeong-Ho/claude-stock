@@ -1553,3 +1553,5 @@ def test_Q4_국내_start_run_은_KR_UNIVERSE_이름_미국_이름_실패면_코�
     u.run_to(3)
     assert json.loads((u.root / "universe" / "us.json").read_text(encoding="utf-8"))["names"] == {}
     assert u.ask.contexts and all(c["names"] == {} for c in u.ask.contexts)
+    notes = [n for r in u.runs() if r.get("event") == "end" and r.get("command") == "start" for n in r.get("notes") or []]
+    assert any("종목 이름 0/" in n for n in notes)                                 # 검토 6b B-1: 일지에 남음

@@ -370,7 +370,8 @@ def run_harness(r2_rep, jobs, work, python=None) -> dict:
     except (OSError, subprocess.SubprocessError) as e:
         raise ReplayEnvError(f"기준값 하네스를 돌리지 못했어요({type(e).__name__}: {e})")
     if p.returncode == 3:
-        raise ReplayEnvError("기준값 하네스: " + (p.stderr or "").strip()[-600:])
+        err = (p.stderr or "").strip()            # 머리(무슨 일인지)가 잘리지 않게 앞뒤를 남김(검토 6b: 긴 경로에서 잘림)
+        raise ReplayEnvError("기준값 하네스: " + (err if len(err) <= 1200 else err[:600] + " … " + err[-600:]))
     if p.returncode != 0 or not out.exists():
         raise ReplayEnvError(f"기준값 하네스가 실패했어요(종료 코드 {p.returncode}): {(p.stderr or '').strip()[-1500:]}")
     return json.loads(out.read_text(encoding="utf-8"))

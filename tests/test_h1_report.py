@@ -1759,4 +1759,5 @@ def test_한계_절은_시장별로_맞는_말을_한다(built, tmp_path):
     assert f"{h1.N_UNIVERSE}종목" in us and f"{len(markets.KR_UNIVERSE)}종목" in kr
     for t in (us, kr):
         assert "A1 이 A0 보다 뒤처지기 쉽다" in t and "R2 2018·2022" in t
-        assert "미국 12%·16%(무작위보다 못함), 국내 88%" in t and "수익률이 아니라 순위" in t
+        assert "미국 두 종목군에서 12%·16%(무작위보다 못함), 국내 88%" in t and "수익률이 아니라 순위" in t
+        assert "시작일만 무작위로 1,000번" in t and "95% 에는 못 미침" in t           # 검토 6b B-6: R2 정의 그대로

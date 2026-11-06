@@ -14,7 +14,7 @@ analyst.py - 로직이 팀장(Claude)에게 연락하는 다리. (운영모델 2
 H1 포워드 모의매매용 추가 (docs/h1-forward-design.md §3.4, 2026-11-04):
 - normalize_verdict(): 팀장 판정 글자 정리(" VETO" → "veto", "Hold" → "hold"). H1 판정 기록에서만 쓴다.
   운영 apply()·team.py 는 지금 그대로(공백·대문자가 섞인 글자는 veto·hold 로 보지 않음).
-- analyze_logged(): analyze() 와 같은 프롬프트·같은 호출·같은 파싱으로 같은 결과를 내고,
+- analyze_logged(): analyze() 와 같은 프롬프트(context 를 주면 H1 전용 프롬프트)·같은 호출·같은 파싱으로 같은 결과를 내고,
   "어떻게 됐는지"(상태·물은 시각·걸린 시간·종료 코드·모델·CLI 버전)를 함께 돌려준다 → 나중 채점·폴백 비율용.
   analyze() 와 결과가 다른 곳은 둘뿐이다(2a 검토 A-6): 답의 "analysis" 가 목록이 아니면 analyze() 는 TypeError 로
   멈추지만 analyze_logged 는 bad_json 폴백, 출력 글자를 읽지 못하면(UnicodeDecodeError 등) decode_error 폴백.

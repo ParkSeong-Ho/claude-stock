@@ -547,14 +547,16 @@ class Leader:
 
     @staticmethod
     def _reply_item(result, code):
-        """답에서 그 종목 찾기. 먼저 코드 그대로, 없으면 열쇠 맨 앞 코드(예 "005930(삼성전자)"·"005930 삼성전자"·
-        "005930: …")가 그 코드이고 그런 열쇠가 하나뿐일 때만(검토 6a A-1 — 표시 글을 베껴 와도 veto 가 버려지지 않게)."""
+        """답에서 그 종목 찾기 → (item, 찾은 열쇠). 먼저 코드 그대로, 없으면 열쇠의 맨 앞 낱말(빈칸·괄호·쌍점·대괄호 앞,
+        대소문자 무시)이 그 코드와 **완전히 같고** 그런 열쇠가 하나뿐일 때만(검토 6a A-1 — 표시 글을 베껴 와도 veto 가
+        버려지지 않게). 앞글자만 같은 것("GOOG"↔"GOOGL", "A"↔"AAPL"·"A.O. Smith")은 받지 않는다(검토 6b B-2)."""
         item = result.get(code)
         if item is not None:
-            return item
-        hits = [v for k, v in result.items()
-                if isinstance(k, str) and k.strip() != code and re.split(r"[\s(:\[]", k.strip(), maxsplit=1)[0] == code]
-        return hits[0] if len(hits) == 1 else None
+            return item, code
+        want = code.upper()
+        hits = [(v, k) for k, v in result.items()
+                if isinstance(k, str) and re.split(r"[\s(:\[]", k.strip(), maxsplit=1)[0].upper() == want]
+        return hits[0] if len(hits) == 1 else (None, None)
 
     def _next_call_no(self, trainer):
         prefix = f"{self.market}|{self.date}|{trainer}|"
@@ -614,9 +616,9 @@ class Leader:
         records = []
         for c in todo:
             code = c["code"]
-            item = None
+            item, reply_key = None, None
             if status == "ok" and isinstance(result, dict):
-                item = self._reply_item(result, code)
+                item, reply_key = self._reply_item(result, code)
             if status == "ok" and isinstance(item, dict):
                 source, rec_status = "llm", "ok"
                 if analyst.normalize_verdict(item.get("verdict")) is None:
@@ -643,6 +645,7 @@ class Leader:
                 "elapsed_s": float((meta or {}).get("elapsed_s") or 0.0),
                 "next_open": self.next_open.isoformat(),
                 "call_id": call_id, "batch": batch,
+                "reply_code": reply_key if reply_key not in (None, code) else None,   # 답의 code 가 코드와 달랐으면 그 글(6b B-5)
                 "signal": {"price": _jsonable(c.get("price")), "rsi": _jsonable(c.get("rsi")),
                            "reason": _jsonable(c.get("reason")), "date": _jsonable(c.get("date"))},
             })
@@ -2649,9 +2652,22 @@ def _archive_path(root, rec) -> Path:
 
 # ============================ 고정 종목군 (Q7, §3.7) ============================
 
+NAME_MAX = 60                                    # 종목 이름 표시 길이 상한(검토 6b B-3)
+
+
+def _clean_name(n):
+    """표시용 이름 정리: 글자가 아니면 None, 줄바꿈·제어 문자는 빈칸으로(프롬프트에 가짜 줄이 생기지 않게), 앞뒤 빈칸 정리,
+    NAME_MAX 자에서 자름(검토 6b B-3)."""
+    if not isinstance(n, str):
+        return None
+    n = " ".join("".join(ch if ch.isprintable() else " " for ch in n).split())
+    return n[:NAME_MAX] or None
+
+
 def _universe_blob(mk, codes, at, env, names=None) -> bytes:
-    """종목군 파일. names = {코드: 이름}(팀장 프롬프트 표시용, 설계 Q4 2026-11-06) — 종목군에 있는 코드만 남긴다."""
-    names = {c: names[c] for c in codes if isinstance((names or {}).get(c), str) and names[c].strip()}
+    """종목군 파일. names = {코드: 이름}(팀장 프롬프트 표시용, 설계 Q4 2026-11-06) — 종목군에 있는 코드만, 정리한 이름만 남긴다."""
+    names = {c: _clean_name((names or {}).get(c)) for c in codes}
+    names = {c: n for c, n in names.items() if n}
     return _dump({"market": mk, "codes": list(codes), "n": len(codes), "fetched_at": at,
                   "source": f"screener.universe({N_UNIVERSE})" if mk == "us" else "markets.KR_UNIVERSE",
                   "fdr_version": (env or {}).get("FinanceDataReader") if mk == "us" else None,
@@ -2682,7 +2698,8 @@ def read_universe_names(market, root=None) -> dict:
     names = d.get("names") if isinstance(d, dict) else None
     if not isinstance(names, dict):
         return {}
-    return {c: n for c, n in names.items() if isinstance(c, str) and isinstance(n, str) and n.strip()}
+    out = {c: _clean_name(n) for c, n in names.items() if isinstance(c, str)}
+    return {c: n for c, n in out.items() if n}
 
 
 def _check_codes(mk, codes, what):
@@ -3479,6 +3496,10 @@ def _start_locked(mk, root, source, leader_mode, gate) -> int:
             u_names = _source_names(source, log)
             u_blob = _universe_blob(mk, codes, _iso(now), env, u_names)
             u_sha = _sha256_bytes(u_blob)
+            n_named = len(json_loads_strict(u_blob.decode("utf-8"))["names"])
+            if n_named < len(codes):                  # 검토 6b B-1: 이름이 모자라면 일지(runs.jsonl notes)에 남김
+                log.note(f"종목 이름 {n_named}/{len(codes)} — 이름 없는 종목은 팀장 프롬프트에 코드만 가요"
+                         f"(이름은 표시용, 판정·장부와 무관. 이 창 동안 그대로)")
             _say(f"  종목군: 새로 받은 {len(codes)}종목을 고정(universe/{mk}.json)")
         fetched = _fetch_all(mk, source, now, codes, set(), CAL_PROBE[mk])           # 7 종목 시세
         _universe_check(mk, codes, fetched, set(), set(), log)
@@ -3791,7 +3812,8 @@ def _run_body(mk, root, source, leader_mode, gate, log, ch, env, cal_rec) -> int
         return code
     if len(todo) > MAX_LATE_BATCH:
         raise H1Refused(EXIT_BACKLOG, f"밀린 봉 {len(todo)}개({todo[0]}~{todo[-1]}) > {MAX_LATE_BATCH} → 판정 창 실패"
-                                      f"(사전 등록 ②-2). python h1.py restart --market {mk} → start")
+                                      f"(사전 등록 ②-2). python h1.py restart --market {mk} --confirm {mk} --reason backlog "
+                                      f"--note \"…\" → start(그 시장 start 시각에)")
     _say(f"  처리할 봉 {len(todo)}개: {', '.join(todo)}")
 
     fp_cands = _pending_l_records(root, mk, S, meta.get("created_at"), set(todo))     # ④ 거짓 양성 후보(2c R-4)
